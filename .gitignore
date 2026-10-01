@@ -1,0 +1,17 @@
+# Output di compilazione e simulazione
+build/
+out/
+*.o
+*.a
+*.elf
+*.csv
+*.log
+
+# Mai in repository: immagini del robot, binari proprietari, segreti
+*.img
+Backup/
+Estratto/
+.robot_ip
+id_rsa*
+*.pem
+*.key
