@@ -20,16 +20,27 @@ LDFLAGS_ARM   = -static
 
 RT_SRC  = rt/rt.c
 RT_HDR  = rt/rt.h rt/rt_tempo.h
+GD32_SRC = gd32/gd32.c
+GD32_HDR = gd32/gd32.h
+LIDAR_SRC = lidar/lidar.c
+LIDAR_HDR = lidar/lidar.h
+# Librerie dei protocolli: ogni test e ogni strumento le compila tutte (sono piccole).
+PROTO_SRC = $(GD32_SRC) $(LIDAR_SRC)
+PROTO_HDR = $(GD32_HDR) $(LIDAR_HDR)
 
 PROGRAMMI = latenza carico
-TEST      = test_rt_tempo test_rt_task
+STRUMENTI = spia
+TEST      = test_rt_tempo test_rt_task test_gd32 test_lidar test_registro
+
+SPIA_SRC = spia/spia.c spia/registro.c
+SPIA_HDR = spia/registro.h
 
 .PHONY: all host arm test test-arm clean
 
 all: host arm
 
-host: $(addprefix build/host/,$(PROGRAMMI) $(TEST))
-arm:  $(addprefix build/arm/,$(PROGRAMMI) $(TEST))
+host: $(addprefix build/host/,$(PROGRAMMI) $(STRUMENTI) $(TEST))
+arm:  $(addprefix build/arm/,$(PROGRAMMI) $(STRUMENTI) $(TEST))
 
 # Programmi in bench/: un file bench/<nome>.c diventa l'eseguibile <nome>.
 build/host/%: bench/%.c $(RT_SRC) $(RT_HDR)
@@ -40,17 +51,28 @@ build/arm/%: bench/%.c $(RT_SRC) $(RT_HDR)
 	@mkdir -p $(@D)
 	$(CC_ARM) $(CFLAGS_ARM) -o $@ $< $(RT_SRC) $(LDFLAGS_ARM)
 
-build/host/test_%: test/test_%.c $(RT_SRC) $(RT_HDR) test/test.h
+# La spia (spia/): intercetta e registra il traffico con GD32 e lidar.
+build/host/spia: $(SPIA_SRC) $(SPIA_HDR) $(RT_SRC) $(RT_HDR) $(PROTO_SRC) $(PROTO_HDR)
 	@mkdir -p $(@D)
-	$(CC_HOST) $(CFLAGS_HOST) -o $@ $< $(RT_SRC)
+	$(CC_HOST) $(CFLAGS_HOST) -o $@ $(SPIA_SRC) $(RT_SRC) $(PROTO_SRC)
 
-build/arm/test_%: test/test_%.c $(RT_SRC) $(RT_HDR) test/test.h
+build/arm/spia: $(SPIA_SRC) $(SPIA_HDR) $(RT_SRC) $(RT_HDR) $(PROTO_SRC) $(PROTO_HDR)
 	@mkdir -p $(@D)
-	$(CC_ARM) $(CFLAGS_ARM) -o $@ $< $(RT_SRC) $(LDFLAGS_ARM)
+	$(CC_ARM) $(CFLAGS_ARM) -o $@ $(SPIA_SRC) $(RT_SRC) $(PROTO_SRC) $(LDFLAGS_ARM)
+
+build/host/test_%: test/test_%.c $(RT_SRC) $(RT_HDR) $(PROTO_SRC) $(PROTO_HDR) $(SPIA_HDR) spia/registro.c test/test.h
+	@mkdir -p $(@D)
+	$(CC_HOST) $(CFLAGS_HOST) -o $@ $< $(RT_SRC) $(PROTO_SRC) spia/registro.c
+
+build/arm/test_%: test/test_%.c $(RT_SRC) $(RT_HDR) $(PROTO_SRC) $(PROTO_HDR) $(SPIA_HDR) spia/registro.c test/test.h
+	@mkdir -p $(@D)
+	$(CC_ARM) $(CFLAGS_ARM) -o $@ $< $(RT_SRC) $(PROTO_SRC) spia/registro.c $(LDFLAGS_ARM)
 
 # Esegue tutti i test sul PC.
-test: $(addprefix build/host/,$(TEST))
-	@set -e; for t in $^; do echo "== $$t"; ./$$t; done
+# Poi la prova completa della spia con periferiche finte (tools/prova-spia.py, ~2 s).
+test: $(addprefix build/host/,$(TEST)) build/host/spia
+	@set -e; for t in $(addprefix build/host/,$(TEST)); do echo "== $$t"; ./$$t; done
+	@echo "== tools/prova-spia.py"; python3 tools/prova-spia.py build/host/spia 2 | tail -1
 
 # Esegue i test compilati per ARM sul PC tramite l'emulatore qemu-arm-static.
 # Verifica che il binario del robot funzioni, ma i tempi non sono significativi.

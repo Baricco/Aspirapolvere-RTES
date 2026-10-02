@@ -74,3 +74,48 @@ Prova di riavvio (`reboot` alle 18:41:14, robot sulla base con il cavo USB colle
   Lo ripristina `adb kill-server; adb start-server`: è un problema del PC, non del robot.
 
 Da fare ancora per l'accesso comodo: SSH solo con chiave (`/etc/config/dropbear`), dopo un altro riavvio di prova.
+
+## 2026-10-02 — inventario dell'hardware
+
+Fatto solo con letture sul robot e sul disassemblato: risultato in `hardware.md`. Cose nuove:
+- il **motore del lidar lo comanda il GD32** (`0x71` = potenza 0–100, `controlLidarPwm`), il lidar manda i dati su
+  `/dev/ttyS1` a 115200;
+- **GPIO 233** accende l'amplificatore dell'altoparlante; l'audio lo suona `tinyplayer`, il volume si regola con
+  `amixer`;
+- c'è un orologio con batteria tampone (PCF8563 su I2C-1, `/dev/rtc1`);
+- tasti e LED del tasto passano probabilmente dal GD32 (nessun LED o tasto Linux usato dai programmi);
+- RobotApp è sempre collegato al cloud del produttore (TCP verso 43.158.121.228:9090) e log-server cerca di
+  caricare i log via FTP.
+
+Su richiesta dell'utente lo scopo è **usare tutto l'hardware**, quindi la spia copre tutti i canali.
+
+## 2026-10-02 — blocco A: librerie e spia
+
+- `gd32/`: checksum, costruzione dei frame, deframer con risincronizzazione (dopo un frame rovinato scarta un
+  solo byte e rianalizza il resto, così un frame troncato non fa perdere quello che lo segue), codici, batteria.
+  41 controlli, tra cui 3000 frame casuali mescolati a rumore e frame troncati.
+- `lidar/`: ricavato dal disassemblato (sezione "Lidar" di `protocollo.md`) e verificato sui byte veri: formato
+  `AA`, checksum a somma o CRC-16/MODBUS (le tabelle di AuxCtrl sono quelle standard), codici `0xA9`–`0xAE`.
+- `spia/`: `spia proxy` (pty + bind mount, multi-canale, SCHED_FIFO), `leggi`, `riepilogo`, `termios`; formato
+  del registro in `registro.h`. Prova completa sul PC con periferiche finte (`tools/prova-spia.py`, ora dentro
+  `./rtes.sh test`): ogni byte arriva intatto in entrambe le direzioni e il registro coincide.
+- Verifica nel disassemblato del rischio annotato nel piano: AuxCtrl **non** chiama mai `getCTS`, `getDSR`,
+  `getDCD`, `getRing`, quindi la pty gli basta.
+
+Problemi incontrati:
+- sul robot `/tmp` è montata `nodev`: il nodo della UART vera creato lì con `mknod` non si apre
+  ("Permission denied"). Ora si crea in `/dev` (tmpfs senza `nodev`);
+- con la musl e il kernel 3.4 `cfgetispeed()` restituisce 0: la velocità si legge dai bit `CBAUD` di `c_cflag`.
+
+## 2026-10-02 — prima cattura con la spia (robot sulla base, stack originale)
+
+`tools/spia-robot.sh avvia`: lo stack originale è ripartito attraverso la spia senza accorgersene.
+- `spia termios`: `/dev/ttyS3` e `/dev/ttyS1` a 115200 8N1 raw, senza controllo di flusso.
+- **0 errori di checksum** in entrambe le direzioni (con strace il 26–34% dei frame era troncato).
+- Frame dei sensori `0x15` **ogni 20,0 ms** (min 17,6, max 22,4); heartbeat del GD32 `0x06` **ogni 2,0 s**;
+  heartbeat del SoC ogni 204 ms; `0x0d` dal SoC ogni 3,0 s.
+- Batteria: `dati[8] = 0xa5` = **16,5 V**, bit "in carica" a 1 per tutta la cattura: la batteria (Li-ion 4S,
+  16,8 V piena) è quasi carica. Questo conferma il messaggio `isBatteryFull` di RobotApp.
+- Lidar: all'avvio dello stack il GD32 lo accende per un attimo e il lidar stampa il testo di avvio (93 byte, nessun
+  pacchetto), poi resta spento perché il robot è sulla base.
+- I 52 byte scartati all'inizio sono la coda di un frame già in viaggio quando la spia ha aperto la UART.

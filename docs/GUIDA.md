@@ -31,10 +31,13 @@ all'esecuzione sul robot. Va letta prima di scrivere un task.
 | `rt/rt_tempo.h` | tempo in nanosecondi (`int64_t`), conversioni, `rt_adesso()`, `rt_dormi_fino_a()` |
 | `rt/rt.h`, `rt/rt.c` | task periodici SCHED_FIFO: creazione, ciclo periodico, statistiche, mutex con priority inheritance |
 | `bench/` | programmi di misura: `latenza.c` (latenza e jitter), `carico.c` (carico CPU sui core scelti) |
+| `gd32/gd32.h`, `gd32/gd32.c` | protocollo seriale con il GD32 (motori, sensori, carica): checksum, costruzione dei frame, deframer che si risincronizza, codici dei comandi. Senza Linux e senza allocazioni |
+| `lidar/lidar.h`, `lidar/lidar.c` | protocollo del lidar 3irobotix LDS3: pacchetti `AA`, checksum a somma o CRC-16/MODBUS, deframer, codici |
+| `spia/` | `spia`: si mette in mezzo tra i programmi originali e l'hardware e registra tutto (vedi sezione 9); `registro.h` è il formato del file |
 | `tasks/` | i task applicativi, **da scrivere** |
 | `hal/`, `sim/` | interfaccia hardware e simulatore (fasi successive) |
 | `test/` | unit test: un file `test_*.c` è un programma; framework minimo in `test/test.h` |
-| `tools/` | `installa-toolchain.sh`, `misure-fase0.sh` (campagna di misure sul robot), `misura-lunga.sh` e `notte.sh` (misure lunghe sorvegliate, vedi `docs/misure-lunghe.md`), `analizza-latenza.py` (percentili e istogrammi dei CSV), `estrai-frame.py` e `disassembla.sh` (reverse del protocollo GD32, vedi `docs/protocollo.md`) |
+| `tools/` | `installa-toolchain.sh`, `misure-fase0.sh` (campagna di misure sul robot), `misura-lunga.sh` e `notte.sh` (misure lunghe sorvegliate, vedi `docs/misure-lunghe.md`), `analizza-latenza.py` (percentili e istogrammi dei CSV), `estrai-frame.py` e `disassembla.sh` (reverse del protocollo GD32, vedi `docs/protocollo.md`), `spia-robot.sh` (inserisce/toglie la spia sul robot), `prova-spia.py` (prova della spia sul PC con periferiche finte) |
 | `docs/` | piano, questa guida, diario delle fasi, misure |
 | `Makefile` | regole di compilazione (di solito si passa da `rtes.sh`) |
 | `rtes.sh` | tutti i comandi del progetto |
@@ -162,9 +165,10 @@ int main(void)
   - `ssh-robot.sh`: SSH con la chiave dedicata.
 
   Restano fuori perché legati a questo PC (chiave SSH, rete). `rtes.sh` li richiama come `../ssh-robot.sh`.
-- **Cosa fare in pratica:**
-  1. Accendi il robot e lancia `../avvia-robot.sh` entro circa 3 minuti (vedi `~/Aspirapolvere/LEGGIMI.md`).
-  2. A quel punto funzionano `./rtes.sh deploy …` e `./rtes.sh ssh`.
+  - `Script/trova-robot.sh`: trova l'IP del robot dal suo MAC (lo usa `ssh-robot.sh`).
+- **Cosa fare in pratica (dal 2026-10-02):** accendi il robot; dopo circa 30 secondi è in Wi-Fi e
+  funzionano `./rtes.sh deploy …` e `./rtes.sh ssh`. All'avvio parte lo stack originale (serve per caricare la
+  batteria). `../avvia-robot.sh` resta come piano di riserva (vedi `~/Aspirapolvere/LEGGIMI.md`).
 - **I file in `/tmp/rtes/` sul robot sono in RAM:** al riavvio spariscono. Nessuna di queste operazioni scrive
   sulla memoria flash del robot.
 
@@ -174,3 +178,31 @@ int main(void)
   aggiungi `test_qualcosa` alla variabile `TEST` del `Makefile`.
 - **Un nuovo programma di misura:** crea `bench/nome.c` e aggiungi `nome` alla variabile `PROGRAMMI` del
   `Makefile`. Una regola generica lo compila per PC e robot.
+
+## 9. La spia (`spia/spia.c`)
+
+Serve a vedere **tutto** quello che i programmi originali si scambiano con l'hardware, per ricavarne i protocolli.
+
+```
+AuxCtrl ⇄ /dev/ttyS3 = pty (bind mount) ⇄ spia ⇄ /dev/spia-gd32-vero (mknod, stessa UART) ⇄ GD32
+AuxCtrl ⇄ /dev/ttyS1 = pty (bind mount) ⇄ spia ⇄ /dev/spia-lidar-vero                      ⇄ lidar
+```
+
+La spia crea una pty e la monta sopra il dispositivo: chi apre `/dev/ttyS3` parla in realtà con la spia, che
+inoltra ogni byte alla UART vera e lo scrive nel registro. AuxCtrl non se ne accorge (non usa le linee di controllo
+della seriale). La spia gira con `SCHED_FIFO` e la memoria bloccata, quindi non perde byte (strace ne perdeva un
+terzo).
+
+| Comando | Cosa fa |
+|---|---|
+| `tools/spia-robot.sh avvia` | copia la spia sul robot, ferma per qualche secondo lo stack originale, inserisce la spia e riavvia lo stack |
+| `tools/spia-robot.sh stato` | byte e frame visti finora, errori |
+| `tools/spia-robot.sh scarica [file]` | copia il registro sul PC (default `build/robot/spia/<data>.spia`) |
+| `tools/spia-robot.sh ferma` | toglie la spia e riavvia lo stack |
+| `build/host/spia riepilogo <file>` | per canale, direzione e comando: quanti frame, lunghezze, periodi |
+| `build/host/spia leggi <file> [-c gd32\|lidar]` | un frame per riga, con tempo, direzione, codice, nome e dati |
+| `spia termios /dev/ttyS3` (sul robot) | impostazioni della seriale (sul robot non c'è `stty`) |
+
+Tutto è in RAM: un riavvio del robot toglie la spia. Il registro contiene i byte grezzi così come sono arrivati,
+quindi si può rianalizzare quando i decodificatori migliorano. Formato: `spia/registro.h`.
+

@@ -22,6 +22,11 @@ Regole che valgono per tutto il piano:
 
 ## Blocco A: `gd32-spia` (sul PC, senza robot)
 
+*Stato al 2026-10-02: FATTO, ed esteso a tutti i canali (GD32 e lidar). Codice in `gd32/`, `lidar/`, `spia/`;
+il formato del log è in `spia/registro.h` (con un campo canale in più rispetto a A2); la decodifica la fa
+`spia leggi`/`riepilogo` in C con le stesse librerie, invece di `estrai-frame.py --spia`. Manca la modalità
+`solo` (A4). Diario in `fase1.md`.*
+
 ### A1. Libreria del protocollo `gd32/` con unit test
 È la base del driver della fase 2, quindi va scritta bene fin da subito.
 
@@ -105,6 +110,8 @@ Il programma prende il posto di AuxCtrl:
 ---
 
 ## Blocco B: accesso comodo (con il robot)
+
+*Stato al 2026-10-02: FATTO (B0 = stack originale + adb, B1–B3), B4 rimandato a fine progetto. Vedi `fase1.md`.*
 
 Obiettivo: accendi il robot e dopo un minuto è raggiungibile in SSH, senza USB e senza `avvia-robot.sh`.
 
