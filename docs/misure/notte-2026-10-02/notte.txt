@@ -1,0 +1,22 @@
+2026-10-02 00:13:58 inizio notte: stack originale attivo
+2026-10-02 00:13:58 == misura originale (carico 0, ping 0, 3600 s)
+2026-10-02 01:14:55    esito originale: completata
+  latenza     n=3600000 min      5.8  media     11.0  p50     10.6  p99     17.2  p99.9     20.7  max    158.8 us
+2026-10-02 01:14:56 solo carica per 1800 s
+2026-10-02 01:44:56 fermo lo streaming di strace e lo stack originale, avvio solo AuxCtrl
+AuxCtrl=3845 RobotApp= Monitor=
+2026-10-02 01:45:04 == misura riposo (carico 0, ping 0, 3600 s)
+2026-10-02 02:45:57    esito riposo: completata
+  latenza     n=3600000 min      5.7  media      9.9  p50      9.8  p99     13.5  p99.9     16.8  max     53.5 us
+2026-10-02 02:45:58 == misura wifi (carico 0, ping 1, 3600 s)
+2026-10-02 03:46:49    esito wifi: completata
+  latenza     n=3600000 min      5.7  media      9.8  p50     10.0  p99     15.9  p99.9     42.3  max    116.6 us
+2026-10-02 03:46:49 == misura carico (carico 1, ping 0, 3600 s)
+2026-10-02 04:47:38    esito carico: completata
+  latenza     n=3600000 min      5.9  media     11.1  p50     10.3  p99     20.0  p99.9     25.8  max     88.5 us
+2026-10-02 04:47:39 == misura peggiore (carico 1, ping 1, 3600 s)
+2026-10-02 05:48:30    esito peggiore: completata
+  latenza     n=3600000 min      5.4  media     12.5  p50     10.8  p99     28.0  p99.9     83.6  max    455.5 us
+2026-10-02 05:48:31 riavvio lo stack originale per continuare la carica
+RobotApp=2132 AuxCtrl=2150
+2026-10-02 05:48:37 fine notte

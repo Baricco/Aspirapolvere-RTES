@@ -43,6 +43,10 @@ Obiettivo: un nostro programma C con task real-time, che gira sul SoC del robot 
 0. **Toolchain e valori di riferimento RT:** cross-compiler armv7 musl statico, `qemu-user-static` sul PC, hello world
    sul robot. Misura di latenza e jitter di un task `SCHED_FIFO`, su core isolato e con carico sugli altri.
    Verifica di `PTHREAD_PRIO_INHERIT` con la nostra musl.
+   *Stato al 2026-10-01: quasi completata, vedi `docs/fase0.md`. Latenza massima 38 µs in 60 s, 0 deadline
+   mancate. Mancano la misura lunga, quella con traffico Wi-Fi e i test sotto qemu.*
+   *Stato al 2026-10-02: misure lunghe e Wi-Fi fatte (`docs/misure-lunghe.md`): 5 h, 0 deadline mancate, max
+   455,5 µs nel caso peggiore. Unit test eseguiti direttamente sul robot (51/51), qemu non serve più.*
 1. **Reverse del protocollo GD32 e lidar:** Ghidra su AuxCtrl più `strace -x` sui suoi read/write.
    Il risultato va in `docs/protocollo.md`.
 2. **Driver minimo:** il nostro programma al posto di AuxCtrl, con heartbeat e lettura dei sensori. Nessun reset in 10 minuti.

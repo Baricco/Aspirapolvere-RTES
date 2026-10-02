@@ -15,3 +15,6 @@ Estratto/
 id_rsa*
 *.pem
 *.key
+
+# Cross-compilatore (si installa con tools/installa-toolchain.sh)
+toolchain/

@@ -1,0 +1,62 @@
+make: «build/arm/latenza» è aggiornato.
+make: «build/arm/carico» è aggiornato.
+== programmi copiati in /tmp/rtes; 4 misure da 60 s, durata totale circa 5 minuti
+== idle: dura circa 60 s (l'output arriva alla fine)
+sistema: Linux 3.4.39 #993 SMP PREEMPT Thu Dec 3 05:01:35 UTC 2020 (armv7l)
+core online: 4
+sched_rt_runtime_us: 950000 (tempo CPU per secondo concesso ai task RT)
+misura: periodo 1000 us, 60000 job (~60 s), priorità 80, cpu 3, esecuzione 0 us
+latenza: prio 80, cpu 3, periodo 1000.0 us, deadline 1000.0 us
+  job 60000, deadline mancate 0
+  latenza    min      5.9  media     10.0  max     22.4 us
+  esecuzione min      0.6  media      0.8  max      2.1 us
+  risposta max 23.6 us
+campioni salvati in idle.csv (60000 righe)
+== altri: dura circa 60 s (l'output arriva alla fine)
+sistema: Linux 3.4.39 #993 SMP PREEMPT Thu Dec 3 05:01:35 UTC 2020 (armv7l)
+core online: 4
+sched_rt_runtime_us: 950000 (tempo CPU per secondo concesso ai task RT)
+misura: periodo 1000 us, 60000 job (~60 s), priorità 80, cpu 3, esecuzione 0 us
+latenza: prio 80, cpu 3, periodo 1000.0 us, deadline 1000.0 us
+  job 60000, deadline mancate 0
+  latenza    min      6.1  media     10.8  max     38.1 us
+  esecuzione min      0.8  media      0.9  max      2.0 us
+  risposta max 39.9 us
+campioni salvati in altri.csv (60000 righe)
+== stesso: dura circa 60 s (l'output arriva alla fine)
+sistema: Linux 3.4.39 #993 SMP PREEMPT Thu Dec 3 05:01:35 UTC 2020 (armv7l)
+core online: 4
+sched_rt_runtime_us: 950000 (tempo CPU per secondo concesso ai task RT)
+misura: periodo 1000 us, 60000 job (~60 s), priorità 80, cpu 3, esecuzione 0 us
+latenza: prio 80, cpu 3, periodo 1000.0 us, deadline 1000.0 us
+  job 60000, deadline mancate 0
+  latenza    min      5.4  media      5.8  max     10.6 us
+  esecuzione min      0.6  media      0.7  max      1.7 us
+  risposta max 11.9 us
+campioni salvati in stesso.csv (60000 righe)
+== p10ms: dura circa 60 s (l'output arriva alla fine)
+sistema: Linux 3.4.39 #993 SMP PREEMPT Thu Dec 3 05:01:35 UTC 2020 (armv7l)
+core online: 4
+sched_rt_runtime_us: 950000 (tempo CPU per secondo concesso ai task RT)
+misura: periodo 10000 us, 6000 job (~60 s), priorità 80, cpu 3, esecuzione 0 us
+latenza: prio 80, cpu 3, periodo 10000.0 us, deadline 10000.0 us
+  job 6000, deadline mancate 0
+  latenza    min      6.5  media     10.7  max     18.9 us
+  esecuzione min      0.7  media      0.9  max      2.0 us
+  risposta max 20.8 us
+campioni salvati in p10ms.csv (6000 righe)
+== CSV scaricati in build/robot/
+idle
+  latenza     n=60000   min      5.9  media     10.0  p50      9.9  p99     13.4  p99.9     14.9  max     22.4 us
+  esecuzione  n=60000   min      0.6  media      0.8  p50      0.8  p99      1.0  p99.9      1.3  max      2.1 us
+altri
+  latenza     n=60000   min      6.1  media     10.8  p50     10.2  p99     14.8  p99.9     16.4  max     38.1 us
+  esecuzione  n=60000   min      0.8  media      0.9  p50      0.9  p99      1.0  p99.9      1.3  max      2.0 us
+stesso
+  latenza     n=60000   min      5.4  media      5.8  p50      5.7  p99      6.4  p99.9      7.5  max     10.6 us
+  esecuzione  n=60000   min      0.6  media      0.7  p50      0.7  p99      0.8  p99.9      1.0  max      1.7 us
+p10ms
+  latenza     n=6000    min      6.5  media     10.7  p50     10.8  p99     14.7  p99.9     17.1  max     18.9 us
+  esecuzione  n=6000    min      0.7  media      0.9  p50      0.9  p99      1.2  p99.9      1.9  max      2.0 us
+grafico salvato in build/robot/fase0.png
+exit=0
