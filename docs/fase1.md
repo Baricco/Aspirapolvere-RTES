@@ -176,3 +176,16 @@ arrivati dati (`getStm32ReceiveData`). Dato che con solo AuxCtrl il robot non si
   diario che attribuiscono a RobotApp eccezioni, LED, `isBatteryFull` e i frame del GD32 vanno lette come
   "everest-server". RobotApp fa app, cloud, mappe, programmazioni, suoni e sospensione.
 - Fine della fase 1: riepilogo di hardware, software e protocolli in `RIEPILOGO.md`.
+
+## 2026-10-02 — decisioni per le fasi successive e prova di FreeRTOS
+
+- Piano generale rivisto con l'utente (`PIANO.md`): nuova fase 2 "caratterizzazione completa dell'hardware"
+  (passi in `fase2-piano.md`), poi driver e framework, task (utente), app e server aperiodico, installazione.
+- Decisioni: batteria gestita nel driver; stato sicuro all'avvio, watchdog dei task e stato di guasto con LED e
+  suono (il rilancio automatico più avanti); mappatura griglia + allineamento tentata in hard RT; avvio del nostro
+  software all'accensione con ritorno all'originale; niente serbatoio dell'acqua. Da decidere: framework RT, server
+  aperiodico, tipo di app.
+- Prova di **FreeRTOS ufficiale (port POSIX)** sul robot (`esperimenti/freertos-posix/`): il port originale si è
+  bloccato, perché il thread del tick aveva la stessa priorità dei task e un task che non si ferma mai gli toglieva
+  la CPU. Corretto il tick (SCHED_FIFO 95, risvegli assoluti): ritardo −11…+13 µs, jitter 21 µs.
+- Fonte esterna trovata: codetiger/VacuumTiger (stessa scheda), da usare come seconda fonte nella fase 2.

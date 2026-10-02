@@ -1,0 +1,27 @@
+--- a/portable/ThirdParty/GCC/Posix/port.c	2024-04-22 09:38:21.000000000 +0200
++++ b/portable/ThirdParty/GCC/Posix/port.c	2026-10-02 22:16:17.139648582 +0200
+@@ -387,15 +387,19 @@
+     
+     prvPortSetCurrentThreadName("Scheduler timer");
+ 
++    /* Modifica RTES: il tick deve comportarsi come un interrupt, quindi il suo thread ha una priorità
++     * SCHED_FIFO più alta di tutti i task; e si sveglia a istanti assoluti (niente deriva). */
++    struct sched_param xParam = { .sched_priority = 95 };
++    pthread_setschedparam( pthread_self(), SCHED_FIFO, &xParam );
++    struct timespec xProssimo;
++    clock_gettime( CLOCK_MONOTONIC, &xProssimo );
+     while( xTimerTickThreadShouldRun )
+     {
+-        /*
+-         * signal to the active task to cause tick handling or
+-         * preemption (if enabled)
+-         */
++        xProssimo.tv_nsec += portTICK_RATE_MICROSECONDS * 1000L;
++        while( xProssimo.tv_nsec >= 1000000000L ) { xProssimo.tv_nsec -= 1000000000L; xProssimo.tv_sec++; }
++        clock_nanosleep( CLOCK_MONOTONIC, TIMER_ABSTIME, &xProssimo, NULL );
+         Thread_t * thread = prvGetThreadFromTask( xTaskGetCurrentTaskHandle() );
+         pthread_kill( thread->pthread, SIGALRM );
+-        usleep( portTICK_RATE_MICROSECONDS );
+     }
+ 
+     return NULL;

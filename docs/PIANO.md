@@ -1,96 +1,96 @@
 # Piano progetto RTES: task real-time in C sul Proscenic M6 Pro
 
-Obiettivo: un nostro programma C con task real-time, che gira sul SoC del robot e comanda direttamente l'hardware.
+Obiettivo: un nostro software C con task real-time, che gira sul SoC del robot, comanda direttamente **tutto**
+l'hardware (non solo il minimo) e si controlla da un'app: avanti, indietro, rotazione, aspirazione, telemetria.
+I task dell'esame li scrive l'utente da solo, sopra un framework e un driver preparati insieme.
 
 ## Decisioni prese
-- **Niente Valetudo, niente flash.** Abbiamo già root (SSH/adb). Valetudo parla solo con RobotApp, non con l'hardware.
-- **Scheduling: `SCHED_FIFO`**, cioè la semantica di FreeRTOS (priorità fissa con preemption).
-  Niente `SCHED_DEADLINE`: il kernel 3.4 non lo ha, e le alternative (backport, kernel mainline) costano troppo
-  e rischiano di briccare il robot. Priorità assegnate con rate-monotonic, più l'analisi di schedulabilità classica.
-- **Multi-core partizionato:** ogni task è fissato a un core (`sched_setaffinity`), e ogni core si analizza come un
-  sistema single-core. I dati condivisi tra core si proteggono con mutex o code, mai contando sulle priorità.
-- **Ogni task RT** usa `mlockall()` e `clock_nanosleep(TIMER_ABSTIME)`.
-- **Sviluppo anche senza robot:** livello HAL con due backend, robot e simulatore 2D, più unit test.
-- **Repository git** `Aspirapolvere-RTES`, privata su GitHub, senza GitHub Actions. I test si lanciano a mano
-  con `./rtes.sh` prima di ogni commit.
-- **Persistenza senza flash:** binari in `/mnt/UDISK/rt/` e script in `/etc/init.d/` (overlay ext4 su `rootfs_data`).
-  L'avvio è sicuro: parte solo se esiste `/mnt/UDISK/rt/enable`, con un ritardo, e se il nostro programma termina
-  in modo anomalo si torna ad AuxCtrl.
+- **Niente Valetudo, niente flash.** Abbiamo già root (SSH/adb). Valetudo parla solo con il software originale.
+- **Linux resta il sistema operativo** (kernel 3.4.39 `SMP PREEMPT`, non RT): niente cambio di OS né di kernel.
+  Niente `SCHED_DEADLINE` (il kernel 3.4 non lo ha).
+- **Ogni task RT** usa `mlockall()` e risvegli ad istanti assoluti (`clock_nanosleep(TIMER_ABSTIME)` o equivalente).
+- **Sviluppo anche senza robot:** HAL con due backend, robot e simulatore, più unit test.
+- **Repository git** `Aspirapolvere-RTES`, privata su GitHub, senza GitHub Actions. `./rtes.sh test` prima di ogni
+  commit.
+- **Persistenza senza flash:** binari in `/mnt/UDISK/rt/`, script in `/etc/init.d/` (overlay ext4).
+- **All'accensione, a lavoro finito, parte il nostro software**, con interruttore di sicurezza
+  (`/mnt/UDISK/rt/enable`) e ritorno allo stack originale se il nostro non parte.
+- **Gestione della batteria nel driver:** il driver espone percentuale vera, corrente, temperatura e controllo
+  della carica già pronti; i task usano solo i valori.
+- **Robustezza:** stato sicuro all'avvio (motori, spazzole, aspirazione a zero prima di tutto), watchdog dei task
+  (se un task critico salta le scadenze o non risponde, tutti i motori si fermano) e **stato di guasto ben
+  riconoscibile** (colore del LED + suono dall'altoparlante). Il rilancio automatico del programma si aggiunge in
+  futuro.
+- **Mappatura:** griglia di occupazione + allineamento delle scansioni lidar con un numero fisso di iterazioni,
+  tentata come task **hard real-time** periodico (un giro del lidar); se non regge le scadenze, passa al server
+  aperiodico.
+- **Niente serbatoio dell'acqua:** pompa e sensori del serbatoio restano solo documentati.
 
 ## Ancora da decidere
-- **Criterio di partizionamento dei task sui core:**
-  - per carico: i task veloci su un core, quelli pesanti (lidar, navigazione) su un altro;
-  - per criticità: i task hard real-time su un core, quelli soft real-time sugli altri.
+- **Framework RT** (da chiarire nella fase 3). Requisiti: real-time **vero, non solo nel nome**; didatticamente
+  sensato (per questo l'idea di FreeRTOS); sfruttare al massimo l'hardware (4 core). Candidati:
+  - FreeRTOS ufficiale con il port POSIX: API identica, **un solo core**, niente interrupt veri, chiamate bloccanti
+    e `printf` da gestire, stack minimi (`PTHREAD_STACK_MIN`). La documentazione ufficiale dice che "non si comporta
+    da sistema real-time"; ma con il tick su un thread `SCHED_FIFO` a priorità massima e risvegli assoluti
+    (modifica di 10 righe) abbiamo misurato sul robot **−11…+13 µs di ritardo e 21 µs di jitter** (task a 10 ms,
+    3000 risvegli, task a bassa priorità che consuma CPU sullo stesso core) — 2026-10-02;
+  - uno strato con API stile FreeRTOS sopra i thread `SCHED_FIFO` di Linux (4 core, ma scheduler di Linux);
+  - un ibrido: FreeRTOS su un core per i task dell'esame, thread Linux per driver e rete.
+- **Server aperiodico** per i comandi dell'app: polling, deferrable o sporadic server (confrontabili con le misure).
+- **Tipo di app** (pagina web, Android, programma sul PC).
+- **Partizionamento dei task sui core** (per carico o per criticità), quando conosceremo WCET e periodi.
 
-  La scelta si fa quando conosceremo WCET e periodi reali. Si possono anche confrontare le due soluzioni con le
-  misure. In ogni caso Linux e i servizi non RT restano sui core 0–1.
-
-## Architettura trovata (dal backup, 2026-10-01)
+## Architettura del software originale (dettagli in `RIEPILOGO.md`)
 ```
- RobotApp (SLAM, pianificazione, cloud)          <- da sostituire con il nostro codice
-     |  socket Unix /tmp/AuxEverest_Sock
- AuxCtrl (driver: heartbeat, sensori, lidar)     <- da sostituire con il nostro codice
-     |  /dev/ttyS3            |  /dev/ttyS1
- MCU GD32F103 (motori,        Lidar 3irobotix LDS3
- bumper, cliff, batteria)
+GD32 ⇄ /dev/ttyS3 ⇄ AuxCtrl ⇄ /tmp/AuxEverest_Sock ⇄ everest-server ⇄ /tmp/everest_sock ⇄ RobotApp ⇄ cloud
+lidar → /dev/ttyS1 → AuxCtrl
 ```
-- SoC Allwinner A33 (4x Cortex-A7), Linux 3.4.39 `SMP PREEMPT` (non RT), HZ=100, timer ad alta risoluzione, musl.
-- AuxCtrl e RobotApp sono binari C++ con i simboli; sul robot ci sono `strace` e `gdbserver`.
-- Il contenuto estratto dal backup è in `~/Aspirapolvere/Estratto/` (fuori dalla repository: contiene binari proprietari).
-- Vincolo critico: senza heartbeat verso il GD32 il robot si resetta dopo ~4 minuti.
-- **Correzione del 2026-10-02** (`protocollo.md`, `RIEPILOGO.md`): il cervello del robot è **everest-server**
-  (stato, movimento, SLAM, eccezioni, protocollo del GD32); RobotApp fa app, cloud, mappe e sospensione; AuxCtrl
-  inoltra i frame del GD32, manda il keepalive `0x0d` (l'unico sorvegliato dal watchdog del GD32, timeout ~190 s) e
-  gestisce lidar e audio. Il nostro driver deve replicare AuxCtrl più la parte di everest-server che parla con il GD32.
+- **AuxCtrl**: driver delle periferiche (seriali, keepalive `0x0d`, lidar, audio).
+- **everest-server**: il cervello (stati, movimento, SLAM, eccezioni, protocollo del GD32). Esporta ~10.500 nomi di
+  funzione: è la fonte principale per completare il protocollo.
+- **RobotApp**: app, cloud, mappe, sospensione, suoni.
+- Il watchdog del GD32 sorveglia solo `0x0d`: senza, reset del robot dopo ~190 s.
+- Il nostro software deve replicare AuxCtrl e la parte di everest-server che parla con il GD32.
 
 ## Fasi
-0. **Toolchain e valori di riferimento RT:** cross-compiler armv7 musl statico, `qemu-user-static` sul PC, hello world
-   sul robot. Misura di latenza e jitter di un task `SCHED_FIFO`, su core isolato e con carico sugli altri.
-   Verifica di `PTHREAD_PRIO_INHERIT` con la nostra musl.
-   *Stato al 2026-10-01: quasi completata, vedi `docs/fase0.md`. Latenza massima 38 µs in 60 s, 0 deadline
-   mancate. Mancano la misura lunga, quella con traffico Wi-Fi e i test sotto qemu.*
-   *Stato al 2026-10-02: misure lunghe e Wi-Fi fatte (`docs/misure-lunghe.md`): 5 h, 0 deadline mancate, max
-   455,5 µs nel caso peggiore. Unit test eseguiti direttamente sul robot (51/51), qemu non serve più.*
-1. **Reverse del protocollo GD32 e lidar:** Ghidra su AuxCtrl più `strace -x` sui suoi read/write.
-   Il risultato va in `docs/protocollo.md`.
-   *Stato al 2026-10-02: passi 1 e 2 fatti senza robot (catture strace + disassemblato con
-   `tools/disassembla.sh`). Noti: formato del frame e checksum, nomi e codici di 24 comandi, heartbeat `0x06`
-   ogni 200 ms, velocità `0x66` ogni 20 ms (con conversione in tick), sequenza di avvio, campi della batteria
-   nel frame dei sensori `0x15`. Mancano le prove sul robot per gli altri campi dei sensori, e il lidar.
-   Prima delle prove: la fase trasversale "accesso comodo". Piano dettagliato in `docs/fase1-piano.md`.*
-   *Stato al 2026-10-02 sera: FATTA (eccetto il contenuto delle scansioni del lidar e i campi legati ai motori, che
-   richiedono i motori accesi: fase 3). Riepilogo completo in `docs/RIEPILOGO.md`.*
-2. **Driver minimo:** il nostro programma al posto di AuxCtrl, con heartbeat e lettura dei sensori. Nessun reset in 10 minuti.
-3. **Attuazione:** ruote, spazzole, aspirazione, con il robot sollevato.
-4. **Architettura RT:** task, partizionamento sui core, misure di WCET e jitter, analisi di schedulabilità.
-5. **Comportamento** (evitamento ostacoli, segui-muro), poi installazione persistente e relazione.
+0. **Toolchain e valori di riferimento RT** — FATTA. Latenza max 38 µs in 60 s; 5 h di misure lunghe con 0 deadline
+   mancate (max 455,5 µs nel caso peggiore). `docs/fase0.md`, `docs/misure-lunghe.md`.
+1. **Reverse dei protocolli e accesso comodo** — FATTA. Spia sulle seriali e sui socket, frame dei sensori mappato
+   con prove fisiche, canale AuxCtrl ↔ everest-server, watchdog. `docs/fase1.md`, `docs/RIEPILOGO.md`.
+2. **Caratterizzazione completa dell'hardware** (insieme, PROSSIMA) — ogni sensore, attuatore e comando capito e
+   provato: disassemblato di everest-server, lidar (scansioni), ruote, spazzole, aspirazione, comandi di avvio,
+   carica, batteria (corrente, temperatura, percentuale), IMU, IR analogici, audio. Banco di prova con interblocco
+   di sicurezza. Passi in `docs/fase2-piano.md`.
+3. **Driver e framework RT** (insieme) — il nostro driver al posto di AuxCtrl + parte di everest-server (keepalive,
+   avvio, sensori decodificati, attuatori, lidar, audio, batteria, stato sicuro, stato di guasto); scelta e
+   preparazione del framework RT (vedi "Ancora da decidere"), con esempi e guida.
+4. **Task RT** (utente, da solo) — sicurezza, controllo del moto, lidar, comportamento, watchdog dei task, mappatura
+   in hard RT; WCET, jitter, analisi di schedulabilità.
+5. **App e server aperiodico** (insieme) — scelta del tipo di app e del server; comandi e telemetria.
+6. **Installazione persistente e relazione** — avvio automatico del nostro software con ritorno all'originale,
+   eventuale rilancio automatico, SSH solo con chiave, documentazione finale.
 
-Fasi trasversali: simulatore (dalla fase 0, poi a livello di protocollo dopo la fase 1) e accesso comodo.
-*Accesso comodo fatto il 2026-10-02 (`docs/fase1.md`): Wi-Fi di casa salvato, stack originale all'avvio (provvisorio,
-finché la batteria non la gestiamo noi), IP trovato dal MAC. "SSH solo con chiave" è rimandato: si valuta a fine
-progetto, per l'installazione definitiva.*
+Fasi trasversali: simulatore (a livello di protocollo, con i dati delle catture) e test sul PC.
 
-**Obiettivo esteso (2026-10-02):** il nostro software deve usare **tutto** l'hardware del robot, non solo il
-minimo per funzionare. Per questo la fase 1 produce una mappa completa dei componenti (GD32 con motori, sensori e
-carica, lidar, audio, LED, tasti, e tutto quello che troveremo) e del protocollo di ciascuno, e la spia intercetta
-tutti i canali, non solo `/dev/ttyS3`.
-
-## Bozza dei task
+## Bozza dei task (da rivedere nella fase 4)
 | Task | Tipo | Periodo/deadline | Criticità |
 |---|---|---|---|
-| Comunicazione GD32 (heartbeat, ricezione sensori) | periodico | ~10-20 ms (da misurare) | hard |
-| Sicurezza (bumper, cliff, ruota sollevata, stop motori) | sporadico | deadline stretta | hard |
-| Controllo moto (velocità ruote) | periodico | 20 ms | hard |
-| Acquisizione lidar | periodico, guidato dai dati | ~1 giro (~200 ms) | soft |
-| Navigazione / comportamento | periodico | 100 ms | soft |
-| Telemetria e log via Wi-Fi | aperiodico | best effort | non RT (SCHED_OTHER) |
+| Comunicazione GD32 (sensori ogni 20 ms, keepalive `0x0d` ogni 3 s) | periodico | 20 ms | hard |
+| Sicurezza (bumper, anti-caduta, stop motori) | periodico/sporadico | entro un periodo dei sensori | hard |
+| Controllo moto (velocità `0x66`) | periodico | 20 ms | hard |
+| Watchdog dei task + stato di guasto | periodico | ~50 ms | hard |
+| Acquisizione lidar | periodico, guidato dai dati | ~1 giro (~200 ms) | soft/hard |
+| Mappatura (griglia + allineamento) | periodico | 1 giro del lidar | hard (tentativo) |
+| Batteria (nel driver) | periodico | ~1 s | soft |
+| Comandi dall'app | aperiodico, tramite server | budget del server | soft |
+| Telemetria e log | aperiodico | best effort | non RT |
 
 ## Comandi (`./rtes.sh`)
 | Comando | Cosa fa |
 |---|---|
-| `test` | compila per il PC ed esegue gli unit test |
-| `sim` | esegue i task nel simulatore e salva la traccia |
+| `test` | compila per il PC ed esegue unit test e prove della spia |
 | `build` | compila per il robot (ARM, statico) |
-| `deploy` | copia il binario in `/tmp` sul robot e lo avvia (solo in RAM) |
-| `install` / `uninstall` | installa o rimuove la versione persistente con avvio sicuro |
+| `deploy` | copia il binario in `/tmp/rtes` sul robot e lo avvia (solo in RAM) |
+| `scarica` | copia un file dal robot |
 | `ssh` | apre una shell sul robot |
+| `sim`, `install`, `uninstall` | da fare |
