@@ -34,7 +34,7 @@ all'esecuzione sul robot. Va letta prima di scrivere un task.
 | `tasks/` | i task applicativi, **da scrivere** |
 | `hal/`, `sim/` | interfaccia hardware e simulatore (fasi successive) |
 | `test/` | unit test: un file `test_*.c` è un programma; framework minimo in `test/test.h` |
-| `tools/` | `installa-toolchain.sh`, `misure-fase0.sh` (campagna di misure sul robot), `misura-lunga.sh` e `notte.sh` (misure lunghe sorvegliate, vedi `docs/misure-lunghe.md`), `analizza-latenza.py` (percentili e istogrammi dei CSV) |
+| `tools/` | `installa-toolchain.sh`, `misure-fase0.sh` (campagna di misure sul robot), `misura-lunga.sh` e `notte.sh` (misure lunghe sorvegliate, vedi `docs/misure-lunghe.md`), `analizza-latenza.py` (percentili e istogrammi dei CSV), `estrai-frame.py` e `disassembla.sh` (reverse del protocollo GD32, vedi `docs/protocollo.md`) |
 | `docs/` | piano, questa guida, diario delle fasi, misure |
 | `Makefile` | regole di compilazione (di solito si passa da `rtes.sh`) |
 | `rtes.sh` | tutti i comandi del progetto |

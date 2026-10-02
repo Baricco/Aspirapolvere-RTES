@@ -49,6 +49,11 @@ Obiettivo: un nostro programma C con task real-time, che gira sul SoC del robot 
    455,5 µs nel caso peggiore. Unit test eseguiti direttamente sul robot (51/51), qemu non serve più.*
 1. **Reverse del protocollo GD32 e lidar:** Ghidra su AuxCtrl più `strace -x` sui suoi read/write.
    Il risultato va in `docs/protocollo.md`.
+   *Stato al 2026-10-02: passi 1 e 2 fatti senza robot (catture strace + disassemblato con
+   `tools/disassembla.sh`). Noti: formato del frame e checksum, nomi e codici di 24 comandi, heartbeat `0x06`
+   ogni 200 ms, velocità `0x66` ogni 20 ms (con conversione in tick), sequenza di avvio, campi della batteria
+   nel frame dei sensori `0x15`. Mancano le prove sul robot per gli altri campi dei sensori, e il lidar.
+   Prima delle prove: la fase trasversale "accesso comodo".*
 2. **Driver minimo:** il nostro programma al posto di AuxCtrl, con heartbeat e lettura dei sensori. Nessun reset in 10 minuti.
 3. **Attuazione:** ruote, spazzole, aspirazione, con il robot sollevato.
 4. **Architettura RT:** task, partizionamento sui core, misure di WCET e jitter, analisi di schedulabilità.
