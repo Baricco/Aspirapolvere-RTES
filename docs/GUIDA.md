@@ -201,6 +201,9 @@ terzo).
 | `tools/spia-robot.sh ferma` | toglie la spia e riavvia lo stack |
 | `build/host/spia riepilogo <file>` | per canale, direzione e comando: quanti frame, lunghezze, periodi |
 | `build/host/spia leggi <file> [-c gd32\|lidar]` | un frame per riga, con tempo, direzione, codice, nome e dati |
+| `tools/spia-robot.sh eventi` | segue in diretta gli eventi: byte dei sensori che cambiano, comandi diversi da heartbeat e velocità |
+| `tools/sensori.py base` / `diff` | salva lo stato dei 96 byte dei sensori come riferimento / mostra quali byte sono cambiati (per le prove fisiche) |
+| `tools/ritmo.py [secondi]` | trova i bit che cambiano a ritmo (azione ripetuta 3 volte) |
 | `spia termios /dev/ttyS3` (sul robot) | impostazioni della seriale (sul robot non c'è `stty`) |
 
 Tutto è in RAM: un riavvio del robot toglie la spia. Il registro contiene i byte grezzi così come sono arrivati,

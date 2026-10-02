@@ -4,6 +4,7 @@
 #
 #   tools/spia-robot.sh avvia      copia la spia, ferma lo stack originale, avvia "spia proxy" (gd32 + lidar),
 #                                  riavvia lo stack originale: da quel momento tutto il traffico passa dalla spia
+#   tools/spia-robot.sh eventi     segue in diretta gli eventi (byte dei sensori che cambiano, comandi): Ctrl-C per uscire
 #   tools/spia-robot.sh stato      la spia gira? quanti byte e frame ha visto (ultime righe del suo stato)
 #   tools/spia-robot.sh ferma      ferma lo stack, ferma la spia (che smonta i bind mount), riavvia lo stack
 #   tools/spia-robot.sh scarica [dest]   copia il registro sul PC (default build/robot/spia/<data>.spia)
@@ -26,14 +27,17 @@ case "${1:-}" in
     make -C "$DIR" --no-print-directory build/arm/spia
     robot "mkdir -p $D && cat > $D/.spia && chmod +x $D/.spia && mv $D/.spia $D/spia" < "$DIR/build/arm/spia"
     robot "pidof spia >/dev/null && { echo 'la spia gira già'; exit 1; }
+      [ -e $REG ] && mv $REG $D/spia-\$(date +%Y%m%d-%H%M%S).reg   # la registrazione precedente non si perde
       $FERMA_STACK
-      start-stop-daemon -S -b -m -p $D/spia.pid -x /bin/sh -- -c 'exec $D/spia proxy -o $REG -s 10 >$D/spia.out 2>$D/spia.err'
+      start-stop-daemon -S -b -m -p $D/spia.pid -x /bin/sh -- -c 'exec $D/spia proxy -o $REG -s 10 --eventi $D/spia.eventi --attesa 30 --impara 15 --istantanea $D/spia.sensori >$D/spia.out 2>$D/spia.err'
       sleep 1
       cat $D/spia.out
       grep -E 'ttyS[13]' /proc/mounts || { echo 'ERRORE: bind mount assente'; cat $D/spia.err; /etc/init.d/robotManager start; exit 1; }
       /etc/init.d/robotManager start
       sleep 3
       echo \"stack: Monitor=\$(pidof Monitor) AuxCtrl=\$(pidof AuxCtrl) RobotApp=\$(pidof RobotApp)\"" ;;
+  eventi)
+    robot "tail -n 40 -f $D/spia.eventi" ;;
   stato)
     robot "echo \"spia=\$(pidof spia) AuxCtrl=\$(pidof AuxCtrl) RobotApp=\$(pidof RobotApp)\"; ls -la $REG 2>/dev/null; tail -3 $D/spia.err" ;;
   ferma)

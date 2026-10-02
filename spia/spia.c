@@ -86,6 +86,175 @@ static void decod_contatori(const decod_t *d, uint64_t *ok, uint64_t *err, uint6
 	}
 }
 
+
+/* ------------------------------------------------------------------------------------------------------ */
+/* Eventi in tempo reale (--eventi FILE): per le prove dei sensori.                                       */
+/*
+ * Scrive una riga per ogni cosa "interessante":
+ *   - nel frame dei sensori 0x15, i byte che cambiano rispetto al frame precedente. Nei primi --impara secondi
+ *     dopo --attesa secondi (il tempo che lo stack originale finisca di avviarsi; robot fermo) la spia impara quali byte cambiano da soli (IMU, temperature, rumore dei sensori analogici)
+ *     e poi li ignora. Un byte che dopo cambia più di 10 volte in un secondo diventa anche lui "rumoroso";
+ *   - ogni altro frame del GD32 (esclusi l'heartbeat 0x06 e i sensori), in entrambe le direzioni;
+ *   - il comando di velocità 0x66 solo quando cambia;
+ *   - i pacchetti del lidar diversi dalle scansioni.
+ */
+#define EV_SENSORI 96
+
+typedef struct {
+	FILE *out;
+	int64_t t0, inizio_apprendimento, fine_apprendimento;
+	uint8_t prec[EV_SENSORI];
+	int ha_prec;
+	uint8_t rumoroso[EV_SENSORI];
+	int64_t finestra[EV_SENSORI];      /* inizio della finestra di 1 s per contare i cambi */
+	int cambi[EV_SENSORI];
+	uint8_t vel_prec[8];
+	int ha_vel;
+	const char *istantanea;            /* file con min/max di ogni byte dei sensori nell'ultimo secondo */
+	uint8_t win_min[EV_SENSORI], win_max[EV_SENSORI];
+	int64_t win_inizio;
+	int dir;                           /* direzione del blocco in corso */
+	int64_t adesso;
+} eventi_t;
+
+static eventi_t ev;
+
+static void ev_testa(void)
+{
+	fprintf(ev.out, "%8.2f %s ", (double)(ev.adesso - ev.t0) / RT_NS_PER_S, ev.dir == REG_VERSO_SOC ? "rx" : "tx");
+}
+
+static void ev_frame(const gd32_frame_t *f)
+{
+	const char *nome = gd32_nome_cmd(f->cmd);
+	ev_testa();
+	fprintf(ev.out, "0x%02x %s:", f->cmd, nome ? nome : "?");
+	for (int i = 0; i < f->n_dati; i++)
+		fprintf(ev.out, " %02x", f->dati[i]);
+	fputc('\n', ev.out);
+}
+
+/* Ogni secondo riscrive il file dell'istantanea: tre righe da 96 byte esadecimali (min, max, ultimo frame). */
+static void ev_istantanea(const gd32_frame_t *f, int n)
+{
+	if (!ev.istantanea)
+		return;
+	if (ev.win_inizio == 0) {
+		memcpy(ev.win_min, f->dati, (size_t)n);
+		memcpy(ev.win_max, f->dati, (size_t)n);
+		ev.win_inizio = ev.adesso;
+	}
+	for (int i = 0; i < n; i++) {
+		if (f->dati[i] < ev.win_min[i]) ev.win_min[i] = f->dati[i];
+		if (f->dati[i] > ev.win_max[i]) ev.win_max[i] = f->dati[i];
+	}
+	if (ev.adesso - ev.win_inizio < RT_S(1))
+		return;
+	char tmp[PATH_MAX];
+	snprintf(tmp, sizeof tmp, "%s.tmp", ev.istantanea);
+	FILE *o = fopen(tmp, "w");
+	if (o) {
+		fprintf(o, "t %.2f\n", (double)(ev.adesso - ev.t0) / RT_NS_PER_S);
+		const uint8_t *righe[3] = { ev.win_min, ev.win_max, f->dati };
+		const char *nomi[3] = { "min", "max", "ultimo" };
+		for (int r = 0; r < 3; r++) {
+			fprintf(o, "%s", nomi[r]);
+			for (int i = 0; i < n; i++)
+				fprintf(o, " %02x", righe[r][i]);
+			fputc('\n', o);
+		}
+		fclose(o);
+		rename(tmp, ev.istantanea);   /* chi legge vede sempre un file completo */
+	}
+	ev.win_inizio = 0;
+}
+
+static void ev_sensori(const gd32_frame_t *f)
+{
+	int n = f->n_dati < EV_SENSORI ? f->n_dati : EV_SENSORI;
+	ev_istantanea(f, n);
+	if (!ev.ha_prec) {
+		memcpy(ev.prec, f->dati, (size_t)n);
+		ev.ha_prec = 1;
+		return;
+	}
+	if (ev.adesso < ev.inizio_apprendimento) {   /* lo stack si sta ancora avviando: si osserva e basta */
+		memcpy(ev.prec, f->dati, (size_t)n);
+		return;
+	}
+	int apprendo = ev.adesso < ev.fine_apprendimento;
+	int scritto = 0;
+	for (int i = 0; i < n; i++) {
+		if (f->dati[i] == ev.prec[i] || ev.rumoroso[i])
+			continue;
+		if (apprendo) {
+			ev.rumoroso[i] = 1;
+			continue;
+		}
+		if (ev.adesso - ev.finestra[i] > RT_S(1)) {
+			ev.finestra[i] = ev.adesso;
+			ev.cambi[i] = 0;
+		}
+		if (++ev.cambi[i] > 10) {
+			ev.rumoroso[i] = 1;
+			ev_testa();
+			fprintf(ev.out, "(byte %d dei sensori cambia troppo spesso: da ora lo ignoro)\n", i);
+			continue;
+		}
+		if (!scritto++) {
+			ev_testa();
+			fprintf(ev.out, "sensori");
+		}
+		fprintf(ev.out, "  [%d] %02x->%02x", i, ev.prec[i], f->dati[i]);
+	}
+	if (scritto)
+		fputc('\n', ev.out);
+	if (apprendo == 0 && ev.fine_apprendimento && ev.t0) {
+		/* stampa una volta sola l'elenco dei byte ignorati, alla fine dell'apprendimento */
+		static int detto;
+		if (!detto++) {
+			ev_testa();
+			fprintf(ev.out, "fine apprendimento; byte dei sensori ignorati perché cambiano da soli:");
+			for (int i = 0; i < EV_SENSORI; i++)
+				if (ev.rumoroso[i])
+					fprintf(ev.out, " %d", i);
+			fputc('\n', ev.out);
+		}
+	}
+	memcpy(ev.prec, f->dati, (size_t)n);
+}
+
+static void ev_gd32(const gd32_frame_t *f, void *ctx)
+{
+	(void)ctx;
+	if (f->cmd == GD32_HEARTBEAT)
+		return;
+	if (ev.dir == REG_VERSO_SOC && f->cmd == GD32_SENSORI) {
+		ev_sensori(f);
+		return;
+	}
+	if (ev.dir == REG_DAL_SOC && f->cmd == GD32_VELOCITA && f->n_dati == 8) {
+		if (ev.ha_vel && !memcmp(ev.vel_prec, f->dati, 8))
+			return;
+		memcpy(ev.vel_prec, f->dati, 8);
+		ev.ha_vel = 1;
+	}
+	ev_frame(f);
+}
+
+static void ev_lidar(const lidar_pacchetto_t *p, void *ctx)
+{
+	(void)ctx;
+	if (p->cmd == LIDAR_SCANSIONE || p->cmd == LIDAR_SCANSIONE_NUOVA)
+		return;
+	const char *nome = lidar_nome_cmd(p->cmd);
+	ev_testa();
+	fprintf(ev.out, "lidar 0x%02x %s:", p->cmd, nome ? nome : "?");
+	for (int i = 0; i < p->n_param; i++)
+		fprintf(ev.out, " %02x", p->param[i]);
+	fputc('\n', ev.out);
+}
+
 /* ------------------------------------------------------------------------------------------------------ */
 /* proxy                                                                                                  */
 
@@ -288,14 +457,18 @@ static int analizza_canale(const char *s, reg_canale_t *c, uint8_t id)
 static int cmd_proxy(int argc, char **argv)
 {
 	const char *uscita = NULL;
-	int priorita = 80, senza_mount = 0, forza = 0, ogni_s = 10;
+	int priorita = 80, senza_mount = 0, forza = 0, ogni_s = 10, impara_s = 10, attesa_s = 0;
+	const char *file_eventi = NULL;
 	static canale_t cc[REG_MAX_CANALI];
 	int n = 0;
 
 	static const struct option opz[] = {
 		{ "uscita", required_argument, 0, 'o' }, { "canale", required_argument, 0, 'c' },
 		{ "priorita", required_argument, 0, 'p' }, { "stato", required_argument, 0, 's' },
-		{ "senza-mount", no_argument, 0, 'M' }, { "forza", no_argument, 0, 'F' }, { 0, 0, 0, 0 },
+		{ "senza-mount", no_argument, 0, 'M' }, { "forza", no_argument, 0, 'F' },
+		{ "eventi", required_argument, 0, 'E' }, { "impara", required_argument, 0, 'I' },
+		{ "attesa", required_argument, 0, 'A' },
+		{ "istantanea", required_argument, 0, 'T' }, { 0, 0, 0, 0 },
 	};
 	int o;
 	while ((o = getopt_long(argc, argv, "o:c:p:s:", opz, NULL)) != -1) {
@@ -305,6 +478,10 @@ static int cmd_proxy(int argc, char **argv)
 		case 's': ogni_s = atoi(optarg); break;
 		case 'M': senza_mount = 1; break;
 		case 'F': forza = 1; break;
+		case 'E': file_eventi = optarg; break;
+		case 'I': impara_s = atoi(optarg); break;
+		case 'A': attesa_s = atoi(optarg); break;
+		case 'T': ev.istantanea = optarg; break;
 		case 'c':
 			if (n == REG_MAX_CANALI || analizza_canale(optarg, &cc[n].info, (uint8_t)n)) {
 				fprintf(stderr, "spia: canale non valido: %s (formato nome,gd32|lidar|grezzo,dispositivo)\n", optarg);
@@ -372,6 +549,24 @@ static int cmd_proxy(int argc, char **argv)
 	struct pollfd pf[2 * REG_MAX_CANALI];
 	static uint8_t buf[4096];
 	int64_t t0 = rt_adesso(), prossimo_stato = t0 + RT_S(ogni_s), prossimo_flush = t0 + RT_S(1);
+	static decod_t dec_ev[REG_MAX_CANALI][2];
+	if (file_eventi) {
+		ev.out = fopen(file_eventi, "w");
+		if (!ev.out) {
+			fprintf(stderr, "spia: apro %s: %s\n", file_eventi, strerror(errno));
+			esito = 1;
+			goto fine;
+		}
+		setvbuf(ev.out, NULL, _IOLBF, 0);
+		ev.t0 = t0;
+		ev.inizio_apprendimento = t0 + RT_S(attesa_s);
+		ev.fine_apprendimento = ev.inizio_apprendimento + RT_S(impara_s);
+		fprintf(ev.out, "spia: tra %d s imparo per %d s quali byte dei sensori cambiano da soli (non toccare il robot)\n",
+		        attesa_s, impara_s);
+		for (int i = 0; i < n; i++)
+			for (int d = 0; d < 2; d++)
+				decod_init(&dec_ev[i][d], cc[i].info.protocollo);
+	}
 
 	while (!fermati) {
 		for (int i = 0; i < n; i++) {
@@ -402,6 +597,11 @@ static int cmd_proxy(int argc, char **argv)
 				c->blocchi[dir]++;
 				c->persi[dir] += scrivi_tutto(dest, buf, (size_t)k, 20);
 				decod_scrivi(&c->decod[dir], buf, (size_t)k, NULL, NULL, NULL);
+				if (ev.out) {
+					ev.dir = dir;
+					ev.adesso = adesso;
+					decod_scrivi(&dec_ev[i][dir], buf, (size_t)k, ev_gd32, ev_lidar, NULL);
+				}
 			}
 		}
 		if (adesso >= prossimo_flush) {
@@ -418,6 +618,8 @@ static int cmd_proxy(int argc, char **argv)
 fine:
 	for (int i = 0; i < n; i++)
 		chiudi_canale(&cc[i]);
+	if (ev.out)
+		fclose(ev.out);
 	if (fclose(reg)) {
 		fprintf(stderr, "spia: chiudo %s: %s\n", uscita, strerror(errno));
 		esito = 1;
@@ -650,7 +852,7 @@ static void uso(void)
 {
 	fprintf(stderr,
 	        "uso: spia proxy -o <registro> [-c nome,protocollo,dispositivo]... [-p priorità] [-s secondi]\n"
-	        "                [--senza-mount] [--forza]\n"
+	        "                [--eventi <file> [--attesa s] [--impara s] [--istantanea <file>]] [--senza-mount] [--forza]\n"
 	        "       (canali di default: gd32,gd32,/dev/ttyS3 e lidar,lidar,/dev/ttyS1)\n"
 	        "     spia leggi <registro> [-c canale]\n"
 	        "     spia riepilogo <registro> [-c canale]\n"

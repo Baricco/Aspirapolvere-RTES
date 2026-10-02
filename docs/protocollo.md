@@ -133,6 +133,8 @@ robot si sistema sulla base.
 | `0x08` | `01` | conferma di `0x08` (zero dell'IMU) | all'avvio |
 | `0x06` | nessuno | heartbeat del GD32 | **ogni 2,0 s** (spia; con strace sembrava irregolare) |
 | `0xa2` | 1 byte | stato della calibrazione dell'IMU | all'avvio |
+| `0x04` | nessuno | conferma della sospensione | quando il SoC manda `0x04` |
+| `0x05` | nessuno | **risveglio: tasto premuto mentre il robot dorme** | ogni 100 ms finché il SoC non risponde con `0x05` |
 
 ### Frame dei sensori (`0x15`, 96 byte)
 AuxCtrl (`unpacketCRL200SSensorMessage`) azzera una struct `TSensorMessage` da 88 byte e ci copia i primi 88 byte
@@ -141,25 +143,63 @@ campi della batteria (`updateBatterySensor`); il resto lo inoltra a RobotApp sul
 `/tmp/AuxEverest_Sock`. RobotApp non esporta i nomi delle sue funzioni interne: il significato degli altri campi
 va ricavato con le prove sul robot.
 
-Offset in byte dall'inizio dei dati (dopo `cmd`). Valori a robot fermo sulla base.
+Offset in byte dall'inizio dei dati (dopo `cmd`). **[prova]** = verificato con le prove fisiche del 2026-10-02
+(spia + `tools/sensori.py` / `tools/ritmo.py`, registrazione `build/robot/spia/20261002-prove-sensori.spia`).
 
 | Offset | Tipo | Valori visti | Significato |
 |---|---|---|---|
-| 0–1 | 2 byte | `01 00` → `01 06` | [ipotesi] stato/modalità; cambia durante l'avvio |
-| 2–3 | 2 byte | `00 0d` → `00 0f` | [ipotesi] maschera di bit (sensori abilitati?) |
-| 7 | bit | bit0, bit1 | **[codice] bit0 = in carica, bit1 = sulla base / alimentatore collegato** (AuxCtrl considera "sulla base" anche quando bit0 = 1). Visto `0x02` sulla base con la batteria in protezione, `0x01` sulla base in carica (spia, 2026-10-02) |
-| 8 | uint8 | 0x71–0x8c la notte del 2026-10-01 (batteria in protezione che si riprende), **0xa5 = 16,5 V** il 2026-10-02 sera dopo un giorno sulla base | **[codice] tensione della batteria × 10**. [ipotesi] batteria Li-ion 4S: 16,8 V piena, ~12 V scarica |
-| 9 | uint8 | 27–28 | [ipotesi] temperatura della batteria (°C) |
-| 16–19 | int32 | `0x6978`, `0x6954` | [ipotesi] contatore encoder ruota sinistra (costante: robot fermo) |
-| 24–27 | int32 | `0x6978`, `0x6950` | [ipotesi] contatore encoder ruota destra |
-| 44–51 | 4 × int16 | piccoli, attorno a 0 | [ipotesi] IMU (giroscopio/accelerometro): rumore a robot fermo |
-| 56–57 | uint16 | 100 | [ipotesi] percentuale batteria o costante |
-| 58, 60, 62 | 3 × uint16 | 0 | **[codice] tre valori che AuxCtrl moltiplica per 10** e salva insieme alla tensione: [ipotesi] correnti |
-| 64–65 | uint16 | 66–3170, poi 2114 | [ipotesi] segnale IR della base o corrente di carica |
-| 78–85 | 4 × int16 | 0–64 | [ipotesi] sensori di dislivello (cliff) / IR |
-| 88–89 | 2 byte | `03 19` | costante |
-| 90–95 | 3 × int16 | uguali a 94/92/44 | copia di alcuni campi dell'IMU (stessi valori) |
-| altri | | sempre 0 | da scoprire con il robot in movimento (bumper, ruote sollevate, spazzole…) |
+| 0 | uint8 | `01` | [ipotesi] stato/modalità |
+| **1** | bit | `00` libero, `06` sulla base | **[prova] bumper: bit 2 (`0x04`) = microinterruttore sinistro, bit 1 (`0x02`) = destro**, 1 = premuto. Sulla base il robot è spinto contro la base e li tiene premuti tutti e due (`06`). Una pressione al centro può far scattare uno solo dei due |
+| 2 | uint8 | `00` | |
+| **3** | bit | `0f` in aria | **[prova] sensori anti-caduta digitali, 1 = nessun pavimento**: bit 3 (`0x08`) il più a sinistra, bit 2, bit 1, bit 0 (`0x01`) il più a destra (sono 4, sul semicerchio anteriore). RobotApp li usa anche per capire che il robot è sollevato (`m_wheel_up_CliffIR_filter`) |
+| **4** | bit | `04` / `00` | **[prova] bit 2 (`0x04`) = cassetto della polvere presente**. Tolto → RobotApp segnala l'eccezione 6 `EXCEPTION_DUSTBOX_INEXISTENCE` e mette il LED a `08` |
+| **7** | bit | `00`, `01`, `02` | **[codice] [prova] bit 0 = in carica, bit 1 = sulla base / alimentatore collegato** (AuxCtrl considera "sulla base" anche quando bit 0 = 1). `01` sulla base in carica, `00` fuori. Con contatti di carica instabili cambia di continuo |
+| **8** | uint8 | `a2`–`a5` | **[codice] tensione della batteria × 10**: 16,5 V in carica, 16,2–16,4 V fuori dalla base. La notte del 2026-10-01, con la batteria in protezione, era 11,3–14 V. [ipotesi] Li-ion 4S, 16,8 V piena |
+| 9 | uint8 | `1f`–`20` | [ipotesi] temperatura della batteria in °C (31–32) |
+| **16–19** | int32 | `0x6930`… | **[prova] encoder della ruota sinistra** (contatore assoluto: cambia girando la ruota a mano; scende quando la ruota gira all'indietro) |
+| **24–27** | int32 | `0x693c`… | **[prova] encoder della ruota destra** |
+| 40–43 | int32 | varia ruotando il robot | [ipotesi] angolo integrato dal giroscopio (sale mentre il robot ruota, resta fermo dopo) |
+| 44–55 | 6 × int16 | piccoli, rumorosi | [ipotesi] IMU: 44/48 rumore del giroscopio, 46/50 cambiano inclinando il robot (accelerometro) |
+| 56 | uint8 | `64` (100) | [ipotesi] percentuale della batteria; si azzera e risale (00→19→4b→64) al risveglio |
+| **58** | uint8 | 0 → 0a | **[prova] tasto ACCENSIONE: durata della pressione in unità di 10 ms**, torna a 0 al rilascio. [codice] AuxCtrl moltiplica 58, 60 e 62 per 10 |
+| 60 | uint8 | 0 | [ipotesi] tasto "Punto" (`detectDockOrPointButtonPress`): stesso formato, il modello M6 Pro non ce l'ha |
+| **62** | uint8 | 0 → 0a | **[prova] tasto CASA**, stesso formato del 58 |
+| 64 | bit | `42` sulla base, `62` fuori | [ipotesi] bit 5 (`0x20`) = fuori dalla base / nessun segnale della base |
+| **65** | uint8 | `00`, `01`, `04`, `08` | **[prova] stato del LED del tasto: ripete l'ultimo comando `0x8d`** (vedi i codici del LED) |
+| 66 | uint8 | `00`/`02` | cambia all'avvio |
+| 78, 80, 82, 84 | 4 × int16 | 1–4, 0x31–0x41, 0x0c, 2–3 | [ipotesi] valori analogici di 4 sensori IR: NON reagiscono al foglio sotto i sensori anti-caduta. Forse sensori laterali/muro |
+| 88–89 | 2 byte | `03 19` | costante; `89` va a 0 per un attimo al risveglio |
+| 90–95 | 3 × int16 | uguali a 94/92/44 | copia di alcuni campi dell'IMU |
+| altri | | sempre 0 | da scoprire con i motori in funzione (correnti, spazzole, aspirazione) |
+
+**Non esistono** (verificato): un interruttore sulla torretta del lidar e interruttori di "ruota sollevata"
+(spingendo una ruota fino a fine corsa non cambia nessun bit).
+
+### Codici del LED del tasto (`0x8d`, SoC → GD32) [prova]
+
+| Codice | LED | Quando |
+|---|---|---|
+| `00` | spento | prima della sospensione |
+| `01` | azzurro chiaro fisso | fermo, tutto a posto |
+| `04` | giallo | in carica sulla base |
+| `08` | rosso lampeggiante | errore (es. cassetto tolto) |
+
+### Sospensione e risveglio [osservato]
+
+Con `sleep_enable=1` in `/mnt/UDISK/config/device_config.ini` RobotApp addormenta il robot dopo `sleep_time` = 5 minuti
+fermo fuori dalla base (dal 2026-10-02 la sospensione è disattivata: vedi `fase1.md`).
+```
+sospensione  SoC → GD32: 0x8d 00 (LED spento), 0x97 00 (lidar), 0x65 00, 0x68 00 00, 0x69 00, 0x6a 00, 0x6b 00,
+                         0x0c 00, 0x04 (sleep)
+             GD32 → SoC: 0x0c 01, 0x04; poi NESSUN frame dei sensori
+risveglio    GD32 → SoC: 0x05 (alla pressione del tasto; ogni 100 ms finché il SoC non risponde)
+             SoC → GD32: 0x0c 01, 0x08 (zero dell'IMU), 0x05 (conferma), 0x8d 01; poi tornano i sensori
+```
+Il risveglio NON rimanda `0x78 01` (infrarossi anti-caduta), che AuxCtrl manda solo al proprio avvio.
+`0x0c 01` / `0x0c 00` sembra quindi "SoC attivo / SoC in sospensione".
+
+`0x9d` (SoC → GD32, 1 byte): `01` quando il robot perde il contatto di carica, `00` quando torna sulla base.
+[ipotesi] abilita qualcosa legato alla carica o all'uscita dalla base.
 
 ## Lidar 3irobotix LDS3 (`/dev/ttyS1`)
 

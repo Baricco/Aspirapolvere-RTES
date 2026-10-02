@@ -81,7 +81,8 @@ def main():
     g_m, g_s, g_nome = pty_raw()
     l_m, l_s, l_nome = pty_raw()
     reg = tempfile.NamedTemporaryFile(suffix=".spia", delete=False).name
-    spia = subprocess.Popen([SPIA, "proxy", "-o", reg, "--senza-mount", "-p", "0", "-s", "0",
+    extra = os.environ.get("SPIA_ARGS", "").split()
+    spia = subprocess.Popen([SPIA, "proxy", "-o", reg, "--senza-mount", "-p", "0", "-s", "0", *extra,
                              "-c", f"gd32,gd32,{g_nome}", "-c", f"lidar,lidar,{l_nome}"],
                             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     pty_spia = {}

@@ -119,3 +119,26 @@ Problemi incontrati:
 - Lidar: all'avvio dello stack il GD32 lo accende per un attimo e il lidar stampa il testo di avvio (93 byte, nessun
   pacchetto), poi resta spento perché il robot è sulla base.
 - I 52 byte scartati all'inizio sono la coda di un frame già in viaggio quando la spia ha aperto la UART.
+
+## 2026-10-02 — prove fisiche dei sensori (con l'utente)
+
+Metodo: spia inserita con `--eventi` e `--istantanea`; l'utente fa un'azione e la tiene, oppure la ripete 3 volte
+a ritmo; `tools/sensori.py diff` confronta min/max di ogni byte con lo stato di riferimento, `tools/ritmo.py`
+trova i bit che cambiano a ritmo. Registrazione: `build/robot/spia/20261002-prove-sensori.spia` (27 min, 0 errori).
+Risultati nella tabella del frame `0x15` di `protocollo.md`. In sintesi:
+- bumper: byte 1, bit 2 (sinistro) e bit 1 (destro). Sulla base sono premuti tutti e due;
+- anti-caduta: byte 3, bit 3..0 da sinistra a destra, 1 = nessun pavimento;
+- cassetto: byte 4, bit 2; tasti: byte 58 (accensione) e 62 (casa) = durata della pressione in 10 ms;
+- encoder delle ruote: int32 ai byte 16 e 24; LED: byte 65 ripete il comando `0x8d` (00 spento, 01 azzurro,
+  04 giallo in carica, 08 rosso lampeggiante);
+- non ci sono interruttori sulle ruote né sulla torretta del lidar;
+- i byte 78–84 (4 valori analogici) non reagiscono ai sensori anti-caduta: da capire.
+
+Problemi incontrati:
+- primi tentativi sul bumper falliti perché il robot era sulla base, che tiene già premuti i bumper (byte 1 = `06`);
+- **sospensione**: fermo fuori dalla base, dopo 5 minuti RobotApp addormenta il GD32 (sequenza in
+  `protocollo.md`) e i sensori non arrivano più. Il risveglio con il tasto non riaccende gli infrarossi
+  anti-caduta (`0x78 01`): durante la prova del foglio sembravano rotti;
+- con l'OK dell'utente: **`/mnt/UDISK/config/device_config.ini`, `sleep_enable=1` → `0`** (copia in
+  `device_config.ini.orig`; per tornare indietro: ricopiare l'originale e riavviare lo stack);
+- `tools/spia-robot.sh avvia` sovrascriveva la registrazione precedente: ora la rinomina.
