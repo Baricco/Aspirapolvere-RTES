@@ -11,7 +11,8 @@
  *
  * Tutti i numeri sono little-endian (come il SoC e il PC). tempo_ns è CLOCK_MONOTONIC del robot.
  * La direzione è vista dal SoC: VERSO_SOC = dati dalla periferica (GD32, lidar) ai programmi,
- * DAL_SOC = dati dai programmi alla periferica.
+ * DAL_SOC = dati dai programmi alla periferica. Per i canali socket (spia socket): VERSO_SOC = dal server, cioè
+ * chi è in ascolto (AuxCtrl), al client (RobotApp); DAL_SOC = dal client al server.
  */
 #ifndef REGISTRO_H
 #define REGISTRO_H
@@ -27,7 +28,7 @@
 enum { REG_VERSO_SOC = 0, REG_DAL_SOC = 1 };
 
 /* Come interpretare i byte di un canale (per i decodificatori). */
-enum { REG_PROTO_GREZZO = 0, REG_PROTO_GD32 = 1, REG_PROTO_LIDAR = 2 };
+enum { REG_PROTO_GREZZO = 0, REG_PROTO_GD32 = 1, REG_PROTO_LIDAR = 2, REG_PROTO_EVEREST = 3 };
 
 typedef struct {
 	uint8_t id;

@@ -46,7 +46,11 @@
 #include "../gd32/gd32.h"
 #include "../lidar/lidar.h"
 #include "../rt/rt.h"
+#include "everest.h"
 #include "registro.h"
+
+#include <sys/socket.h>
+#include <sys/un.h>
 
 /* ------------------------------------------------------------------------------------------------------ */
 /* Decodifica in tempo reale, solo per le statistiche (il registro contiene comunque i byte grezzi).       */
@@ -55,13 +59,18 @@ typedef struct {
 	uint8_t protocollo;
 	gd32_deframer_t gd32;
 	lidar_deframer_t lidar;
+	everest_deframer_t everest;
 } decod_t;
+
+/* Callback dei messaggi everest: impostata da chi chiama decod_scrivi (NULL = solo contatori). */
+static everest_msg_cb decod_cb_everest;
 
 static void decod_init(decod_t *d, uint8_t protocollo)
 {
 	d->protocollo = protocollo;
 	gd32_deframer_init(&d->gd32);
 	lidar_deframer_init(&d->lidar);
+	everest_deframer_init(&d->everest);
 }
 
 static void decod_scrivi(decod_t *d, const uint8_t *b, size_t n, gd32_frame_cb cg, lidar_pacchetto_cb cl, void *ctx)
@@ -70,6 +79,8 @@ static void decod_scrivi(decod_t *d, const uint8_t *b, size_t n, gd32_frame_cb c
 		gd32_deframer_scrivi(&d->gd32, b, n, cg, ctx);
 	else if (d->protocollo == REG_PROTO_LIDAR)
 		lidar_deframer_scrivi(&d->lidar, b, n, cl, ctx);
+	else if (d->protocollo == REG_PROTO_EVEREST)
+		everest_deframer_scrivi(&d->everest, b, n, (cg || cl) ? decod_cb_everest : NULL, ctx);
 }
 
 static void decod_contatori(const decod_t *d, uint64_t *ok, uint64_t *err, uint64_t *scartati)
@@ -83,6 +94,10 @@ static void decod_contatori(const decod_t *d, uint64_t *ok, uint64_t *err, uint6
 		*ok = d->lidar.pacchetti_ok;
 		*err = d->lidar.checksum_errati + d->lidar.len_errati;
 		*scartati = d->lidar.byte_scartati;
+	} else if (d->protocollo == REG_PROTO_EVEREST) {
+		*ok = d->everest.messaggi_ok;
+		*err = d->everest.testate_errate;
+		*scartati = d->everest.byte_scartati;
 	}
 }
 
@@ -627,6 +642,279 @@ fine:
 	return esito;
 }
 
+
+/* ------------------------------------------------------------------------------------------------------ */
+/* socket: si mette in mezzo su socket Unix (stream e datagrammi)                                         */
+/*
+ * Stream (es. /tmp/AuxEverest_Sock, server = AuxCtrl, client = RobotApp):
+ *   1. rinomina il socket del server in <percorso>.vero: il server continua ad ascoltare lì;
+ *   2. si mette in ascolto su <percorso>; ogni client che arriva viene collegato a <percorso>.vero;
+ *   3. inoltra e registra nelle due direzioni.
+ *   I client già collegati prima NON passano dalla spia: chi la usa deve far ricollegare il client
+ *   (tools/spia-robot.sh termina RobotApp, che Monitor rilancia).
+ * Datagrammi: rinomina il socket di chi riceve in <percorso>.vero, riceve al suo posto e inoltra.
+ * All'uscita rimette tutto com'era (cancella i propri socket e rinomina .vero al nome originale).
+ */
+#define SOCK_MAX_COPPIE 4
+
+typedef struct {
+	reg_canale_t info;
+	int datagrammi;
+	char vero[PATH_MAX];
+	int fd_ascolto;                    /* stream: in ascolto; datagrammi: il socket che riceve */
+	int fd_client[SOCK_MAX_COPPIE];    /* stream: lato client (RobotApp) */
+	int fd_server[SOCK_MAX_COPPIE];    /* stream: lato server (AuxCtrl, su .vero) */
+	int rinominato;
+	uint64_t byte[2], connessioni;
+	decod_t decod[2];
+} sock_t;
+
+static int indirizzo(const char *percorso, struct sockaddr_un *a)
+{
+	memset(a, 0, sizeof(*a));
+	a->sun_family = AF_UNIX;
+	if (strlen(percorso) >= sizeof a->sun_path)
+		return -1;
+	strcpy(a->sun_path, percorso);
+	return 0;
+}
+
+static int apri_sock(sock_t *c)
+{
+	const char *p = c->info.dispositivo;
+	struct sockaddr_un a;
+	struct stat st;
+	for (int i = 0; i < SOCK_MAX_COPPIE; i++)
+		c->fd_client[i] = c->fd_server[i] = -1;
+	c->fd_ascolto = -1;
+	if (stat(p, &st) || !S_ISSOCK(st.st_mode)) {
+		fprintf(stderr, "spia: %s non esiste o non è un socket\n", p);
+		return -1;
+	}
+	snprintf(c->vero, sizeof c->vero, "%s.vero", p);
+	if (rename(p, c->vero)) {
+		fprintf(stderr, "spia: rinomino %s: %s\n", p, strerror(errno));
+		return -1;
+	}
+	c->rinominato = 1;
+	c->fd_ascolto = socket(AF_UNIX, (c->datagrammi ? SOCK_DGRAM : SOCK_STREAM) | SOCK_NONBLOCK, 0);
+	if (c->fd_ascolto < 0 || indirizzo(p, &a) || bind(c->fd_ascolto, (struct sockaddr *)&a, sizeof a) ||
+	    (!c->datagrammi && listen(c->fd_ascolto, 8))) {
+		fprintf(stderr, "spia: socket su %s: %s\n", p, strerror(errno));
+		return -1;
+	}
+	chmod(p, st.st_mode & 07777);
+	decod_init(&c->decod[0], c->info.protocollo);
+	decod_init(&c->decod[1], c->info.protocollo);
+	return 0;
+}
+
+static void chiudi_coppia(sock_t *c, int i)
+{
+	if (c->fd_client[i] >= 0) close(c->fd_client[i]);
+	if (c->fd_server[i] >= 0) close(c->fd_server[i]);
+	c->fd_client[i] = c->fd_server[i] = -1;
+}
+
+static void chiudi_sock(sock_t *c)
+{
+	for (int i = 0; i < SOCK_MAX_COPPIE; i++)
+		chiudi_coppia(c, i);
+	if (c->fd_ascolto >= 0)
+		close(c->fd_ascolto);
+	c->fd_ascolto = -1;
+	if (c->rinominato) {
+		unlink(c->info.dispositivo);
+		if (rename(c->vero, c->info.dispositivo))
+			fprintf(stderr, "spia: ATTENZIONE, non riesco a rimettere %s: %s\n", c->info.dispositivo, strerror(errno));
+	}
+	c->rinominato = 0;
+}
+
+static void accetta(sock_t *c, int64_t adesso, FILE *reg)
+{
+	int fc = accept4(c->fd_ascolto, NULL, NULL, SOCK_NONBLOCK);
+	if (fc < 0)
+		return;
+	struct sockaddr_un a;
+	int fs = socket(AF_UNIX, SOCK_STREAM, 0);
+	if (fs < 0 || indirizzo(c->vero, &a) || connect(fs, (struct sockaddr *)&a, sizeof a)) {
+		fprintf(stderr, "spia: %s: collegamento al server %s fallito: %s\n", c->info.nome, c->vero, strerror(errno));
+		close(fc);
+		if (fs >= 0) close(fs);
+		return;
+	}
+	fcntl(fs, F_SETFL, fcntl(fs, F_GETFL) | O_NONBLOCK);
+	int i = 0;
+	while (i < SOCK_MAX_COPPIE && c->fd_client[i] >= 0)
+		i++;
+	if (i == SOCK_MAX_COPPIE) {
+		fprintf(stderr, "spia: %s: troppi client\n", c->info.nome);
+		close(fc);
+		close(fs);
+		return;
+	}
+	c->fd_client[i] = fc;
+	c->fd_server[i] = fs;
+	c->connessioni++;
+	/* un record vuoto segna l'inizio di una nuova connessione (i deframer ripartono da capo) */
+	reg_scrivi_record(reg, adesso, c->info.id, REG_DAL_SOC, NULL, 0);
+	decod_init(&c->decod[0], c->info.protocollo);
+	decod_init(&c->decod[1], c->info.protocollo);
+	fprintf(stderr, "spia: %s: nuovo client collegato (coppia %d)\n", c->info.nome, i);
+}
+
+static int cmd_socket(int argc, char **argv)
+{
+	const char *uscita = NULL;
+	int ogni_s = 10, n = 0;
+	static sock_t cc[REG_MAX_CANALI];
+	static const struct option opz[] = {
+		{ "uscita", required_argument, 0, 'o' }, { "stream", required_argument, 0, 'S' },
+		{ "dgram", required_argument, 0, 'D' }, { "stato", required_argument, 0, 's' }, { 0, 0, 0, 0 },
+	};
+	int o;
+	while ((o = getopt_long(argc, argv, "o:s:", opz, NULL)) != -1) {
+		switch (o) {
+		case 'o': uscita = optarg; break;
+		case 's': ogni_s = atoi(optarg); break;
+		case 'S':
+		case 'D':
+			if (n == REG_MAX_CANALI || analizza_canale(optarg, &cc[n].info, (uint8_t)n)) {
+				fprintf(stderr, "spia: canale non valido: %s (formato nome,everest|grezzo,percorso)\n", optarg);
+				return 2;
+			}
+			cc[n].datagrammi = o == 'D';
+			n++;
+			break;
+		default: return 2;
+		}
+	}
+	if (!uscita || n == 0) {
+		fprintf(stderr, "uso: spia socket -o <registro> --stream nome,proto,percorso [--dgram nome,proto,percorso]...\n");
+		return 2;
+	}
+	FILE *reg = fopen(uscita, "wb");
+	if (!reg) {
+		fprintf(stderr, "spia: apro %s: %s\n", uscita, strerror(errno));
+		return 1;
+	}
+	reg_intestazione_t h = { .n_canali = (uint8_t)n };
+	for (int i = 0; i < n; i++)
+		h.canali[i] = cc[i].info;
+	reg_scrivi_intestazione(reg, &h);
+
+	struct sigaction sa = { .sa_handler = al_segnale };
+	sigaction(SIGINT, &sa, NULL);
+	sigaction(SIGTERM, &sa, NULL);
+	sigaction(SIGHUP, &sa, NULL);
+	signal(SIGPIPE, SIG_IGN);
+
+	int esito = 0;
+	for (int i = 0; i < n; i++) {
+		if (apri_sock(&cc[i])) {
+			esito = 1;
+			goto fine;
+		}
+		printf("canale %s (%s): %s <-> %s\n", cc[i].info.nome, cc[i].datagrammi ? "datagrammi" : "stream",
+		       cc[i].info.dispositivo, cc[i].vero);
+	}
+	fflush(stdout);
+
+	static uint8_t buf[REG_MAX_BLOCCO];
+	int64_t t0 = rt_adesso(), prossimo_stato = t0 + RT_S(ogni_s), prossimo_flush = t0 + RT_S(1);
+	while (!fermati) {
+		struct pollfd pf[REG_MAX_CANALI * (1 + 2 * SOCK_MAX_COPPIE)];
+		int quale[REG_MAX_CANALI * (1 + 2 * SOCK_MAX_COPPIE)][2];   /* canale, ruolo: -1 ascolto, 2i client, 2i+1 server */
+		int np = 0;
+		for (int i = 0; i < n; i++) {
+			pf[np] = (struct pollfd){ .fd = cc[i].fd_ascolto, .events = POLLIN };
+			quale[np][0] = i; quale[np++][1] = -1;
+			for (int k = 0; k < SOCK_MAX_COPPIE; k++) {
+				if (cc[i].fd_client[k] < 0)
+					continue;
+				pf[np] = (struct pollfd){ .fd = cc[i].fd_client[k], .events = POLLIN };
+				quale[np][0] = i; quale[np++][1] = 2 * k;
+				pf[np] = (struct pollfd){ .fd = cc[i].fd_server[k], .events = POLLIN };
+				quale[np][0] = i; quale[np++][1] = 2 * k + 1;
+			}
+		}
+		int r = poll(pf, (nfds_t)np, 200);
+		if (r < 0 && errno != EINTR) {
+			perror("spia: poll");
+			esito = 1;
+			break;
+		}
+		int64_t adesso = rt_adesso();
+		for (int j = 0; j < np && r > 0; j++) {
+			if (!(pf[j].revents & (POLLIN | POLLHUP | POLLERR)))
+				continue;
+			sock_t *c = &cc[quale[j][0]];
+			int ruolo = quale[j][1];
+			if (ruolo < 0 && c->datagrammi) {
+				ssize_t k = recv(c->fd_ascolto, buf, sizeof buf, 0);
+				if (k < 0)
+					continue;
+				struct sockaddr_un a;
+				indirizzo(c->vero, &a);
+				sendto(c->fd_ascolto, buf, (size_t)k, MSG_DONTWAIT, (struct sockaddr *)&a, sizeof a);
+				reg_scrivi_record(reg, adesso, c->info.id, REG_VERSO_SOC, buf, (uint16_t)k);
+				c->byte[0] += (uint64_t)k;
+				decod_scrivi(&c->decod[0], buf, (size_t)k, NULL, NULL, NULL);
+				continue;
+			}
+			if (ruolo < 0) {
+				accetta(c, adesso, reg);
+				continue;
+			}
+			int coppia = ruolo / 2, dal_client = ruolo % 2 == 0;
+			int da = dal_client ? c->fd_client[coppia] : c->fd_server[coppia];
+			int a_fd = dal_client ? c->fd_server[coppia] : c->fd_client[coppia];
+			if (da < 0)
+				continue;
+			ssize_t k = read(da, buf, sizeof buf);
+			if (k == 0 || (k < 0 && errno != EAGAIN && errno != EINTR)) {
+				fprintf(stderr, "spia: %s: il %s ha chiuso la connessione (coppia %d)\n", c->info.nome,
+				        dal_client ? "client" : "server", coppia);
+				chiudi_coppia(c, coppia);
+				continue;
+			}
+			if (k < 0)
+				continue;
+			int dir = dal_client ? REG_DAL_SOC : REG_VERSO_SOC;
+			reg_scrivi_record(reg, adesso, c->info.id, (uint8_t)dir, buf, (uint16_t)k);
+			c->byte[dir] += (uint64_t)k;
+			decod_scrivi(&c->decod[dir], buf, (size_t)k, NULL, NULL, NULL);
+			if (scrivi_tutto(a_fd, buf, (size_t)k, 1000))
+				fprintf(stderr, "spia: %s: byte persi inoltrando (coppia %d)\n", c->info.nome, coppia);
+		}
+		if (adesso >= prossimo_flush) {
+			fflush(reg);
+			prossimo_flush = adesso + RT_S(1);
+		}
+		if (ogni_s > 0 && adesso >= prossimo_stato) {
+			fprintf(stderr, "[%7.1f s]", (double)(adesso - t0) / RT_NS_PER_S);
+			for (int i = 0; i < n; i++) {
+				uint64_t ok0, e0, s0, ok1, e1, s1;
+				decod_contatori(&cc[i].decod[0], &ok0, &e0, &s0);
+				decod_contatori(&cc[i].decod[1], &ok1, &e1, &s1);
+				fprintf(stderr, "  %s: %llu conn, server->client %llu B %llu msg, client->server %llu B %llu msg",
+				        cc[i].info.nome, (unsigned long long)cc[i].connessioni,
+				        (unsigned long long)cc[i].byte[0], (unsigned long long)ok0,
+				        (unsigned long long)cc[i].byte[1], (unsigned long long)ok1);
+			}
+			fputc('\n', stderr);
+			prossimo_stato = adesso + RT_S(ogni_s);
+		}
+	}
+fine:
+	for (int i = 0; i < n; i++)
+		chiudi_sock(&cc[i]);
+	if (fclose(reg))
+		esito = 1;
+	return esito;
+}
+
 /* ------------------------------------------------------------------------------------------------------ */
 /* leggi / riepilogo                                                                                      */
 
@@ -665,6 +953,14 @@ static void leggi_lidar(const lidar_pacchetto_t *p, void *ctx)
 	stampa_testa(x);
 	fprintf(x->out, "0x%02x %s %u ", p->cmd, nome ? nome : "?", p->n_param);
 	stampa_hex(x->out, p->param, p->n_param);
+}
+
+static void leggi_everest(const everest_msg_t *m, void *ctx)
+{
+	const ctx_leggi_t *x = ctx;
+	stampa_testa(x);
+	fprintf(x->out, "cmd %d len %d c12 %d t %llu: ", m->comando, m->lunghezza, m->campo12, (unsigned long long)m->tempo);
+	stampa_hex(x->out, m->dati, m->n_dati < 256 ? m->n_dati : 256);
 }
 
 /* Statistiche per (canale, direzione, cmd). */
@@ -710,6 +1006,40 @@ static void riep_lidar(const lidar_pacchetto_t *p, void *ctx)
 	conta_cmd(r->canale, r->direzione, p->cmd, p->n_param, r->tempo_ns);
 }
 
+/* I comandi everest sono int32: si tengono in una tabella a parte. */
+#define EV_MAX_CMD 1024
+static struct { uint8_t can, dir; int32_t cmd; stat_cmd_t s; } stat_everest[EV_MAX_CMD];
+static int n_stat_everest;
+
+static void riep_everest(const everest_msg_t *m, void *ctx)
+{
+	const reg_record_t *r = ((ctx_riep_t *)ctx)->rec;
+	int i = 0;
+	while (i < n_stat_everest && !(stat_everest[i].can == r->canale && stat_everest[i].dir == r->direzione &&
+	                                stat_everest[i].cmd == m->comando))
+		i++;
+	if (i == n_stat_everest) {
+		if (n_stat_everest == EV_MAX_CMD)
+			return;
+		stat_everest[n_stat_everest++] = (typeof(stat_everest[0])){ r->canale, r->direzione, m->comando, { 0 } };
+	}
+	stat_cmd_t *s = &stat_everest[i].s;
+	unsigned len = (unsigned)m->lunghezza;
+	if (s->n == 0) {
+		s->len_min = s->len_max = len;
+		s->primo = r->tempo_ns;
+		s->dt_min = INT64_MAX;
+	} else {
+		int64_t dt = r->tempo_ns - s->ultimo;
+		if (dt < s->dt_min) s->dt_min = dt;
+		if (dt > s->dt_max) s->dt_max = dt;
+		if (len < s->len_min) s->len_min = len;
+		if (len > s->len_max) s->len_max = len;
+	}
+	s->ultimo = r->tempo_ns;
+	s->n++;
+}
+
 static int cmd_leggi(int argc, char **argv, int riepilogo)
 {
 	const char *solo = NULL;
@@ -751,6 +1081,14 @@ static int cmd_leggi(int argc, char **argv, int riepilogo)
 		if (t_primo < 0) t_primo = r.tempo_ns;
 		t_ultimo = r.tempo_ns;
 		byte[r.canale][r.direzione] += r.n;
+		if (r.n == 0 && c->protocollo == REG_PROTO_EVEREST) {   /* nuova connessione: i deframer ripartono */
+			decod_init(&dec[r.canale][0], c->protocollo);
+			decod_init(&dec[r.canale][1], c->protocollo);
+			if (!riepilogo)
+				printf("%.6f %s --- nuova connessione ---\n", (double)r.tempo_ns / RT_NS_PER_S, c->nome);
+			continue;
+		}
+		decod_cb_everest = riepilogo ? riep_everest : leggi_everest;
 		if (riepilogo) {
 			ctx_riep_t x = { &r };
 			decod_scrivi(&dec[r.canale][r.direzione], r.dati, r.n, riep_gd32, riep_lidar, &x);
@@ -780,10 +1118,27 @@ static int cmd_leggi(int argc, char **argv, int riepilogo)
 				decod_contatori(&dec[i][d], &ok, &err, &sc);
 				printf("\n== %s (%s, %s) %s: %llu byte, %llu frame, %llu errori, %llu byte scartati\n",
 				       c->nome, c->dispositivo, reg_nome_protocollo(c->protocollo),
-				       d == REG_VERSO_SOC ? "periferica -> SoC" : "SoC -> periferica",
+				       strncmp(c->dispositivo, "/dev/", 5) == 0
+				               ? (d == REG_VERSO_SOC ? "periferica -> SoC" : "SoC -> periferica")
+				               : (d == REG_VERSO_SOC ? "server -> client" : "client -> server"),
 				       (unsigned long long)byte[i][d], (unsigned long long)ok, (unsigned long long)err,
 				       (unsigned long long)sc);
 				int titolo = 0;
+				if (c->protocollo == REG_PROTO_EVEREST) {
+					for (int k = 0; k < n_stat_everest; k++) {
+						if (stat_everest[k].can != i || stat_everest[k].dir != d)
+							continue;
+						stat_cmd_t *s = &stat_everest[k].s;
+						if (!titolo++)
+							printf("  cmd          messaggi   dati(byte)     periodo medio/min/max (ms)\n");
+						printf("  %-10d %10llu   %5u-%-5u", stat_everest[k].cmd, (unsigned long long)s->n, s->len_min, s->len_max);
+						if (s->n > 1)
+							printf("  %9.1f %9.1f %9.1f", (double)(s->ultimo - s->primo) / (double)(s->n - 1) / 1e6,
+							       (double)s->dt_min / 1e6, (double)s->dt_max / 1e6);
+						putchar('\n');
+					}
+					continue;
+				}
 				for (int k = 0; k < 256; k++) {
 					stat_cmd_t *s = &statistiche[i][d][k];
 					if (!s->n)
@@ -854,6 +1209,7 @@ static void uso(void)
 	        "uso: spia proxy -o <registro> [-c nome,protocollo,dispositivo]... [-p priorità] [-s secondi]\n"
 	        "                [--eventi <file> [--attesa s] [--impara s] [--istantanea <file>]] [--senza-mount] [--forza]\n"
 	        "       (canali di default: gd32,gd32,/dev/ttyS3 e lidar,lidar,/dev/ttyS1)\n"
+	        "     spia socket -o <registro> --stream nome,everest|grezzo,percorso [--dgram nome,proto,percorso]...\n"
 	        "     spia leggi <registro> [-c canale]\n"
 	        "     spia riepilogo <registro> [-c canale]\n"
 	        "     spia termios <dispositivo>...\n");
@@ -869,6 +1225,7 @@ int main(int argc, char **argv)
 	argv++;
 	argc--;
 	if (!strcmp(cmd, "proxy"))     return cmd_proxy(argc, argv);
+	if (!strcmp(cmd, "socket"))    return cmd_socket(argc, argv);
 	if (!strcmp(cmd, "leggi"))     return cmd_leggi(argc, argv, 0);
 	if (!strcmp(cmd, "riepilogo")) return cmd_leggi(argc, argv, 1);
 	if (!strcmp(cmd, "termios"))   return cmd_termios(argc, argv);

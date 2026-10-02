@@ -96,6 +96,7 @@ const char *reg_nome_protocollo(uint8_t p)
 	switch (p) {
 	case REG_PROTO_GD32:  return "gd32";
 	case REG_PROTO_LIDAR: return "lidar";
+	case REG_PROTO_EVEREST: return "everest";
 	default:              return "grezzo";
 	}
 }
@@ -104,6 +105,7 @@ int reg_protocollo_da_nome(const char *s)
 {
 	if (!strcmp(s, "gd32"))   return REG_PROTO_GD32;
 	if (!strcmp(s, "lidar"))  return REG_PROTO_LIDAR;
+	if (!strcmp(s, "everest")) return REG_PROTO_EVEREST;
 	if (!strcmp(s, "grezzo")) return REG_PROTO_GREZZO;
 	return -1;
 }

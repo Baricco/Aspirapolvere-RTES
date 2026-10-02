@@ -142,3 +142,17 @@ Problemi incontrati:
 - con l'OK dell'utente: **`/mnt/UDISK/config/device_config.ini`, `sleep_enable=1` → `0`** (copia in
   `device_config.ini.orig`; per tornare indietro: ricopiare l'originale e riavviare lo stack);
 - `tools/spia-robot.sh avvia` sovrascriveva la registrazione precedente: ora la rinomina.
+
+## 2026-10-02 — canale tra AuxCtrl e RobotApp
+
+- Nuovo comando `spia socket` (stream e datagrammi): rinomina il socket del server in `.vero`, si mette in ascolto al
+  suo posto e collega ogni client al server; all'uscita rimette tutto com'era. Decodificatore `spia/everest.c`.
+  Prova sul PC `tools/prova-spia-socket.py` (dentro `./rtes.sh test`). Sul robot: `tools/spia-robot.sh socket`,
+  con la logica in `tools/robot-spia-socket.sh`.
+- Primo tentativo: terminato RobotApp perché si ricollegasse attraverso la spia. Non si è ricollegato: **il client di
+  `/tmp/AuxEverest_Sock` è everest-server**, non RobotApp (il percorso compare solo in AuxCtrl ed everest-server).
+  Terminato everest-server, Monitor lo ha rilanciato e si è collegato attraverso la spia in 9 s. Lo script ora
+  termina everest-server.
+- Risultato (sezione nuova in `protocollo.md`): il comando 600 trasporta i frame del GD32 così come sono, e **è
+  RobotApp a guidare il protocollo del GD32**; AuxCtrl inoltra e gestisce batteria, lidar e audio. Altri comandi
+  (602, 603, 605, 606, 607) per stato, lidar e sospensione, decodificati dai nomi delle variabili globali di AuxCtrl.

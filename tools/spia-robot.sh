@@ -9,6 +9,14 @@
 #   tools/spia-robot.sh ferma      ferma lo stack, ferma la spia (che smonta i bind mount), riavvia lo stack
 #   tools/spia-robot.sh scarica [dest]   copia il registro sul PC (default build/robot/spia/<data>.spia)
 #
+#   tools/spia-robot.sh socket     intercetta anche i socket tra AuxCtrl e RobotApp (spia socket):
+#                                  /tmp/AuxEverest_Sock (stream) e /tmp/UDP_AUXCTRL_SEND_PATH (datagrammi).
+#                                  Termina SOLO everest-server (il client), che Monitor rilancia e che si ricollega attraverso la
+#                                  spia; AuxCtrl e il GD32 non si fermano mai. Registro: /tmp/rtes/socket.reg
+#   tools/spia-robot.sh socket-stato     byte e messaggi visti sui socket
+#   tools/spia-robot.sh socket-ferma     toglie la spia dai socket e riavvia lo stack
+#   tools/spia-robot.sh socket-scarica [dest]   copia sul PC il registro dei socket
+#
 # Lo stack originale resta fermo solo per qualche secondo: il GD32 resetta il robot dopo ~4 minuti senza
 # heartbeat, quindi non c'è rischio. Se la spia si chiudesse male lasciando /dev/ttyS3 montato, AuxCtrl
 # parlerebbe con una pty senza nessuno dall'altra parte: il GD32 resetterebbe il robot e il riavvio
@@ -52,5 +60,20 @@ case "${1:-}" in
     mkdir -p "$(dirname "$dest")"
     robot "cat $REG" > "$dest"
     echo "salvato $dest ($(stat -c %s "$dest") byte)" ;;
-  *) sed -n '2,15p' "$0"; exit 2 ;;
+  socket)
+    make -C "$DIR" --no-print-directory build/arm/spia
+    robot "mkdir -p $D && cat > $D/.spia && chmod +x $D/.spia && mv $D/.spia $D/spia" < "$DIR/build/arm/spia"
+    robot "cat > $D/spia-socket.sh" < "$DIR/tools/robot-spia-socket.sh"
+    robot "sh $D/spia-socket.sh avvia" ;;
+  socket-stato)
+    robot "sh $D/spia-socket.sh stato" ;;
+  socket-ferma)
+    robot "sh $D/spia-socket.sh ferma" ;;
+  socket-scarica)
+    dest=${2:-$DIR/build/robot/spia/socket-$(date +%Y%m%d-%H%M%S)}
+    mkdir -p "$(dirname "$dest")"
+    robot "cat $D/socket.reg" > "$dest.spia"
+    robot "cat $D/socket-udp.reg" > "$dest-udp.spia"
+    echo "salvati $dest.spia ($(stat -c %s "$dest.spia") byte) e $dest-udp.spia ($(stat -c %s "$dest-udp.spia") byte)" ;;
+  *) sed -n '2,24p' "$0"; exit 2 ;;
 esac

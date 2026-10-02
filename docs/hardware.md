@@ -10,7 +10,7 @@ viene: [robot] = letto sul robot acceso, [disass.] = dal disassemblato di AuxCtr
 ```
                          SoC Allwinner A33 (Linux)
  ┌───────────────────────────────────────────────────────────────────────────┐
- │ RobotApp ── /tmp/AuxEverest_Sock ── AuxCtrl ── /dev/ttyS3 ──┐            │
+ │ RobotApp ─ everest-server ─ AuxEverest_Sock ─ AuxCtrl ─ ttyS3 ─┐         │
  │    │  │                              │    └─── /dev/ttyS1 ──┼──┐         │
  │    │  └ tinyplayer/amixer ─ codec audio ─ altoparlante      │  │         │
  │    │       (amplificatore: GPIO 233)                         │  │         │
@@ -48,8 +48,8 @@ viene: [robot] = letto sul robot acceso, [disass.] = dal disassemblato di AuxCtr
 
 | Canale | Chi | Uso |
 |---|---|---|
-| `/tmp/AuxEverest_Sock` (Unix) | AuxCtrl ↔ RobotApp | sensori e comandi già interpretati: utile per dare un nome ai campi dei frame |
-| `/tmp/everest_sock` | RobotApp ↔ everest-server | |
+| `/tmp/AuxEverest_Sock` (Unix) | AuxCtrl (server) ↔ **everest-server** (client) | frame del GD32 inoltrati così come sono (comando 600), scansioni del lidar (605), stato: vedi `protocollo.md` |
+| `/tmp/everest_sock` | RobotApp (server) ↔ everest-server (client) | everest-server smista i messaggi tra AuxCtrl e RobotApp |
 | `/tmp/UDP_*_PATH`, `/tmp/cliManager.sock` | RobotApp, wifiManager, aggiornamenti | |
 | TCP 0.0.0.0:6000 | everest-server in ascolto | |
 | TCP verso 43.158.121.228:9090 | RobotApp | **cloud del produttore**, connessione stabile |
@@ -60,5 +60,6 @@ viene: [robot] = letto sul robot acceso, [disass.] = dal disassemblato di AuxCtr
 
 1. `/dev/ttyS3` (GD32), in entrambe le direzioni: motori, sensori, carica, motore del lidar, tasti, LED.
 2. `/dev/ttyS1` (lidar), in entrambe le direzioni.
-3. `/tmp/AuxEverest_Sock`: non è hardware, ma dice come RobotApp interpreta ogni frame. Serve a dare un nome ai campi.
+3. `/tmp/AuxEverest_Sock`: fatto con `spia socket` (2026-10-02). Contiene gli stessi frame della seriale più lo stato e le
+   scansioni del lidar già elaborate.
 4. Audio e GPIO 233: non hanno un protocollo. Basta sapere quali comandi esegue RobotApp (`tinyplayer`, `amixer`).

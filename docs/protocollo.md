@@ -245,6 +245,46 @@ Poi manda solo pacchetti binari. Il primo è la versione: `...LDS3_NOR_180504153
 Il contenuto dei pacchetti di scansione (angoli, distanze, intensità) va ricavato dalle funzioni `unpacket*` e
 verificato con il lidar in rotazione (robot fuori dalla base).
 
+## Canale AuxCtrl ↔ everest-server ↔ RobotApp (`/tmp/AuxEverest_Sock`)
+
+Catturato il 2026-10-02 con `spia socket` (`tools/spia-robot.sh socket`; registro
+`build/robot/spia/20261002-socket.spia`, 129 s, 0 errori). Implementato in `spia/everest.h`.
+
+**Chi parla con chi** [robot] [codice]. Il percorso `/tmp/AuxEverest_Sock` compare solo in AuxCtrl (server, in
+ascolto) e in **everest-server** (client), non in RobotApp. everest-server fa da smistatore: è anche client di
+`/tmp/everest_sock`, su cui RobotApp è in ascolto, ed è in ascolto su TCP 0.0.0.0:6000.
+```
+GD32 ⇄ /dev/ttyS3 ⇄ AuxCtrl ⇄ /tmp/AuxEverest_Sock ⇄ everest-server ⇄ /tmp/everest_sock ⇄ RobotApp
+lidar → /dev/ttyS1 → AuxCtrl (elabora le scansioni) ──────────── 605 ─────────────────────→ RobotApp
+```
+C'è anche un canale a datagrammi diretto, `/tmp/UDP_AUXCTRL_SEND_PATH` (creato da RobotApp) e
+`/tmp/UDP_AUXCTRL_RECV_PATH`: in 2 minuti a robot fermo non è passato nulla.
+
+**Formato** (`CMsgServer::Send`, `CommonClient::SendLocalData`): intestazione da 32 byte little-endian
+`magia 0x5867a9b0 | int32 comando | int32 lunghezza | int32 ? | uint64 tempo | 8 byte senza significato`, poi i dati.
+
+**Comandi** (`recvCallback` in AuxCtrl, salto su `comando - 600`; il significato viene dai nomi delle variabili
+globali che ogni ramo modifica e dai messaggi di log):
+
+| Comando | Direzione | Dati | Significato |
+|---|---|---|---|
+| **600** | entrambe | un frame GD32 intero (`FA FB ...`) | **inoltro dei frame del GD32**: ogni 20 ms in entrambe le direzioni |
+| 602 | RobotApp → AuxCtrl | vuoto | richiesta di stato (`g_receive_status_request`); 10 volte ogni 100 ms dopo la connessione |
+| 602 | AuxCtrl → RobotApp | 2 × int32 | stato: `lidar_status_flag`, `stm32_status_flag` (`01 .. 01 ..` = tutti e due a posto); lo manda `main` |
+| 603 | RobotApp → AuxCtrl | int32 | alimentazione del lidar (`g_lidar_power_flag`, log "lidar power is %d") |
+| 605 | AuxCtrl → RobotApp | | scansioni del lidar elaborate da AuxCtrl (`getLidarData`); assenti con il lidar spento |
+| 606 | entrambe | int32 | controllo del lidar (`g_lidar_control`, log "Aux lidar control %d"); AuxCtrl lo manda da `main` in un certo stato |
+| 607 | RobotApp → AuxCtrl | int32 | stato di sospensione (`g_sleep_mode`, log "Sleep state %d") |
+| 601, 604 | | | non gestiti |
+
+**Conseguenza importante.** Il protocollo del GD32 lo guida **RobotApp**, non AuxCtrl: heartbeat `0x06`, velocità
+`0x66`, LED `0x8d`, sequenza di avvio (`0x07`, `0x17`, `0x18`, `0x19`, `0x78`, ...) arrivano tutti da RobotApp
+dentro messaggi 600, e AuxCtrl li scrive sulla seriale. Quando everest-server si ricollega, RobotApp rifà da capo la
+sequenza di avvio del GD32. AuxCtrl si occupa di: seriale e inoltro, batteria (`updateBatterySensor`), lidar
+(lettura, parsing, motore), audio e comandi di fabbrica. Domanda aperta: con AuxCtrl da solo (senza RobotApp) il
+robot non si resettava (fase 0), quindi probabilmente AuxCtrl manda un heartbeat suo quando non ha client: da
+verificare con la spia sulla seriale.
+
 ## Sequenza di avvio [osservato]
 
 Dalla cattura `cattura-ricarica`, quando AuxCtrl si avvia. I tempi sono quelli delle richieste; le risposte del

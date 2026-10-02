@@ -32,8 +32,8 @@ PROGRAMMI = latenza carico
 STRUMENTI = spia
 TEST      = test_rt_tempo test_rt_task test_gd32 test_lidar test_registro
 
-SPIA_SRC = spia/spia.c spia/registro.c
-SPIA_HDR = spia/registro.h
+SPIA_SRC = spia/spia.c spia/registro.c spia/everest.c
+SPIA_HDR = spia/registro.h spia/everest.h
 
 .PHONY: all host arm test test-arm clean
 
@@ -69,10 +69,11 @@ build/arm/test_%: test/test_%.c $(RT_SRC) $(RT_HDR) $(PROTO_SRC) $(PROTO_HDR) $(
 	$(CC_ARM) $(CFLAGS_ARM) -o $@ $< $(RT_SRC) $(PROTO_SRC) spia/registro.c $(LDFLAGS_ARM)
 
 # Esegue tutti i test sul PC.
-# Poi la prova completa della spia con periferiche finte (tools/prova-spia.py, ~2 s).
+# Poi le prove complete della spia con periferiche e socket finti (tools/prova-spia*.py, ~3 s).
 test: $(addprefix build/host/,$(TEST)) build/host/spia
 	@set -e; for t in $(addprefix build/host/,$(TEST)); do echo "== $$t"; ./$$t; done
 	@echo "== tools/prova-spia.py"; python3 tools/prova-spia.py build/host/spia 2 | tail -1
+	@echo "== tools/prova-spia-socket.py"; python3 tools/prova-spia-socket.py build/host/spia | tail -1
 
 # Esegue i test compilati per ARM sul PC tramite l'emulatore qemu-arm-static.
 # Verifica che il binario del robot funzioni, ma i tempi non sono significativi.
