@@ -53,14 +53,21 @@ Obiettivo: un nostro programma C con task real-time, che gira sul SoC del robot 
    `tools/disassembla.sh`). Noti: formato del frame e checksum, nomi e codici di 24 comandi, heartbeat `0x06`
    ogni 200 ms, velocità `0x66` ogni 20 ms (con conversione in tick), sequenza di avvio, campi della batteria
    nel frame dei sensori `0x15`. Mancano le prove sul robot per gli altri campi dei sensori, e il lidar.
-   Prima delle prove: la fase trasversale "accesso comodo".*
+   Prima delle prove: la fase trasversale "accesso comodo". Piano dettagliato in `docs/fase1-piano.md`.*
 2. **Driver minimo:** il nostro programma al posto di AuxCtrl, con heartbeat e lettura dei sensori. Nessun reset in 10 minuti.
 3. **Attuazione:** ruote, spazzole, aspirazione, con il robot sollevato.
 4. **Architettura RT:** task, partizionamento sui core, misure di WCET e jitter, analisi di schedulabilità.
 5. **Comportamento** (evitamento ostacoli, segui-muro), poi installazione persistente e relazione.
 
-Fasi trasversali: simulatore (dalla fase 0, poi a livello di protocollo dopo la fase 1) e accesso comodo
-(Wi-Fi di casa persistente, avvio automatico di AuxCtrl, SSH solo con chiave).
+Fasi trasversali: simulatore (dalla fase 0, poi a livello di protocollo dopo la fase 1) e accesso comodo.
+*Accesso comodo fatto il 2026-10-02 (`docs/fase1.md`): Wi-Fi di casa salvato, stack originale all'avvio (provvisorio,
+finché la batteria non la gestiamo noi), IP trovato dal MAC. "SSH solo con chiave" è rimandato: si valuta a fine
+progetto, per l'installazione definitiva.*
+
+**Obiettivo esteso (2026-10-02):** il nostro software deve usare **tutto** l'hardware del robot, non solo il
+minimo per funzionare. Per questo la fase 1 produce una mappa completa dei componenti (GD32 con motori, sensori e
+carica, lidar, audio, LED, tasti, e tutto quello che troveremo) e del protocollo di ciascuno, e la spia intercetta
+tutti i canali, non solo `/dev/ttyS3`.
 
 ## Bozza dei task
 | Task | Tipo | Periodo/deadline | Criticità |
