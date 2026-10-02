@@ -141,8 +141,8 @@ robot si sistema sulla base.
 ### Frame dei sensori (`0x15`, 96 byte)
 AuxCtrl (`unpacketCRL200SSensorMessage`) azzera una struct `TSensorMessage` da 88 byte e ci copia i primi 88 byte
 dei dati così come sono [codice]. Gli ultimi 8 servono probabilmente alla variante CRL-300. AuxCtrl usa solo i
-campi della batteria (`updateBatterySensor`); il resto lo inoltra a RobotApp sul socket
-`/tmp/AuxEverest_Sock`. RobotApp non esporta i nomi delle sue funzioni interne: il significato degli altri campi
+campi della batteria (`updateBatterySensor`); il frame intero lo inoltra a everest-server sul socket
+`/tmp/AuxEverest_Sock`. everest-server non esporta i nomi delle sue funzioni interne: il significato degli altri campi
 va ricavato con le prove sul robot.
 
 Offset in byte dall'inizio dei dati (dopo `cmd`). **[prova]** = verificato con le prove fisiche del 2026-10-02
@@ -154,7 +154,7 @@ Offset in byte dall'inizio dei dati (dopo `cmd`). **[prova]** = verificato con l
 | **1** | bit | `00` libero, `06` sulla base | **[prova] bumper: bit 2 (`0x04`) = microinterruttore sinistro, bit 1 (`0x02`) = destro**, 1 = premuto. Sulla base il robot è spinto contro la base e li tiene premuti tutti e due (`06`). Una pressione al centro può far scattare uno solo dei due |
 | 2 | uint8 | `00` | |
 | **3** | bit | `0f` in aria | **[prova] sensori anti-caduta digitali, 1 = nessun pavimento**: bit 3 (`0x08`) il più a sinistra, bit 2, bit 1, bit 0 (`0x01`) il più a destra (sono 4, sul semicerchio anteriore). RobotApp li usa anche per capire che il robot è sollevato (`m_wheel_up_CliffIR_filter`) |
-| **4** | bit | `04` / `00` | **[prova] bit 2 (`0x04`) = cassetto della polvere presente**. Tolto → RobotApp segnala l'eccezione 6 `EXCEPTION_DUSTBOX_INEXISTENCE` e mette il LED a `08` |
+| **4** | bit | `04` / `00` | **[prova] bit 2 (`0x04`) = cassetto della polvere presente**. Tolto → everest-server segnala l'eccezione 6 `EXCEPTION_DUSTBOX_INEXISTENCE` e mette il LED a `08` |
 | **7** | bit | `00`, `01`, `02` | **[codice] [prova] bit 0 = in carica, bit 1 = sulla base / alimentatore collegato** (AuxCtrl considera "sulla base" anche quando bit 0 = 1). `01` sulla base in carica, `00` fuori. Con contatti di carica instabili cambia di continuo |
 | **8** | uint8 | `a2`–`a5` | **[codice] tensione della batteria × 10**: 16,5 V in carica, 16,2–16,4 V fuori dalla base. La notte del 2026-10-01, con la batteria in protezione, era 11,3–14 V. [ipotesi] Li-ion 4S, 16,8 V piena |
 | 9 | uint8 | `1f`–`20` | [ipotesi] temperatura della batteria in °C (31–32) |
@@ -253,11 +253,14 @@ Catturato il 2026-10-02 con `spia socket` (`tools/spia-robot.sh socket`; registr
 `build/robot/spia/20261002-socket.spia`, 129 s, 0 errori). Implementato in `spia/everest.h`.
 
 **Chi parla con chi** [robot] [codice]. Il percorso `/tmp/AuxEverest_Sock` compare solo in AuxCtrl (server, in
-ascolto) e in **everest-server** (client), non in RobotApp. everest-server fa da smistatore: è anche client di
-`/tmp/everest_sock`, su cui RobotApp è in ascolto, ed è in ascolto su TCP 0.0.0.0:6000.
+ascolto) e in **everest-server** (client), non in RobotApp. **everest-server è il cervello del robot** (macchina a
+stati, movimento, SLAM, eccezioni, LED: le stringhe `detectWheelUp`, `CDetectControlLight`, `isBatteryFull`,
+`EXCEPTION_*` stanno solo nel suo binario) ed è anche client di `/tmp/everest_sock`, su cui RobotApp (app, cloud,
+mappe, sospensione, suoni) è in ascolto; è in ascolto su TCP 0.0.0.0:6000. I log `NNNN_0_*_logfile` in
+`/mnt/UDISK/log/` sono di everest-server.
 ```
 GD32 ⇄ /dev/ttyS3 ⇄ AuxCtrl ⇄ /tmp/AuxEverest_Sock ⇄ everest-server ⇄ /tmp/everest_sock ⇄ RobotApp
-lidar → /dev/ttyS1 → AuxCtrl (elabora le scansioni) ──────────── 605 ─────────────────────→ RobotApp
+lidar → /dev/ttyS1 → AuxCtrl (elabora le scansioni) ──── 605 ──→ everest-server
 ```
 C'è anche un canale a datagrammi diretto, `/tmp/UDP_AUXCTRL_SEND_PATH` (creato da RobotApp) e
 `/tmp/UDP_AUXCTRL_RECV_PATH`: in 2 minuti a robot fermo non è passato nulla.
@@ -271,21 +274,19 @@ globali che ogni ramo modifica e dai messaggi di log):
 | Comando | Direzione | Dati | Significato |
 |---|---|---|---|
 | **600** | entrambe | un frame GD32 intero (`FA FB ...`) | **inoltro dei frame del GD32**: ogni 20 ms in entrambe le direzioni |
-| 602 | RobotApp → AuxCtrl | vuoto | richiesta di stato (`g_receive_status_request`); 10 volte ogni 100 ms dopo la connessione |
-| 602 | AuxCtrl → RobotApp | 2 × int32 | stato: `lidar_status_flag`, `stm32_status_flag` (`01 .. 01 ..` = tutti e due a posto); lo manda `main` |
-| 603 | RobotApp → AuxCtrl | int32 | alimentazione del lidar (`g_lidar_power_flag`, log "lidar power is %d") |
-| 605 | AuxCtrl → RobotApp | | scansioni del lidar elaborate da AuxCtrl (`getLidarData`); assenti con il lidar spento |
+| 602 | everest-server → AuxCtrl | vuoto | richiesta di stato (`g_receive_status_request`); 10 volte ogni 100 ms dopo la connessione |
+| 602 | AuxCtrl → everest-server | 2 × int32 | stato: `lidar_status_flag`, `stm32_status_flag` (`01 .. 01 ..` = tutti e due a posto); lo manda `main` |
+| 603 | everest-server → AuxCtrl | int32 | alimentazione del lidar (`g_lidar_power_flag`, log "lidar power is %d") |
+| 605 | AuxCtrl → everest-server | | scansioni del lidar elaborate da AuxCtrl (`getLidarData`); assenti con il lidar spento |
 | 606 | entrambe | int32 | controllo del lidar (`g_lidar_control`, log "Aux lidar control %d"); AuxCtrl lo manda da `main` in un certo stato |
-| 607 | RobotApp → AuxCtrl | int32 | stato di sospensione (`g_sleep_mode`, log "Sleep state %d") |
+| 607 | everest-server → AuxCtrl | int32 | stato di sospensione (`g_sleep_mode`, log "Sleep state %d") |
 | 601, 604 | | | non gestiti |
 
-**Conseguenza importante.** Il protocollo del GD32 lo guida **RobotApp**, non AuxCtrl: heartbeat `0x06`, velocità
-`0x66`, LED `0x8d`, sequenza di avvio (`0x07`, `0x17`, `0x18`, `0x19`, `0x78`, ...) arrivano tutti da RobotApp
-dentro messaggi 600, e AuxCtrl li scrive sulla seriale. Quando everest-server si ricollega, RobotApp rifà da capo la
+**Conseguenza importante.** Il protocollo del GD32 lo guida **everest-server**, non AuxCtrl: heartbeat `0x06`,
+velocità `0x66`, LED `0x8d`, sequenza di avvio (`0x07`, `0x17`, `0x18`, `0x19`, `0x78`, ...) arrivano tutti da
+everest-server dentro messaggi 600, e AuxCtrl li scrive sulla seriale. Quando everest-server si ricollega, rifà da capo la
 sequenza di avvio del GD32. AuxCtrl si occupa di: seriale e inoltro, batteria (`updateBatterySensor`), lidar
-(lettura, parsing, motore), audio e comandi di fabbrica. Domanda aperta: con AuxCtrl da solo (senza RobotApp) il
-robot non si resettava (fase 0), quindi probabilmente AuxCtrl manda un heartbeat suo quando non ha client: da
-verificare con la spia sulla seriale.
+(lettura, parsing, motore), audio, comandi di fabbrica e il keepalive `0x0d` (vedi "Il vincolo dell'heartbeat").
 
 ## Sequenza di avvio [osservato]
 
@@ -312,7 +313,7 @@ Senza nessun programma che parli con il GD32 il robot si resetta dopo ~4 minuti 
 | Frame | Chi lo manda | Quando |
 |---|---|---|
 | **`0x0d`** (nessun dato) | **AuxCtrl**, da `main` [codice] | ogni 3,0 s, ma solo se la seriale funziona (`g_stm32_serial_state`) **e** dal GD32 sono arrivati dati dall'ultimo invio (`getStm32ReceiveData()` legge e azzera un flag). Significa "sono vivo e ricevo i tuoi dati" |
-| `0x06` (nessun dato) | RobotApp (tramite everest-server e AuxCtrl) | ogni ~204 ms |
+| `0x06` (nessun dato) | everest-server (tramite AuxCtrl) | ogni ~204 ms |
 
 **Prova del 2026-10-02** (registro `build/robot/spia/20261002-auxctrl-solo.spia`): con **solo AuxCtrl** in esecuzione
 (niente Monitor, RobotApp, everest-server), in 100 s AuxCtrl ha mandato al GD32 solo `0x07` (una volta, all'avvio)
@@ -320,9 +321,18 @@ e **`0x0d` ogni 3,0 s**; nessun `0x06` e nessun `0x66`. Il GD32 ha continuato a 
 `0x06` ogni 2 s. Nella fase 0 il robot con solo AuxCtrl non si è mai resettato (oltre 7 minuti, e poi ore), quindi
 **`0x0d` ogni 3 s basta a tenere buono il GD32**.
 
-Resta da sapere se basta anche il solo `0x06`, e qual è il timeout. Per il nostro driver la scelta sicura è mandare
-`0x0d` ogni 3 s (solo mentre si ricevono dati, come AuxCtrl). Il `0x06` a 5 Hz e la velocità a 50 Hz servono solo
-quando si comandano i motori. Il timeout si misura con un nostro programma (blocco C4 di `fase1-piano.md`).
+**Misure con `spia guida`** (stack fermo, il nostro programma da solo sulla seriale; log in
+`build/robot/heartbeat/`):
+
+| Prova | Cosa manda il SoC | Risultato |
+|---|---|---|
+| A | un solo `0x0d` all'istante 0, poi niente | il GD32 continua a mandare i sensori, poi **resetta il robot dopo ~190 s** |
+| B | `0x06` ogni 200 ms (940 frame), nessun `0x0d` | **reset dopo ~189 s**, come in A: il `0x06` non conta |
+
+Quindi **il watchdog del GD32 sorveglia solo `0x0d`, con un timeout di circa 190 s** (3 min 10 s). AuxCtrl lo manda
+ogni 3 s: margine di oltre 60 volte. Il "reset ogni ~4 minuti" della fase 0 era questo timeout più il tempo di
+avvio del robot. Per il nostro driver: `0x0d` ogni 3 s (solo mentre si ricevono dati, come AuxCtrl), in un task
+periodico; `0x06` e `0x66` servono solo con i motori in uso.
 
 ## Limiti delle catture
 

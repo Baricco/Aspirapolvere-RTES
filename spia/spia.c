@@ -915,6 +915,170 @@ fine:
 	return esito;
 }
 
+
+/* ------------------------------------------------------------------------------------------------------ */
+/* guida: parla direttamente con il GD32 al posto di AuxCtrl (stack originale fermo)                      */
+/*
+ * Apre la seriale (115200 8N1 raw), conta i frame che arrivano e manda periodicamente SOLO i frame indicati:
+ *   --invia CMD:PERIODO_MS   es. --invia 0x0d:3000 --invia 0x06:200   (frame senza dati; ripetibile)
+ *   --solo-se-ricevi         come AuxCtrl con 0x0d: manda solo se dal GD32 è arrivato almeno un frame
+ *                            dall'invio precedente
+ *   --durata S               si ferma dopo S secondi (0 = mai)
+ *   -o REGISTRO              registra tutto (formato di registro.h)
+ * Ogni secondo stampa una riga di stato su stdout (flush immediato: si può seguire via SSH).
+ * NON manda mai comandi ai motori.
+ */
+typedef struct {
+	uint64_t sensori, hb_gd32;
+} conta_guida_t;
+
+static void conta_guida(const gd32_frame_t *f, void *ctx)
+{
+	conta_guida_t *c = ctx;
+	if (f->cmd == GD32_SENSORI)
+		c->sensori++;
+	if (f->cmd == GD32_HEARTBEAT)
+		c->hb_gd32++;
+}
+
+static int cmd_guida(int argc, char **argv)
+{
+	const char *disp = "/dev/ttyS3", *uscita = NULL;
+	int durata = 0, solo_se_ricevi = 0, n_inv = 0;
+	struct { uint8_t cmd; int64_t periodo, prossimo; uint64_t mandati; } inv[8];
+	static const struct option opz[] = {
+		{ "dispositivo", required_argument, 0, 'd' }, { "invia", required_argument, 0, 'i' },
+		{ "durata", required_argument, 0, 't' }, { "solo-se-ricevi", no_argument, 0, 'r' },
+		{ "uscita", required_argument, 0, 'o' }, { "forza", no_argument, 0, 'F' }, { 0, 0, 0, 0 },
+	};
+	int o, forza = 0;
+	while ((o = getopt_long(argc, argv, "d:i:t:ro:", opz, NULL)) != -1) {
+		switch (o) {
+		case 'd': disp = optarg; break;
+		case 't': durata = atoi(optarg); break;
+		case 'r': solo_se_ricevi = 1; break;
+		case 'o': uscita = optarg; break;
+		case 'F': forza = 1; break;
+		case 'i': {
+			char *due = strchr(optarg, ':');
+			if (!due || n_inv == 8) {
+				fprintf(stderr, "spia guida: --invia CMD:PERIODO_MS\n");
+				return 2;
+			}
+			long c = strtol(optarg, NULL, 0), ms = atol(due + 1);
+			if (c == GD32_VELOCITA || c == GD32_VELOCITA_RUOTE || c == GD32_ASPIRAZIONE ||
+			    c == GD32_SPAZZOLA_LATERALE || c == GD32_SPAZZOLA_CENTRALE || c == GD32_MOTORE_LIDAR || ms <= 0) {
+				fprintf(stderr, "spia guida: comando 0x%02lx non ammesso (niente motori) o periodo non valido\n", c);
+				return 2;
+			}
+			inv[n_inv].cmd = (uint8_t)c;
+			inv[n_inv].periodo = RT_MS(ms);
+			inv[n_inv].mandati = 0;
+			n_inv++;
+			break;
+		}
+		default: return 2;
+		}
+	}
+	if (chi_lo_usa(disp) && !forza) {
+		fprintf(stderr, "spia guida: prima ferma lo stack originale\n");
+		return 1;
+	}
+	int fd = open(disp, O_RDWR | O_NOCTTY | O_NONBLOCK);
+	struct termios t;
+	if (fd < 0 || tcgetattr(fd, &t)) {
+		fprintf(stderr, "spia guida: apro %s: %s\n", disp, strerror(errno));
+		return 1;
+	}
+	cfmakeraw(&t);
+	cfsetispeed(&t, B115200);
+	cfsetospeed(&t, B115200);
+	t.c_cflag |= CLOCAL | CREAD;
+	t.c_cflag &= ~(CSTOPB | CRTSCTS | PARENB);
+	tcsetattr(fd, TCSANOW, &t);
+
+	FILE *reg = NULL;
+	if (uscita) {
+		reg = fopen(uscita, "wb");
+		reg_intestazione_t h = { .n_canali = 1 };
+		analizza_canale("gd32,gd32,/dev/ttyS3", &h.canali[0], 0);
+		if (reg)
+			reg_scrivi_intestazione(reg, &h);
+	}
+	struct sigaction sa = { .sa_handler = al_segnale };
+	sigaction(SIGINT, &sa, NULL);
+	sigaction(SIGTERM, &sa, NULL);
+	sigaction(SIGHUP, &sa, NULL);
+	signal(SIGPIPE, SIG_IGN);
+	if (rt_init())
+		fprintf(stderr, "spia guida: mlockall non riuscito (si continua)\n");
+	struct sched_param sp = { .sched_priority = 80 };
+	sched_setscheduler(0, SCHED_FIFO, &sp);
+
+	gd32_deframer_t dfr;
+	gd32_deframer_init(&dfr);
+	static uint8_t buf[4096];
+	int64_t t0 = rt_adesso(), prossima_riga = t0 + RT_S(1), ultimo_rx = t0;
+	uint64_t frame_da_invio = 0;
+	conta_guida_t conta = { 0, 0 };
+	for (int i = 0; i < n_inv; i++)
+		inv[i].prossimo = t0;
+	printf("guida: %s, %d comandi periodici%s\n", disp, n_inv, solo_se_ricevi ? " (solo se ricevo)" : "");
+	fflush(stdout);
+	while (!fermati) {
+		int64_t adesso = rt_adesso();
+		if (durata > 0 && adesso - t0 >= RT_S(durata))
+			break;
+		for (int i = 0; i < n_inv; i++) {
+			if (adesso < inv[i].prossimo)
+				continue;
+			inv[i].prossimo += inv[i].periodo;
+			if (solo_se_ricevi && frame_da_invio == 0)
+				continue;
+			uint8_t fr[8];
+			size_t k = gd32_componi(inv[i].cmd, NULL, 0, fr, sizeof fr);
+			if (write(fd, fr, k) == (ssize_t)k) {
+				inv[i].mandati++;
+				if (reg)
+					reg_scrivi_record(reg, adesso, 0, REG_DAL_SOC, fr, (uint16_t)k);
+			}
+			frame_da_invio = 0;
+		}
+		struct pollfd p = { .fd = fd, .events = POLLIN };
+		poll(&p, 1, 10);
+		ssize_t k = read(fd, buf, sizeof buf);
+		adesso = rt_adesso();
+		if (k > 0) {
+			if (reg)
+				reg_scrivi_record(reg, adesso, 0, REG_VERSO_SOC, buf, (uint16_t)k);
+			uint64_t prima = dfr.frame_ok;
+			gd32_deframer_scrivi(&dfr, buf, (size_t)k, conta_guida, &conta);
+			if (dfr.frame_ok > prima) {
+				frame_da_invio += dfr.frame_ok - prima;
+				ultimo_rx = adesso;
+			}
+		}
+		if (adesso >= prossima_riga) {
+			printf("%6.1f s  rx %llu frame (sensori %llu, hb GD32 %llu), ultimo rx %.1f s fa",
+			       (double)(adesso - t0) / RT_NS_PER_S, (unsigned long long)dfr.frame_ok,
+			       (unsigned long long)conta.sensori, (unsigned long long)conta.hb_gd32,
+			       (double)(adesso - ultimo_rx) / RT_NS_PER_S);
+			for (int i = 0; i < n_inv; i++)
+				printf(", 0x%02x mandati %llu", inv[i].cmd, (unsigned long long)inv[i].mandati);
+			putchar('\n');
+			fflush(stdout);
+			if (reg)
+				fflush(reg);
+			prossima_riga += RT_S(1);
+		}
+	}
+	if (reg)
+		fclose(reg);
+	close(fd);
+	return 0;
+}
+
+
 /* ------------------------------------------------------------------------------------------------------ */
 /* leggi / riepilogo                                                                                      */
 
@@ -1210,6 +1374,7 @@ static void uso(void)
 	        "                [--eventi <file> [--attesa s] [--impara s] [--istantanea <file>]] [--senza-mount] [--forza]\n"
 	        "       (canali di default: gd32,gd32,/dev/ttyS3 e lidar,lidar,/dev/ttyS1)\n"
 	        "     spia socket -o <registro> --stream nome,everest|grezzo,percorso [--dgram nome,proto,percorso]...\n"
+	        "     spia guida [--invia CMD:MS]... [--solo-se-ricevi] [--durata S] [-o registro]  (stack fermo)\n"
 	        "     spia leggi <registro> [-c canale]\n"
 	        "     spia riepilogo <registro> [-c canale]\n"
 	        "     spia termios <dispositivo>...\n");
@@ -1226,6 +1391,7 @@ int main(int argc, char **argv)
 	argc--;
 	if (!strcmp(cmd, "proxy"))     return cmd_proxy(argc, argv);
 	if (!strcmp(cmd, "socket"))    return cmd_socket(argc, argv);
+	if (!strcmp(cmd, "guida"))     return cmd_guida(argc, argv);
 	if (!strcmp(cmd, "leggi"))     return cmd_leggi(argc, argv, 0);
 	if (!strcmp(cmd, "riepilogo")) return cmd_leggi(argc, argv, 1);
 	if (!strcmp(cmd, "termios"))   return cmd_termios(argc, argv);

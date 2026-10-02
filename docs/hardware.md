@@ -29,7 +29,7 @@ viene: [robot] = letto sul robot acceso, [disass.] = dal disassemblato di AuxCtr
 | Ruote (velocità, encoder) | GD32 | comando `0x66` | [disass.] |
 | Spazzole, aspirazione | GD32 | comandi da identificare | [ipotesi] |
 | **Motore del lidar** | GD32 | comando **`0x71`** + int32 potenza 0–100 | `controlLidarPwm(int)` limita a 0..100 e manda `0x71` [disass.]; il `0x71 00 00 00 00` dell'avvio = lidar fermo |
-| Bumper, cliff, ruote sollevate, cassetto, batteria/carica, base | GD32 | frame sensori `0x15` | il cassetto assente è l'eccezione 6 `EXCEPTION_DUSTBOX_INEXISTENCE` di RobotApp [robot] |
+| Bumper, anti-caduta, cassetto, tasti, encoder, batteria/carica | GD32 | frame sensori `0x15` | mappa completa in `protocollo.md` e `RIEPILOGO.md`; il cassetto assente è l'eccezione 6 di everest-server [robot] |
 | Tasti (pulizia, base) | GD32 [ipotesi] | da identificare | `detectDockOrPointButtonPress` in AuxCtrl [disass.] |
 | LED del tasto | GD32 [ipotesi] | da identificare | la decide `CDetectControlLight` di RobotApp; nessun LED Linux in `/sys/class/leds` [robot] |
 | **Lidar** (dati) | AuxCtrl | `/dev/ttyS1`, 115200 [disass. `getLidarData`] | classi `C3iroboticsLidar`/`CLidarPacket`: checksum CRC e somma, pacchetti "tooth scan", velocità, versione, salute. Con il robot fermo il lidar è spento: 8 interrupt di uart1 in 10 minuti [robot] |
@@ -49,7 +49,7 @@ viene: [robot] = letto sul robot acceso, [disass.] = dal disassemblato di AuxCtr
 | Canale | Chi | Uso |
 |---|---|---|
 | `/tmp/AuxEverest_Sock` (Unix) | AuxCtrl (server) ↔ **everest-server** (client) | frame del GD32 inoltrati così come sono (comando 600), scansioni del lidar (605), stato: vedi `protocollo.md` |
-| `/tmp/everest_sock` | RobotApp (server) ↔ everest-server (client) | everest-server smista i messaggi tra AuxCtrl e RobotApp |
+| `/tmp/everest_sock` | RobotApp (server) ↔ everest-server (client) | everest-server è il cervello del robot; RobotApp fa app, cloud, mappe, sospensione |
 | `/tmp/UDP_*_PATH`, `/tmp/cliManager.sock` | RobotApp, wifiManager, aggiornamenti | |
 | TCP 0.0.0.0:6000 | everest-server in ascolto | |
 | TCP verso 43.158.121.228:9090 | RobotApp | **cloud del produttore**, connessione stabile |

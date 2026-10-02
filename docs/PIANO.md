@@ -38,10 +38,10 @@ Obiettivo: un nostro programma C con task real-time, che gira sul SoC del robot 
 - AuxCtrl e RobotApp sono binari C++ con i simboli; sul robot ci sono `strace` e `gdbserver`.
 - Il contenuto estratto dal backup è in `~/Aspirapolvere/Estratto/` (fuori dalla repository: contiene binari proprietari).
 - Vincolo critico: senza heartbeat verso il GD32 il robot si resetta dopo ~4 minuti.
-- **Correzione del 2026-10-02** (`protocollo.md`): RobotApp non parla con AuxCtrl direttamente ma attraverso
-  everest-server, e il protocollo del GD32 (heartbeat, velocità, LED, avvio) lo guida RobotApp. AuxCtrl inoltra i
-  frame, gestisce batteria, lidar e audio. Per il nostro driver vuol dire che dobbiamo replicare RobotApp verso il
-  GD32 e AuxCtrl verso lidar e audio.
+- **Correzione del 2026-10-02** (`protocollo.md`, `RIEPILOGO.md`): il cervello del robot è **everest-server**
+  (stato, movimento, SLAM, eccezioni, protocollo del GD32); RobotApp fa app, cloud, mappe e sospensione; AuxCtrl
+  inoltra i frame del GD32, manda il keepalive `0x0d` (l'unico sorvegliato dal watchdog del GD32, timeout ~190 s) e
+  gestisce lidar e audio. Il nostro driver deve replicare AuxCtrl più la parte di everest-server che parla con il GD32.
 
 ## Fasi
 0. **Toolchain e valori di riferimento RT:** cross-compiler armv7 musl statico, `qemu-user-static` sul PC, hello world
@@ -58,6 +58,8 @@ Obiettivo: un nostro programma C con task real-time, che gira sul SoC del robot 
    ogni 200 ms, velocità `0x66` ogni 20 ms (con conversione in tick), sequenza di avvio, campi della batteria
    nel frame dei sensori `0x15`. Mancano le prove sul robot per gli altri campi dei sensori, e il lidar.
    Prima delle prove: la fase trasversale "accesso comodo". Piano dettagliato in `docs/fase1-piano.md`.*
+   *Stato al 2026-10-02 sera: FATTA (eccetto il contenuto delle scansioni del lidar e i campi legati ai motori, che
+   richiedono i motori accesi: fase 3). Riepilogo completo in `docs/RIEPILOGO.md`.*
 2. **Driver minimo:** il nostro programma al posto di AuxCtrl, con heartbeat e lettura dei sensori. Nessun reset in 10 minuti.
 3. **Attuazione:** ruote, spazzole, aspirazione, con il robot sollevato.
 4. **Architettura RT:** task, partizionamento sui core, misure di WCET e jitter, analisi di schedulabilità.

@@ -164,3 +164,15 @@ riavvio). AuxCtrl da solo manda al GD32 solo `0x07` all'avvio e **`0x0d` ogni 3,
 (quelli li genera RobotApp). Nel disassemblato `0x0d` parte da `main` ogni 3 s, solo se la seriale va e se dal GD32 sono
 arrivati dati (`getStm32ReceiveData`). Dato che con solo AuxCtrl il robot non si resetta, il keepalive che conta è
 `0x0d`. Dettagli in `protocollo.md`, sezione "Il vincolo dell'heartbeat".
+
+## 2026-10-02 — watchdog del GD32 e correzione sull'architettura
+
+- Nuovo comando `spia guida`: parla direttamente con il GD32 (stack fermo), manda solo i frame indicati (mai
+  comandi ai motori) e stampa lo stato ogni secondo.
+- Prova A (un solo `0x0d`, poi niente): reset del robot dopo ~190 s. Prova B (`0x06` ogni 200 ms, niente `0x0d`):
+  reset dopo ~189 s. **Il watchdog sorveglia solo `0x0d`**, timeout ~190 s. Log in `build/robot/heartbeat/`.
+- **Correzione:** il cervello del robot è **everest-server**, non RobotApp: le stringhe delle eccezioni, del LED e di
+  `detectWheelUp` stanno solo nel suo binario, e i log `NNNN_0_*_logfile` sono suoi. Le voci precedenti di questo
+  diario che attribuiscono a RobotApp eccezioni, LED, `isBatteryFull` e i frame del GD32 vanno lette come
+  "everest-server". RobotApp fa app, cloud, mappe, programmazioni, suoni e sospensione.
+- Fine della fase 1: riepilogo di hardware, software e protocolli in `RIEPILOGO.md`.
