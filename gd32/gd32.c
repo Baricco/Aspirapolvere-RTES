@@ -39,6 +39,8 @@ const char *gd32_nome_cmd(uint8_t cmd)
 	case GD32_VERSIONE:             return "versione";
 	case GD32_IMU_ZERO:             return "imu_zero";
 	case GD32_RESET_ERRORI:         return "reset_errori";
+	case GD32_SOC_ATTIVO:           return "soc_attivo";
+	case GD32_KEEPALIVE:            return "keepalive";
 	case GD32_SENSORI:              return "sensori";
 	case GD32_TIPO_CONTROLLO:       return "tipo_controllo";
 	case GD32_VELOCITA:             return "velocita";

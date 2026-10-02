@@ -92,8 +92,10 @@ pacchetto con il codice passato al costruttore `CRobotPacket(cmd, dati, len)`. L
 | `0xa3` / `0xa4` | calibrazione del magnetometro / stato | – | no |
 
 Codici visti nelle catture ma senza una funzione `packet*` con quel nome (li costruisce altro codice: da capire):
-`0x0c` (`01`, all'avvio, con risposta `0x0c 01`), `0x0d` (nessun dato, ogni 3,0 s), `0x17` (`01 80 cf f0`), `0x18`,
+`0x0c` (`01`, all'avvio, con risposta `0x0c 01`), `0x17` (`01 80 cf f0`), `0x18`,
 `0x19` (`01`), `0x6b` (1 byte), `0x7c` (`00 ff ff`), `0x86` (`00`), `0x9d` (`00`/`01`).
+
+`0x0d` (nessun dato) invece è noto: è il **keepalive di AuxCtrl**, vedi "Il vincolo dell'heartbeat".
 
 `0x71` invece è noto: **potenza del motore del lidar** [codice]. `controlLidarPwm(int p)` limita p a 0..100 e manda
 `0x71` con p come int32 little-endian. All'avvio AuxCtrl manda `0x71 00 00 00 00` (motore fermo). Il lidar quindi
@@ -305,10 +307,22 @@ poi:     SoC → 0x06 ogni 200 ms (heartbeat) e 0x66 ogni 20 ms (velocità)
 
 ## Il vincolo dell'heartbeat
 
-Senza AuxCtrl il robot si resetta dopo ~4 minuti (fase 0). AuxCtrl manda `0x06` ogni ~200 ms e `0x66` ogni 20 ms.
-Non sappiamo ancora quale dei due il GD32 sorvegli, né con quale timeout. Per il driver minimo della fase 2 il
-punto di partenza sicuro è replicare entrambi: `0x06` a 5 Hz e `0x66` con velocità zero a 50 Hz. Poi si
-misura quanto si può allungare il periodo prima del reset.
+Senza nessun programma che parli con il GD32 il robot si resetta dopo ~4 minuti (fase 0). Ci sono due candidati:
+
+| Frame | Chi lo manda | Quando |
+|---|---|---|
+| **`0x0d`** (nessun dato) | **AuxCtrl**, da `main` [codice] | ogni 3,0 s, ma solo se la seriale funziona (`g_stm32_serial_state`) **e** dal GD32 sono arrivati dati dall'ultimo invio (`getStm32ReceiveData()` legge e azzera un flag). Significa "sono vivo e ricevo i tuoi dati" |
+| `0x06` (nessun dato) | RobotApp (tramite everest-server e AuxCtrl) | ogni ~204 ms |
+
+**Prova del 2026-10-02** (registro `build/robot/spia/20261002-auxctrl-solo.spia`): con **solo AuxCtrl** in esecuzione
+(niente Monitor, RobotApp, everest-server), in 100 s AuxCtrl ha mandato al GD32 solo `0x07` (una volta, all'avvio)
+e **`0x0d` ogni 3,0 s**; nessun `0x06` e nessun `0x66`. Il GD32 ha continuato a mandare i sensori ogni 20 ms e il suo
+`0x06` ogni 2 s. Nella fase 0 il robot con solo AuxCtrl non si è mai resettato (oltre 7 minuti, e poi ore), quindi
+**`0x0d` ogni 3 s basta a tenere buono il GD32**.
+
+Resta da sapere se basta anche il solo `0x06`, e qual è il timeout. Per il nostro driver la scelta sicura è mandare
+`0x0d` ogni 3 s (solo mentre si ricevono dati, come AuxCtrl). Il `0x06` a 5 Hz e la velocità a 50 Hz servono solo
+quando si comandano i motori. Il timeout si misura con un nostro programma (blocco C4 di `fase1-piano.md`).
 
 ## Limiti delle catture
 

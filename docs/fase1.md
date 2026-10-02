@@ -156,3 +156,11 @@ Problemi incontrati:
 - Risultato (sezione nuova in `protocollo.md`): il comando 600 trasporta i frame del GD32 così come sono, e **è
   RobotApp a guidare il protocollo del GD32**; AuxCtrl inoltra e gestisce batteria, lidar e audio. Altri comandi
   (602, 603, 605, 606, 607) per stato, lidar e sospensione, decodificati dai nomi delle variabili globali di AuxCtrl.
+
+## 2026-10-02 — chi tiene buono il GD32: AuxCtrl da solo
+
+Stack fermo, spia sulle seriali, **solo AuxCtrl** avviato a mano per 100 s (poi stack completo ripristinato, nessun
+riavvio). AuxCtrl da solo manda al GD32 solo `0x07` all'avvio e **`0x0d` ogni 3,0 s**; niente `0x06` né `0x66`
+(quelli li genera RobotApp). Nel disassemblato `0x0d` parte da `main` ogni 3 s, solo se la seriale va e se dal GD32 sono
+arrivati dati (`getStm32ReceiveData`). Dato che con solo AuxCtrl il robot non si resetta, il keepalive che conta è
+`0x0d`. Dettagli in `protocollo.md`, sezione "Il vincolo dell'heartbeat".

@@ -38,12 +38,14 @@
  * Nomi dalle funzioni CSerialMessagePacket::packet* di AuxCtrl, oppure dal significato osservato.
  */
 enum {
-	GD32_SLEEP               = 0x04,  /* packetStm32Sleep */
-	GD32_WAKEUP_ACK          = 0x05,  /* packetWakeupAck */
+	GD32_SLEEP               = 0x04,  /* packetStm32Sleep; il GD32 conferma con 0x04 e smette di mandare i sensori */
+	GD32_WAKEUP_ACK          = 0x05,  /* GD32 -> SoC al risveglio (tasto premuto); il SoC conferma con 0x05 */
 	GD32_HEARTBEAT           = 0x06,  /* packetHeartBeat: SoC -> GD32 ogni 200 ms */
 	GD32_VERSIONE            = 0x07,  /* richiesta / risposta con la versione del firmware (ASCII) */
 	GD32_IMU_ZERO            = 0x08,  /* packetSetIMUZero; risposta 01 */
 	GD32_RESET_ERRORI        = 0x0a,  /* packetResetErrorCode */
+	GD32_SOC_ATTIVO          = 0x0c,  /* 01 = SoC attivo, 00 = prima della sospensione; il GD32 risponde 0x0c 01 */
+	GD32_KEEPALIVE           = 0x0d,  /* keepalive di AuxCtrl, ogni 3 s: basta da solo a evitare il reset del GD32 */
 	GD32_SENSORI             = 0x15,  /* GD32 -> SoC: stato dei sensori, 96 byte */
 	GD32_TIPO_CONTROLLO      = 0x65,  /* packetMotorControlType, 1 byte */
 	GD32_VELOCITA            = 0x66,  /* packetMotorVelocity: int32 v, int32 omega (tick/s) ogni 20 ms */
