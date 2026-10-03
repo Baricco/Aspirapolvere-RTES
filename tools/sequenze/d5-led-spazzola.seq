@@ -1,0 +1,28 @@
+# Fase 2, blocco D5: modi del LED (0x8d) uno ogni 4 s da guardare a occhio, poi spazzola centrale +30 / -30.
+# SOLO CON IL ROBOT SOLLEVATO (--sollevato).
+2000 0x8d:00
+6000 0x8d:01
+10000 0x8d:02
+14000 0x8d:03
+18000 0x8d:04
+22000 0x8d:05
+26000 0x8d:06
+30000 0x8d:07
+34000 0x8d:08
+38000 0x8d:09
+42000 0x8d:0a
+46000 0x8d:0b
+50000 0x8d:0c
+54000 0x8d:0d
+58000 0x8d:0e
+62000 0x8d:0f
+66000 0x8d:10
+70000 0x8d:11
+74000 0x8d:12
+78000 0x8d:00
+80000 0x6a:i8=30       # spazzola centrale avanti
+85000 0x6a:i8=0
+87000 0x6a:i8=-30      # al contrario (l'eco riportava 100)
+92000 0x6a:i8=0
+93000 0x8d:01
+94000 fine

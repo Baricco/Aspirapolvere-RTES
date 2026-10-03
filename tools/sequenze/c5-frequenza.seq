@@ -1,0 +1,8 @@
+# Fase 2, blocco C5/C4: frequenza del frame dei sensori con i tipi di controllo 0x65, domande innocue al GD32.
+# Niente motori. Uso: tools/banco-robot.sh avvia c5 --sequenza tools/sequenze/c5-frequenza.seq --tensione-minima 140
+0      0x07         # versione del firmware
+500    0x18         # elenco delle funzioni della macchina (packetGetMachineFunctionList)
+20000  0x65:00      # tipo di controllo 0
+40000  0x65:02      # tipo di controllo 2 (quello della pulizia)
+60000  0x65:00
+65000  fine

@@ -1,6 +1,6 @@
 # Riepilogo: hardware, software originale e protocolli del Proscenic M6 Pro
 
-Quello che sappiamo alla fine della fase 1. I dettagli e le fonti sono in `hardware.md` e `protocollo.md`.
+Quello che sappiamo dopo la parte autonoma della fase 2 (2026-10-03; diario in `fase2.md`). I dettagli e le fonti sono in `hardware.md` e `protocollo.md`.
 Affidabilità: **[verificato]** = provato sul robot; **[codice]** = letto nel disassemblato; **[ipotesi]** = da
 confermare.
 
@@ -49,35 +49,47 @@ direttamente al SoC su `/dev/ttyS1`, ma il suo motore lo comanda il GD32.
 
 | Sensore | Dove arriva | Come si legge | |
 |---|---|---|---|
-| Bumper sinistro / destro | GD32 → frame sensori | byte 1, bit 2 / bit 1 (1 = premuto) | [verificato] |
-| 4 anti-caduta (sinistra → destra) | GD32 | byte 3, bit 3, 2, 1, 0 (1 = nessun pavimento) | [verificato] |
+| Bumper sinistro / destro | GD32 → frame sensori | byte 1: sx = bit 2\|3, dx = bit 1\|0 (1 = premuto); con i sensori spenti leggono "premuti" | [verificato] |
+| 4 anti-caduta | GD32 | byte 3: bit 0 sx laterale, 1 sx anteriore, 2 dx anteriore, 3 dx laterale (1 = nessun pavimento). Sulla base leggono `0f` | [verificato] |
+| Sensori alimentati | GD32 | byte 64 bit 5 (comando `0x9d`) | [verificato] |
 | Cassetto della polvere | GD32 | byte 4, bit 2 (1 = presente) | [verificato] |
-| Tasto accensione / casa | GD32 | byte 58 / 62 = durata della pressione in 10 ms | [verificato] |
-| Encoder ruota sinistra / destra | GD32 | int32 ai byte 16 / 24 (contatore assoluto) | [verificato] |
-| Carica in corso / sulla base | GD32 | byte 7, bit 0 / bit 1 | [verificato] / [codice] |
-| Tensione della batteria | GD32 | byte 8 ÷ 10 = volt (16,5 V in carica) | [verificato] |
-| IMU | GD32 | byte 40–55: angolo integrato e valori grezzi | [ipotesi] sui singoli campi |
-| 4 IR analogici | GD32 | int16 ai byte 78, 80, 82, 84 | [ipotesi] seguimuro (everest-server ha `CObservationFollowIR`) |
-| Temperatura batteria | GD32 | byte 9 (°C) | [ipotesi] |
-| Lidar a 360° | SoC, `/dev/ttyS1` | pacchetti `AA` (scansioni `0xAD`/`0xA9`, velocità `0xAE`) | [codice] formato, contenuto da verificare |
+| Tasto accensione / casa | GD32 | uint16 ai byte 58 / 62 × 10 = durata della pressione in ms | [verificato] |
+| Encoder ruota sinistra / destra | GD32 | int32 ai byte 16 / 24; in avanti aumentano | [verificato] |
+| Velocità misurate v / ω | GD32 | int32 ai byte 32 / 36, unità di `0x66`, solo in modalità `0x65 02` | [verificato] |
+| Correnti dei motori (mA) | GD32 | uint16: 74 ruota sx, 76 ruota dx, 78 spazzola laterale, 80 spazzola centrale (offset ~58), 82 aspirazione | [verificato] |
+| Velocità della ventola | GD32 | byte 69 × 100 = giri/min | [verificato] |
+| Eco dei comandi | GD32 | 65 LED, 67 spazzola laterale, 68 spazzola centrale | [verificato] |
+| Carica in corso / contatto con la base | GD32 | byte 7, bit 0 / bit 1 | [verificato] |
+| Tensione della batteria | GD32 | byte 8 ÷ 10 = volt | [verificato] |
+| Temperatura della batteria | GD32 | byte 9, int8 in °C | [codice] (31–32 °C osservati) |
+| IMU | GD32 | int16: velocità angolare (0,01 °/s) 40 imbardata, 44 beccheggio, 48 rollio; angoli (0,01°) 42/46/50 | [verificato] |
+| Vettore di gravità | GD32 | int16 ai byte 52/54/56 in centesimi di g, assi X indietro, Y destra, Z su | [verificato] |
+| IR della base | GD32 | byte 6: due ricevitori (nibble), bit 1/2/4/8 = fasci della base; solo rivolto verso la base | [verificato] |
+| (byte 90–95) | GD32 | copia delle velocità angolari | [verificato] |
+| IR di ostacolo / seguimuro | – | **non presenti** (everest usa il lidar) | [verificato] |
+| Lidar a 360° | SoC, `/dev/ttyS1` | scansioni `0xAD`: 16 settori × ~21 punti, ~360 punti/giro; 0° = dietro, angoli antiorari, distanze esatte al cm | [verificato] |
 | Temperatura del SoC | SoC | `thermal_zone0` | [verificato] |
 
-**Non ci sono** interruttori sulle ruote ("ruota sollevata") né sulla torretta del lidar [verificato]: il robot
-capisce di essere sollevato dai sensori anti-caduta.
+**Non ci sono** interruttori sulle ruote né sulla torretta del lidar [verificato]. everest segnala comunque
+`EXCEPTION_WHEEL_UP` deducendolo da altri sensori.
 
 ### Attuatori
 
-| Attuatore | Chi lo comanda | Comando |
+| Attuatore | Comando | Note [verificato salvo indicazione] |
 |---|---|---|
-| Ruote | GD32 | `0x66` velocità lineare + angolare (oppure `0x67` velocità delle due ruote) |
-| Spazzola laterale / centrale | GD32 | `0x69` / `0x6a` (int8 con segno) |
-| Aspirazione | GD32 | `0x68` (2 byte) |
-| Motore del lidar | GD32 | `0x97` acceso/spento, `0x71` potenza 0–100 |
-| LED del tasto | GD32 | `0x8d` (00 spento, 01 azzurro, 04 giallo, 08 rosso lampeggiante) |
-| Emettitori IR anti-caduta | GD32 | `0x78` acceso/spento, `0x79` direzione |
-| Caricatore | GD32 | `0x9b` |
-| Alimentazione / riavvio del SoC | GD32 | `0x99` / `0x9a` |
-| Altoparlante | SoC | `tinyplayer file.mp3`, volume con `amixer`, amplificatore con GPIO 233 |
+| Modalità dei motori | `0x65` | `00` spenti, `01` velocità per ruota (`0x67`), `02` v/ω (`0x66`) |
+| Ruote | `0x66` v, ω (int32, tick/s) ogni 20 ms; `0x67` sx, dx | risposta in ~130 ms; con anti-caduta su "vuoto" il GD32 rifiuta l'avanti in `02` |
+| Retromarcia sugli anti-caduta | `0x19` bool | attiva: con il vuoto davanti va indietro a metà velocità |
+| Spazzola laterale / centrale | `0x69` / `0x6a` int8 | positivo = verso di pulizia (everest: 60); negativo = sblocco al massimo per ~4 s, poi il GD32 la ferma |
+| Aspirazione | `0x68` int16 = giri/min ÷ 10 (regolata); `0x85` PWM %; `0x86` PWM % compensato | 88% → 18200 giri/min, 1,9 A |
+| Motore del lidar | `0x97` acceso/spento, `0x71` potenza 0–100 | ≈ 0,086 giri/s per unità; serve ~68 per 6 giri/s |
+| LED del tasto | `0x8d` 1 byte | 0 spento, 1 azzurro, 4 giallo che respira, 6 giallo lento, 8 rosso veloce, 12 azzurro che respira… (tabella in `fase2.md`) |
+| Emettitori IR anti-caduta | `0x78` / `0x79` | [codice] |
+| Alimentazione sensori | `0x9d` bool | `00` sulla base (everest) |
+| Caricatore | `0x9b` | nessun effetto visibile: **la carica parte da sola** sui contatti |
+| Pompa dell'acqua | `0x6b` | non c'è il serbatoio: vietato |
+| Alimentazione / riavvio del SoC | `0x99` / `0x9a` | vietati |
+| Altoparlante | `tinyplayer file.mp3`; volume `amixer cset iface=MIXER,name='speaker volume control' 0..63` | il GPIO 233 a 0 **non** lo spegne |
 
 ### Parametri meccanici [codice]
 Ruote: raggio 34,75 mm, carreggiata 241,5 mm, 3616 tick per giro (60,4 µm per tick). Batteria Li-ion 4S
@@ -147,20 +159,25 @@ RobotApp (cloud, app, mappe, programmazioni) non serve.
 | `0x07` | richiesta della versione | – | all'avvio |
 | `0x08` | azzera l'IMU | – | all'avvio e al risveglio |
 | `0x0a` | azzera gli errori | – | ogni tanto |
-| `0x0c` | SoC attivo (`01`) / sta per dormire (`00`) | 1 byte | all'avvio, al risveglio, prima della sospensione |
+| `0x0c` | `TinaHaltedDetectOnce`: sorveglianza del SoC (`01` avvio, `00` prima della sospensione) | 1 byte | all'avvio, al risveglio, prima della sospensione |
 | **`0x0d`** | **keepalive (AuxCtrl)** | – | **ogni 3,0 s**, solo se arrivano dati dal GD32 |
-| `0x17`, `0x18`, `0x19`, `0x7c`, `0x86`, `0x6b` | parte della sequenza di avvio | vari | all'avvio [significato da capire] |
-| `0x65` | tipo di controllo dei motori | 1 byte (00, 02) | all'avvio e ai cambi di modalità |
+| `0x17` | richiesta dati IMU grezzi (`01` + 3 byte di residui) | 4 byte | all'avvio |
+| `0x18` | elenco delle funzioni; risposta `04 00 00 00 3f 00 00 00` | – | all'avvio |
+| `0x19` | retromarcia automatica sugli anti-caduta | bool | all'avvio (`01`) |
+| `0x6b` | pompa dell'acqua | int8 | all'avvio (`00`) |
+| `0x7a` / `0x7c` / `0x80` | parametri autonomi (24 byte) / maschera sensori (`00 ff ff`) / bumper morbido | | `0x7c` all'avvio |
+| `0x84` / `0x85` / `0x86` | aspirazione: modo / PWM / PWM compensato | int32 / u8 / u8 | durante la pulizia |
+| `0x65` | modalità dei motori: 00 spenti, 01 per ruota, 02 v/ω | 1 byte | all'avvio e ai cambi di modalità |
 | `0x66` | velocità: v e ω | int32 v·16561,27 (tick/s), int32 ω·1999,77 | **ogni 20 ms** (quasi sempre zero) |
-| `0x67` | velocità delle due ruote | 2 × int32 | mai visto |
-| `0x68` | aspirazione | 2 byte | ai cambi di stato |
+| `0x67` | velocità delle due ruote (solo in modalità 01) | 2 × int32 | mai visto |
+| `0x68` | aspirazione: giri/min ÷ 10 | int16 | ai cambi di stato |
 | `0x69` / `0x6a` | spazzola laterale / centrale | int8 | ai cambi di stato |
 | `0x71` | potenza del motore del lidar | int32 0–100 | all'avvio (0) |
 | `0x78` / `0x79` | emettitori IR anti-caduta / direzione | bool | all'avvio di AuxCtrl/everest (`0x78 01`) |
 | `0x8d` | LED del tasto | 1 byte: 00, 01, 04, 08 | quando cambia lo stato |
 | `0x97` | alimentazione del lidar | bool | ai cambi di stato |
 | `0x99` / `0x9a` / `0x9b` | alimentazione SoC / riavvio SoC / caricatore | bool / – / bool | mai visti |
-| `0x9d` | [ipotesi] legato alla carica: `01` contatto perso, `00` sulla base | 1 byte | ai cambi del contatto di carica |
+| `0x9d` | alimentazione dei sensori: `00` sulla base, `01` fuori | 1 byte | ai cambi del contatto di carica |
 | `0xa1`–`0xa4` | calibrazioni di IMU e magnetometro | vari | `0xa2` all'avvio |
 
 **Messaggi dal GD32 al SoC:**
@@ -168,34 +185,20 @@ RobotApp (cloud, app, mappe, programmazioni) non serve.
 | cmd | Nome | Dati | Frequenza |
 |---|---|---|---|
 | **`0x15`** | **sensori** | 96 byte (tabella sotto) | **ogni 20,0 ms** |
+| `0x01` | codice di errore | ? | mai visto |
 | `0x06` | heartbeat del GD32 | – | ogni 2,0 s |
+| `0xab` | debug | ? | mai visto |
 | `0x07` | versione | 32 byte ASCII `"2.0.1_19082727"` | in risposta |
 | `0x08`, `0x0c`, `0x17`, `0x18`, `0xa2` | conferme della sequenza di avvio | vari | all'avvio |
 | `0x04` | conferma della sospensione | – | poi il GD32 tace |
 | `0x05` | risveglio (tasto premuto mentre dorme) | – | ogni 100 ms finché il SoC non conferma |
 
-**Frame dei sensori `0x15`** (offset nei 96 byte di dati):
-
-| Byte | Campo |
-|---|---|
-| 0 | stato [ipotesi] (01) |
-| 1 | bumper: bit 2 sinistro, bit 1 destro |
-| 3 | anti-caduta: bit 3…0 da sinistra a destra, 1 = vuoto |
-| 4 | bit 2 cassetto presente |
-| 7 | bit 0 in carica, bit 1 sulla base |
-| 8 | tensione batteria × 10 |
-| 9 | temperatura batteria [ipotesi] |
-| 16–19 / 24–27 | encoder sinistro / destro (int32) |
-| 40–43 | angolo dal giroscopio [ipotesi] |
-| 44–55 | IMU grezza [ipotesi] |
-| 56 | percentuale batteria [ipotesi] |
-| 58 / 60 / 62 | durata della pressione dei tasti accensione / punto (assente) / casa, in 10 ms |
-| 64 | bit 5 = 1 fuori dalla base [ipotesi] |
-| 65 | stato del LED (copia dell'ultimo `0x8d`) |
-| 78, 80, 82, 84 | 4 IR analogici [ipotesi: seguimuro] |
-| 88–89 | costante `03 19` |
-| 90–95 | copia di campi dell'IMU |
-| altri | 0 a robot fermo: probabilmente correnti dei motori e spazzole, da vedere con i motori accesi |
+**Frame dei sensori `0x15`** (96 byte, **50 Hz** sempre; tabella completa in `fase2.md`, decodifica in
+`gd32_leggi_sensori()`): 0 stato · 1 bumper · 2 [?] · 3 anti-caduta · 4 cassetto (bit 2) · 5 [?] · 6 IR della base ·
+7 carica · 8 tensione × 10 · 9 temperatura (int8) · 16/24 encoder · 32/36 v/ω misurati · 40–51 IMU · 52–57
+gravità (0,01 g) · 58/60/62 tasti (× 10 ms) · 64 bit 5 sensori alimentati · 65 LED · 67/68 eco spazzole ·
+69 ventola (× 100 giri/min) · 70 acqua · 74/76/78/80/82 correnti (mA) · 90–95 magnetometro [?].
+Everest ignora i byte 86–87.
 
 **Sequenze:**
 - **Avvio:** SoC → `0x0c 01`, `0x07`, `0x17 01 80 cf f0`, `0x18`, `0x71 0`, `0x65 0`, `0x19 01`, `0x7c 00 ff ff`,
@@ -204,7 +207,9 @@ RobotApp (cloud, app, mappe, programmazioni) non serve.
   poi `0x0c 00` e `0x04`; il GD32 conferma e smette di trasmettere.
 - **Risveglio:** tasto → GD32 `0x05` ripetuto; SoC → `0x0c 01`, `0x08`, `0x05`, `0x8d 01`. Attenzione: non rimanda
   `0x78 01`, quindi gli IR anti-caduta restano spenti finché lo stack non riparte.
-- **Watchdog del GD32 [verificato]:** sorveglia **solo `0x0d`**. Senza `0x0d` il GD32 resetta tutto il robot dopo
+- **Sorveglianza dei motori [verificato, fase 2]:** senza heartbeat `0x06` il GD32 toglie potenza ai motori dopo
+  ~1,9 s; senza comandi `0x66` (ma con l'heartbeat) mantiene l'ultima velocità.
+- **Watchdog del GD32 [verificato]:** per il reset sorveglia **solo `0x0d`**. Senza `0x0d` il GD32 resetta tutto il robot dopo
   **~190 s**, anche se riceve `0x06` ogni 200 ms. AuxCtrl manda `0x0d` ogni 3 s, e basta da solo a tenere vivo il robot.
 
 ### 3.2 Lidar → SoC (`/dev/ttyS1`, 115200)
@@ -221,7 +226,10 @@ All'accensione un testo in cinese (GBK) con produttore e versione, poi pacchetti
 | cmd | `0xA9` scansione (formato vecchio), `0xAB` salute, `0xAC` versione, `0xAD` scansione (nuovo formato), `0xAE` velocità |
 | n | byte di parametri (big-endian) |
 
-Il contenuto delle scansioni (angoli, distanze, intensità) si ricava con il lidar in rotazione (fase 3).
+Contenuto [verificato, fase 2]: `0xAD` = u8 velocità × 0,05 giri/s | int16 × 0,01 (sempre 0,82) [?] | u16 angolo di
+inizio × 0,01° | punti da 3 byte (u8 intensità, u16 distanza in quarti di mm). 16 settori da 22,5° per giro, ~21
+punti ciascuno. `0xAE` (u8 × 0,05 giri/s) arriva solo sotto ~4 giri/s, quando non ci sono scansioni. Velocità ≈
+0,086 giri/s per unità di `0x71`; AuxCtrl regola a 6 giri/s con `60 + I + 10·e + 10·Δe` ogni 20 ms.
 
 ### 3.3 AuxCtrl ↔ everest-server (`/tmp/AuxEverest_Sock`, socket Unix stream)
 

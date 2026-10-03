@@ -1,0 +1,12 @@
+# Fase 2, blocco C1: accensione del lidar e curva potenza -> velocità. Il motore del lidar non richiede --sollevato.
+# Uso: tools/banco-robot.sh lidar c1 --sequenza tools/sequenze/c1-lidar.seq --tensione-minima 140
+0      0x97:01          # alimentazione del lidar
+2000   0x71:i32=60      # potenza di partenza di AuxCtrl (lidarSpeedControl: 60 + PID, riferimento 6 giri/s)
+12000  0x71:i32=40
+20000  0x71:i32=50
+28000  0x71:i32=70
+36000  0x71:i32=80
+44000  0x71:i32=60
+52000  0x71:i32=0
+54000  0x97:00
+56000  fine

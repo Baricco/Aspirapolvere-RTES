@@ -1,0 +1,5 @@
+# Fase 2, blocco C5: chi abilita la carica? Stack originale fermo; l'utente appoggia il robot sulla base nei primi
+# ~30 s. Niente motori. Uso: tools/banco-robot.sh avvia c5c --sequenza tools/sequenze/c5-carica.seq --csv-ogni 100
+120000 0x9d:00      # packetSensorPower(false): everest lo manda quando il robot è sulla base
+180000 0x9b:01      # packetChargerPower(true): solo in AuxCtrl, mai visto nelle catture
+240000 fine

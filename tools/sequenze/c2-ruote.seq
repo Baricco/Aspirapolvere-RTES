@@ -1,0 +1,18 @@
+# Fase 2, blocco C2: ruote. SOLO CON IL ROBOT SOLLEVATO (--sollevato; il banco di prova lo verifica).
+# Scale di 0x66 (packetMotorVelocity): v_tick = v[m/s] * 16561,27 ; w_tick = w[rad/s] * 1999,77.
+# Uso: tools/banco-robot.sh avvia c2 --sollevato --sequenza tools/sequenze/c2-ruote.seq --tensione-minima 140
+0      ogni 20 0x66:i32=0,i32=0       # velocità zero ogni 20 ms, come everest-server
+1000   0x65:02                        # tipo di controllo usato da everest durante la pulizia
+2000   ogni 20 0x66:i32=828,i32=0     # avanti a 5 cm/s
+5000   ogni 20 0x66:i32=-828,i32=0    # indietro a 5 cm/s
+8000   ogni 20 0x66:i32=0,i32=400     # rotazione sul posto a 0,2 rad/s
+11000  ogni 20 0x66:i32=0,i32=0
+12000  ogni 20 0x66:i32=1656,i32=0    # avanti a 10 cm/s
+14000  basta 0x66                     # smetto di mandare la velocità: il GD32 si ferma da solo? dopo quanto?
+20000  0x66:i32=0,i32=0
+20500  ogni 20 0x67:i32=828,i32=0     # 0x67: solo la ruota sinistra (?) a 5 cm/s
+23000  ogni 20 0x67:i32=0,i32=828     # solo la destra (?)
+26000  ogni 20 0x67:i32=0,i32=0
+27000  basta 0x67
+27500  0x65:00
+28000  fine

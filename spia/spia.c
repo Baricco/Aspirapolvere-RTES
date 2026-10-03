@@ -26,6 +26,7 @@
  * pty che fa da finto dispositivo.
  */
 #define _GNU_SOURCE
+#include <ctype.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <getopt.h>
@@ -44,6 +45,7 @@
 #include <unistd.h>
 
 #include "../gd32/gd32.h"
+#include "../gd32/sicurezza.h"
 #include "../lidar/lidar.h"
 #include "../rt/rt.h"
 #include "everest.h"
@@ -917,41 +919,361 @@ fine:
 
 
 /* ------------------------------------------------------------------------------------------------------ */
-/* guida: parla direttamente con il GD32 al posto di AuxCtrl (stack originale fermo)                      */
+/* guida: banco di prova, parla direttamente con il GD32 al posto dello stack originale (stack fermo)      */
 /*
- * Apre la seriale (115200 8N1 raw), conta i frame che arrivano e manda periodicamente SOLO i frame indicati:
- *   --invia CMD:PERIODO_MS   es. --invia 0x0d:3000 --invia 0x06:200   (frame senza dati; ripetibile)
- *   --solo-se-ricevi         come AuxCtrl con 0x0d: manda solo se dal GD32 è arrivato almeno un frame
- *                            dall'invio precedente
- *   --durata S               si ferma dopo S secondi (0 = mai)
- *   -o REGISTRO              registra tutto (formato di registro.h)
- * Ogni secondo stampa una riga di stato su stdout (flush immediato: si può seguire via SSH).
- * NON manda mai comandi ai motori.
+ * Apre la seriale (115200 8N1 raw) e fa da "AuxCtrl + everest-server" minimo:
+ *   - manda il keepalive 0x0d ogni 3 s (senza, il GD32 resetta il robot dopo ~190 s) e l'heartbeat 0x06 ogni
+ *     200 ms, come lo stack originale (--senza-keepalive, --senza-heartbeat per le prove sul watchdog);
+ *   - manda i comandi chiesti:
+ *       --invia CMD[:DATI]@MS   periodico, ogni MS millisecondi (ripetibile)
+ *       --una CMD[:DATI]        una volta sola, all'inizio (ripetibile, nell'ordine dato)
+ *       --sequenza FILE         comandi a tempi stabiliti (formato sotto)
+ *     DATI = elementi separati da virgole: byte in esadecimale ("0a00") oppure tipo=valore con tipo
+ *     i8 u8 i16 u16 i32 u32 (little-endian). Esempi: 0x0d   0x97:01   0x66:i32=1000,i32=0@20
+ *   - stampa ogni secondo una riga con i sensori decodificati (gd32_sensori_t) e i contatori, e subito ogni
+ *     frame del GD32 che non sia sensori o heartbeat; con --csv FILE scrive tutti i campi dei sensori
+ *     (ogni frame, oppure ogni --csv-ogni MS);
+ *   - con -o REGISTRO registra tutti i byte nelle due direzioni (formato di registro.h).
+ *
+ * Sicurezza (gd32/sicurezza.h): i comandi ai motori diversi da zero partono solo con --sollevato, con tutti gli
+ * anti-caduta su "vuoto" e frame dei sensori recenti. Se il blocco scatta, o all'uscita (fine, Ctrl-C,
+ * SIGTERM, SIGHUP), manda i frame che fermano tutti i motori. Pompa dell'acqua e alimentazione del SoC sono
+ * rifiutate già alla lettura delle opzioni. Con --tensione-minima DV, se la tensione media dell'ultimo secondo
+ * scende sotto DV decimi di volt ferma i motori ed esce con codice 3.
+ *
+ * Formato di --sequenza (una riga per passo, tempi in ms dall'avvio, crescenti; # = commento):
+ *     0     ogni 20 0x66:i32=0,i32=0     comando periodico (sostituisce quello con lo stesso cmd)
+ *     500   0x69:i8=30                   comando singolo
+ *     2000  basta 0x66                   smette di mandare il periodico 0x66
+ *     3000  fine                         esce (con l'arresto dei motori)
+ *
+ * Con --comandi FIFO legge anche comandi dal vivo, una riga per comando nello stesso formato di --una (la FIFO
+ * viene creata se non esiste), es. dal robot: echo 0x8d:05 > /tmp/rtes/comandi. Passano dal blocco di sicurezza.
+ *
+ * Codici d'uscita: 0 fine normale, 1 errore, 2 opzioni sbagliate, 3 tensione minima, 4 blocco di sicurezza
+ * scattato durante la prova.
  */
-typedef struct {
-	uint64_t sensori, hb_gd32;
-} conta_guida_t;
+#define GUIDA_MAX_PERIODICI 16
+#define GUIDA_MAX_PASSI     2048
 
-static void conta_guida(const gd32_frame_t *f, void *ctx)
+typedef struct {
+	uint8_t cmd;
+	uint8_t n;
+	uint8_t dati[GD32_MAX_DATI];
+} comando_t;
+
+typedef struct {
+	comando_t c;
+	int64_t periodo, prossimo;
+	uint64_t mandati;
+	int solo_se_ricevi;
+} periodico_t;
+
+typedef enum { PASSO_UNA, PASSO_OGNI, PASSO_BASTA, PASSO_FINE } tipo_passo_t;
+
+typedef struct {
+	int64_t t;
+	tipo_passo_t tipo;
+	int64_t periodo;
+	comando_t c;
+} passo_t;
+
+/* "CMD[:DATI]" -> comando. Ritorna 0, oppure -1 se il testo non è valido. */
+static int analizza_comando(const char *testo, comando_t *c)
 {
-	conta_guida_t *c = ctx;
-	if (f->cmd == GD32_SENSORI)
-		c->sensori++;
-	if (f->cmd == GD32_HEARTBEAT)
-		c->hb_gd32++;
+	char tmp[1024], *salva, *fine;
+	snprintf(tmp, sizeof tmp, "%s", testo);
+	char *due = strchr(tmp, ':');
+	if (due)
+		*due++ = 0;
+	long cmd = strtol(tmp, &fine, 0);
+	if (fine == tmp || *fine || cmd < 0 || cmd > 255)
+		return -1;
+	c->cmd = (uint8_t)cmd;
+	c->n = 0;
+	if (!due)
+		return 0;
+	for (char *el = strtok_r(due, ",", &salva); el; el = strtok_r(NULL, ",", &salva)) {
+		char *uguale = strchr(el, '=');
+		if (uguale) {
+			*uguale = 0;
+			int dim = !strcmp(el, "i8") || !strcmp(el, "u8") ? 1 :
+			          !strcmp(el, "i16") || !strcmp(el, "u16") ? 2 :
+			          !strcmp(el, "i32") || !strcmp(el, "u32") ? 4 : 0;
+			long long v = strtoll(uguale + 1, &fine, 0);
+			if (!dim || fine == uguale + 1 || *fine || c->n + dim > GD32_MAX_DATI)
+				return -1;
+			for (int i = 0; i < dim; i++)
+				c->dati[c->n++] = (uint8_t)((unsigned long long)v >> (8 * i));
+		} else {
+			size_t l = strlen(el);
+			if (l == 0 || l % 2)
+				return -1;
+			for (size_t i = 0; i < l; i += 2) {
+				char h[3] = { el[i], el[i + 1], 0 };
+				if (!isxdigit((unsigned char)h[0]) || !isxdigit((unsigned char)h[1]) || c->n >= GD32_MAX_DATI)
+					return -1;
+				c->dati[c->n++] = (uint8_t)strtol(h, NULL, 16);
+			}
+		}
+	}
+	return 0;
+}
+
+/* Controlli alla lettura delle opzioni: vietati sempre; motori diversi da zero solo con --sollevato. */
+static int comando_ammesso(const comando_t *c, int sollevato, const char *testo)
+{
+	int zero = 1;
+	for (int i = 0; i < c->n; i++)
+		zero &= c->dati[i] == 0;
+	if (sic_e_vietato(c->cmd)) {
+		fprintf(stderr, "spia guida: %s: comando vietato (pompa dell'acqua o alimentazione del SoC)\n", testo);
+		return 0;
+	}
+	if (sic_e_motore(c->cmd) && !zero && !sollevato) {
+		fprintf(stderr, "spia guida: %s: comando a un motore, serve --sollevato (robot sollevato da terra)\n", testo);
+		return 0;
+	}
+	return 1;
+}
+
+static int leggi_sequenza(const char *percorso, passo_t *p, int max, int sollevato)
+{
+	FILE *f = fopen(percorso, "r");
+	if (!f) {
+		fprintf(stderr, "spia guida: apro %s: %s\n", percorso, strerror(errno));
+		return -1;
+	}
+	char riga[1100];
+	int n = 0, nr = 0;
+	int64_t ultimo = 0;
+	while (fgets(riga, sizeof riga, f)) {
+		nr++;
+		char *c = strchr(riga, '#');
+		if (c)
+			*c = 0;
+		char a[1024] = "", b[1024] = "", d[1024] = "";
+		long long t;
+		int k = sscanf(riga, "%lld %1023s %1023s %1023s", &t, a, b, d);
+		if (k <= 0)
+			continue;
+		if (n == max || k < 2 || t < 0 || t * RT_NS_PER_MS < ultimo)
+			goto errore;
+		p[n].t = ultimo = t * RT_NS_PER_MS;
+		const char *testo = a;
+		if (!strcmp(a, "fine")) {
+			p[n].tipo = PASSO_FINE;
+			n++;
+			continue;
+		} else if (!strcmp(a, "basta")) {
+			p[n].tipo = PASSO_BASTA;
+			testo = b;
+		} else if (!strcmp(a, "ogni")) {
+			p[n].tipo = PASSO_OGNI;
+			p[n].periodo = atoll(b) * RT_NS_PER_MS;
+			if (p[n].periodo <= 0)
+				goto errore;
+			testo = d;
+		} else {
+			p[n].tipo = PASSO_UNA;
+		}
+		if (analizza_comando(testo, &p[n].c) || !comando_ammesso(&p[n].c, sollevato, testo))
+			goto errore;
+		n++;
+	}
+	fclose(f);
+	return n;
+errore:
+	fprintf(stderr, "spia guida: %s, riga %d non valida\n", percorso, nr);
+	fclose(f);
+	return -1;
+}
+
+/* Stato del banco di prova, condiviso con la callback dei frame ricevuti. */
+typedef struct {
+	int fd;
+	FILE *reg, *csv;
+	int64_t t0, csv_ogni, csv_prossimo;
+	sicurezza_t sic;
+	int scattato_ora;                   /* la callback ha fatto scattare il blocco: arresto da mandare */
+	gd32_sensori_t s;                   /* ultimo frame dei sensori decodificato */
+	int ha_sensori;
+	uint64_t sensori, hb_gd32, altri;
+	long somma_dv, n_dv;                /* tensione media dell'ultimo secondo */
+	uint64_t mandati_cmd[256];
+} guida_t;
+
+static double guida_t_s(const guida_t *g, int64_t adesso) { return (double)(adesso - g->t0) / RT_NS_PER_S; }
+
+static void guida_csv_testa(FILE *f)
+{
+	fprintf(f, "t_s,stato,bumper,cliff,cassetto,in_carica,sulla_base,tensione_dv,temperatura_c,encoder_sx,encoder_dx,"
+	           "vel_sx,vel_dx,vel_imb,vel_bec,vel_rol,ang_imb,ang_bec,ang_rol,grav_x,grav_y,grav_z,tasto_acc_ms,tasto_casa_ms,"
+	           "b2,b4,b5,b6,controllo,led,b66,b67,b68,b69x100,acqua,g72,c74,c76,c78,c80,c82,c84,b88,mag_x,mag_y,mag_z\n");
+}
+
+static void guida_csv_riga(FILE *f, double t, const gd32_sensori_t *s, const uint8_t *d)
+{
+	fprintf(f, "%.3f,%u,%u,%u,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%u,%u,%u,%u,%u,%u,%u,%d,%u,%d,%u,%u",
+	        t, s->stato, s->bumper_bit, d[3], s->cassetto, s->in_carica, s->sulla_base, s->tensione_dv,
+	        s->temperatura_c, s->encoder_sx, s->encoder_dx, s->vel_sx, s->vel_dx, s->vel_angolare[0], s->vel_angolare[1], s->vel_angolare[2],
+	        s->angolo[0], s->angolo[1], s->angolo[2], s->gravita[0], s->gravita[1], s->gravita[2], s->tasto_accensione_ms,
+	        s->tasto_casa_ms, s->byte2, d[4], s->byte5, d[6], s->controllo, s->led, s->byte66, s->byte67, s->byte68,
+	        s->byte69_x100, s->acqua, s->grezzo72);
+	for (int i = 0; i < 6; i++)
+		fprintf(f, ",%u", s->correnti[i]);
+	fprintf(f, ",%d,%d,%d,%d\n", s->byte88, s->magnetico[0], s->magnetico[1], s->magnetico[2]);
+}
+
+static void guida_frame(const gd32_frame_t *f, void *ctx)
+{
+	guida_t *g = ctx;
+	int64_t adesso = rt_adesso();
+	if (sic_ricevuto(&g->sic, f, adesso))
+		g->scattato_ora = 1;
+	if (f->cmd == GD32_SENSORI && gd32_leggi_sensori(f, &g->s) == 0) {
+		g->ha_sensori = 1;
+		g->sensori++;
+		g->somma_dv += g->s.tensione_dv;
+		g->n_dv++;
+		if (g->csv && adesso >= g->csv_prossimo) {
+			guida_csv_riga(g->csv, guida_t_s(g, adesso), &g->s, f->dati);
+			g->csv_prossimo = g->csv_ogni ? adesso + g->csv_ogni : 0;
+		}
+		return;
+	}
+	if (f->cmd == GD32_HEARTBEAT) {
+		g->hb_gd32++;
+		return;
+	}
+	g->altri++;
+	const char *nome = gd32_nome_cmd(f->cmd);
+	printf("%8.3f rx 0x%02x %s:", guida_t_s(g, adesso), f->cmd, nome ? nome : "?");
+	for (int i = 0; i < f->n_dati; i++)
+		printf(" %02x", f->dati[i]);
+	putchar('\n');
+	fflush(stdout);
+}
+
+static void guida_scrivi(guida_t *g, const uint8_t *fr, size_t k, int64_t adesso)
+{
+	if (scrivi_tutto(g->fd, fr, k, 50) == 0 && g->reg)
+		reg_scrivi_record(g->reg, adesso, 0, REG_DAL_SOC, fr, (uint16_t)k);
+}
+
+/*
+ * Manda un comando passando dal blocco di sicurezza. stampa = 1 per scrivere una riga (comandi non periodici).
+ * Ritorna 1 se il frame è partito, 0 se il blocco lo ha rifiutato.
+ */
+static int guida_manda(guida_t *g, const comando_t *c, int stampa)
+{
+	int64_t adesso = rt_adesso();
+	sic_esito_t e = sic_permesso(&g->sic, c->cmd, c->dati, c->n, adesso);
+	if (e != SIC_PERMESSO) {
+		if (stampa || g->sic.rifiutati == 1)
+			printf("%8.3f RIFIUTATO 0x%02x (%s)\n", guida_t_s(g, adesso), c->cmd,
+			       g->sic.scattato ? g->sic.motivo : "il robot non risulta sollevato");
+		fflush(stdout);
+		return 0;
+	}
+	uint8_t fr[GD32_MAX_FRAME];
+	size_t k = gd32_componi(c->cmd, c->dati, c->n, fr, sizeof fr);
+	guida_scrivi(g, fr, k, adesso);
+	g->mandati_cmd[c->cmd]++;
+	if (stampa) {
+		const char *nome = gd32_nome_cmd(c->cmd);
+		printf("%8.3f tx 0x%02x %s:", guida_t_s(g, adesso), c->cmd, nome ? nome : "?");
+		for (int i = 0; i < c->n; i++)
+			printf(" %02x", c->dati[i]);
+		putchar('\n');
+		fflush(stdout);
+	}
+	return 1;
+}
+
+static void guida_arresto(guida_t *g, const char *perche)
+{
+	uint8_t buf[256];
+	int64_t adesso = rt_adesso();
+	size_t k = sic_frame_arresto(buf, sizeof buf);
+	guida_scrivi(g, buf, k, adesso);
+	printf("%8.3f ARRESTO DEI MOTORI: %s\n", guida_t_s(g, adesso), perche);
+	fflush(stdout);
+}
+
+static void guida_riga_stato(guida_t *g, int64_t adesso, const periodico_t *per, int n_per)
+{
+	const gd32_sensori_t *s = &g->s;
+	printf("%8.3f ", guida_t_s(g, adesso));
+	if (g->ha_sensori)
+		printf("%4.1f V %d°C cliff %x bump %x base %d/%d enc %d/%d vel %d/%d corr %u %u %u %u %u %u led %02x |",
+		       s->tensione_dv / 10.0, s->temperatura_c, g->sic.cliff, s->bumper_bit, s->sulla_base, s->in_carica,
+		       s->encoder_sx, s->encoder_dx, s->vel_sx, s->vel_dx, s->correnti[0], s->correnti[1],
+		       s->correnti[2], s->correnti[3], s->correnti[4], s->correnti[5], s->led);
+	else
+		printf("nessun frame dei sensori |");
+	printf(" rx sens %llu hb %llu altri %llu | tx", (unsigned long long)g->sensori,
+	       (unsigned long long)g->hb_gd32, (unsigned long long)g->altri);
+	for (int i = 0; i < n_per; i++)
+		printf(" %02x:%llu", per[i].c.cmd, (unsigned long long)per[i].mandati);
+	if (g->sic.rifiutati)
+		printf(" | rifiutati %llu", (unsigned long long)g->sic.rifiutati);
+	if (g->sic.scattato)
+		printf(" | BLOCCATO");
+	putchar('\n');
+	fflush(stdout);
+}
+
+static void aggiungi_periodico(periodico_t *per, int *n, const comando_t *c, int64_t periodo, int64_t adesso)
+{
+	int i;
+	for (i = 0; i < *n && per[i].c.cmd != c->cmd; i++)
+		;
+	if (i == *n) {
+		if (*n == GUIDA_MAX_PERIODICI)
+			return;
+		(*n)++;
+		per[i].mandati = 0;
+	}
+	per[i].c = *c;
+	per[i].periodo = periodo;
+	per[i].prossimo = adesso;
+	per[i].solo_se_ricevi = 0;
+}
+
+static void togli_periodico(periodico_t *per, int *n, uint8_t cmd)
+{
+	for (int i = 0; i < *n; i++)
+		if (per[i].c.cmd == cmd) {
+			memmove(&per[i], &per[i + 1], (size_t)(*n - i - 1) * sizeof per[0]);
+			(*n)--;
+			return;
+		}
 }
 
 static int cmd_guida(int argc, char **argv)
 {
-	const char *disp = "/dev/ttyS3", *uscita = NULL;
-	int durata = 0, solo_se_ricevi = 0, n_inv = 0;
-	struct { uint8_t cmd; int64_t periodo, prossimo; uint64_t mandati; } inv[8];
+	const char *disp = "/dev/ttyS3", *uscita = NULL, *file_seq = NULL, *file_csv = NULL, *file_comandi = NULL;
+	int durata = 0, solo_se_ricevi = 0, forza = 0, sollevato = 0, keepalive = 1, heartbeat = 1;
+	int tensione_minima = 0, csv_ogni_ms = 0;
+	static periodico_t per[GUIDA_MAX_PERIODICI];
+	static passo_t passi[GUIDA_MAX_PASSI];
+	static comando_t una[32];
+	int n_per = 0, n_passi = 0, n_una = 0;
+	const char *testi_invia[GUIDA_MAX_PERIODICI];
+	int n_invia = 0;
+
 	static const struct option opz[] = {
 		{ "dispositivo", required_argument, 0, 'd' }, { "invia", required_argument, 0, 'i' },
+		{ "una", required_argument, 0, '1' }, { "sequenza", required_argument, 0, 'q' },
 		{ "durata", required_argument, 0, 't' }, { "solo-se-ricevi", no_argument, 0, 'r' },
-		{ "uscita", required_argument, 0, 'o' }, { "forza", no_argument, 0, 'F' }, { 0, 0, 0, 0 },
+		{ "uscita", required_argument, 0, 'o' }, { "forza", no_argument, 0, 'F' },
+		{ "sollevato", no_argument, 0, 'S' }, { "senza-keepalive", no_argument, 0, 'K' },
+		{ "senza-heartbeat", no_argument, 0, 'H' }, { "tensione-minima", required_argument, 0, 'v' },
+		{ "csv", required_argument, 0, 'c' }, { "csv-ogni", required_argument, 0, 'C' },
+		{ "comandi", required_argument, 0, 'X' }, { 0, 0, 0, 0 },
 	};
-	int o, forza = 0;
+	int o;
 	while ((o = getopt_long(argc, argv, "d:i:t:ro:", opz, NULL)) != -1) {
 		switch (o) {
 		case 'd': disp = optarg; break;
@@ -959,34 +1281,73 @@ static int cmd_guida(int argc, char **argv)
 		case 'r': solo_se_ricevi = 1; break;
 		case 'o': uscita = optarg; break;
 		case 'F': forza = 1; break;
-		case 'i': {
-			char *due = strchr(optarg, ':');
-			if (!due || n_inv == 8) {
-				fprintf(stderr, "spia guida: --invia CMD:PERIODO_MS\n");
+		case 'S': sollevato = 1; break;
+		case 'K': keepalive = 0; break;
+		case 'H': heartbeat = 0; break;
+		case 'v': tensione_minima = atoi(optarg); break;
+		case 'c': file_csv = optarg; break;
+		case 'C': csv_ogni_ms = atoi(optarg); break;
+		case 'q': file_seq = optarg; break;
+		case 'X': file_comandi = optarg; break;
+		case 'i':
+			if (n_invia == GUIDA_MAX_PERIODICI - 2) {
+				fprintf(stderr, "spia guida: troppi --invia\n");
 				return 2;
 			}
-			long c = strtol(optarg, NULL, 0), ms = atol(due + 1);
-			if (c == GD32_VELOCITA || c == GD32_VELOCITA_RUOTE || c == GD32_ASPIRAZIONE ||
-			    c == GD32_SPAZZOLA_LATERALE || c == GD32_SPAZZOLA_CENTRALE || c == GD32_MOTORE_LIDAR || ms <= 0) {
-				fprintf(stderr, "spia guida: comando 0x%02lx non ammesso (niente motori) o periodo non valido\n", c);
-				return 2;
-			}
-			inv[n_inv].cmd = (uint8_t)c;
-			inv[n_inv].periodo = RT_MS(ms);
-			inv[n_inv].mandati = 0;
-			n_inv++;
+			testi_invia[n_invia++] = optarg;
 			break;
-		}
+		case '1':
+			if (n_una == 32 || analizza_comando(optarg, &una[n_una])) {
+				fprintf(stderr, "spia guida: --una CMD[:DATI] non valido: %s\n", optarg);
+				return 2;
+			}
+			n_una++;
+			break;
 		default: return 2;
 		}
 	}
+	/* i controlli dei comandi si fanno dopo aver letto tutte le opzioni (--sollevato può venire dopo) */
+	for (int i = 0; i < n_una; i++)
+		if (!comando_ammesso(&una[i], sollevato, "--una"))
+			return 2;
+	int64_t ora = rt_adesso();
+	if (keepalive) {
+		comando_t c = { .cmd = GD32_KEEPALIVE };
+		aggiungi_periodico(per, &n_per, &c, RT_MS(3000), ora);
+		per[n_per - 1].solo_se_ricevi = solo_se_ricevi;
+	}
+	if (heartbeat) {
+		comando_t c = { .cmd = GD32_HEARTBEAT };
+		aggiungi_periodico(per, &n_per, &c, RT_MS(200), ora);
+	}
+	for (int i = 0; i < n_invia; i++) {
+		char tmp[1024];
+		snprintf(tmp, sizeof tmp, "%s", testi_invia[i]);
+		char *at = strrchr(tmp, '@');
+		comando_t c;
+		long ms = at ? atol(at + 1) : 0;
+		if (at)
+			*at = 0;
+		if (!at || ms <= 0 || analizza_comando(tmp, &c)) {
+			fprintf(stderr, "spia guida: --invia CMD[:DATI]@MS non valido: %s\n", testi_invia[i]);
+			return 2;
+		}
+		if (!comando_ammesso(&c, sollevato, testi_invia[i]))
+			return 2;
+		aggiungi_periodico(per, &n_per, &c, RT_MS(ms), ora);
+	}
+	if (file_seq && (n_passi = leggi_sequenza(file_seq, passi, GUIDA_MAX_PASSI, sollevato)) < 0)
+		return 2;
+
 	if (chi_lo_usa(disp) && !forza) {
 		fprintf(stderr, "spia guida: prima ferma lo stack originale\n");
 		return 1;
 	}
-	int fd = open(disp, O_RDWR | O_NOCTTY | O_NONBLOCK);
+	static guida_t g;
+	memset(&g, 0, sizeof g);
+	g.fd = open(disp, O_RDWR | O_NOCTTY | O_NONBLOCK);
 	struct termios t;
-	if (fd < 0 || tcgetattr(fd, &t)) {
+	if (g.fd < 0 || tcgetattr(g.fd, &t)) {
 		fprintf(stderr, "spia guida: apro %s: %s\n", disp, strerror(errno));
 		return 1;
 	}
@@ -995,15 +1356,39 @@ static int cmd_guida(int argc, char **argv)
 	cfsetospeed(&t, B115200);
 	t.c_cflag |= CLOCAL | CREAD;
 	t.c_cflag &= ~(CSTOPB | CRTSCTS | PARENB);
-	tcsetattr(fd, TCSANOW, &t);
+	tcsetattr(g.fd, TCSANOW, &t);
 
-	FILE *reg = NULL;
 	if (uscita) {
-		reg = fopen(uscita, "wb");
+		g.reg = fopen(uscita, "wb");
 		reg_intestazione_t h = { .n_canali = 1 };
 		analizza_canale("gd32,gd32,/dev/ttyS3", &h.canali[0], 0);
-		if (reg)
-			reg_scrivi_intestazione(reg, &h);
+		if (g.reg)
+			reg_scrivi_intestazione(g.reg, &h);
+	}
+	if (file_csv) {
+		g.csv = fopen(file_csv, "w");
+		if (!g.csv) {
+			fprintf(stderr, "spia guida: apro %s: %s\n", file_csv, strerror(errno));
+			return 1;
+		}
+		guida_csv_testa(g.csv);
+		g.csv_ogni = RT_MS(csv_ogni_ms);
+	}
+	/* FIFO dei comandi dal vivo: aperta in lettura e scrittura, così non dà EOF quando chi scrive chiude */
+	int fd_cmd = -1;
+	static char cmd_buf[2048];
+	size_t cmd_n = 0;
+	if (file_comandi) {
+		struct stat st;
+		if (stat(file_comandi, &st) != 0 && mkfifo(file_comandi, 0600) != 0) {
+			fprintf(stderr, "spia guida: mkfifo %s: %s\n", file_comandi, strerror(errno));
+			return 1;
+		}
+		fd_cmd = open(file_comandi, O_RDWR | O_NONBLOCK);
+		if (fd_cmd < 0) {
+			fprintf(stderr, "spia guida: apro %s: %s\n", file_comandi, strerror(errno));
+			return 1;
+		}
 	}
 	struct sigaction sa = { .sa_handler = al_segnale };
 	sigaction(SIGINT, &sa, NULL);
@@ -1015,67 +1400,132 @@ static int cmd_guida(int argc, char **argv)
 	struct sched_param sp = { .sched_priority = 80 };
 	sched_setscheduler(0, SCHED_FIFO, &sp);
 
+	sic_init(&g.sic, sollevato, RT_MS(100));
 	gd32_deframer_t dfr;
 	gd32_deframer_init(&dfr);
 	static uint8_t buf[4096];
-	int64_t t0 = rt_adesso(), prossima_riga = t0 + RT_S(1), ultimo_rx = t0;
+	g.t0 = rt_adesso();
+	int64_t prossima_riga = g.t0 + RT_S(1);
 	uint64_t frame_da_invio = 0;
-	conta_guida_t conta = { 0, 0 };
-	for (int i = 0; i < n_inv; i++)
-		inv[i].prossimo = t0;
-	printf("guida: %s, %d comandi periodici%s\n", disp, n_inv, solo_se_ricevi ? " (solo se ricevo)" : "");
+	int esito = 0, ip = 0;
+	for (int i = 0; i < n_per; i++)
+		per[i].prossimo = g.t0;
+	printf("guida: %s, %d periodici, %d singoli, %d passi%s%s\n", disp, n_per, n_una, n_passi,
+	       sollevato ? ", motori ammessi (--sollevato)" : ", motori NON ammessi",
+	       tensione_minima ? ", con tensione minima" : "");
 	fflush(stdout);
+	for (int i = 0; i < n_una; i++)
+		guida_manda(&g, &una[i], 1);
+
 	while (!fermati) {
 		int64_t adesso = rt_adesso();
-		if (durata > 0 && adesso - t0 >= RT_S(durata))
+		if (durata > 0 && adesso - g.t0 >= RT_S(durata))
 			break;
-		for (int i = 0; i < n_inv; i++) {
-			if (adesso < inv[i].prossimo)
-				continue;
-			inv[i].prossimo += inv[i].periodo;
-			if (solo_se_ricevi && frame_da_invio == 0)
-				continue;
-			uint8_t fr[8];
-			size_t k = gd32_componi(inv[i].cmd, NULL, 0, fr, sizeof fr);
-			if (write(fd, fr, k) == (ssize_t)k) {
-				inv[i].mandati++;
-				if (reg)
-					reg_scrivi_record(reg, adesso, 0, REG_DAL_SOC, fr, (uint16_t)k);
+		/* passi della sequenza arrivati al loro tempo */
+		int fine = 0;
+		while (ip < n_passi && adesso - g.t0 >= passi[ip].t) {
+			passo_t *p = &passi[ip++];
+			if (p->tipo == PASSO_FINE) {
+				fine = 1;
+				break;
+			} else if (p->tipo == PASSO_UNA) {
+				guida_manda(&g, &p->c, 1);
+			} else if (p->tipo == PASSO_OGNI) {
+				aggiungi_periodico(per, &n_per, &p->c, p->periodo, adesso);
+				printf("%8.3f ogni %lld ms: 0x%02x\n", guida_t_s(&g, adesso), (long long)(p->periodo / RT_NS_PER_MS), p->c.cmd);
+			} else {
+				togli_periodico(per, &n_per, p->c.cmd);
+				printf("%8.3f basta 0x%02x\n", guida_t_s(&g, adesso), p->c.cmd);
 			}
-			frame_da_invio = 0;
+			fflush(stdout);
 		}
-		struct pollfd p = { .fd = fd, .events = POLLIN };
-		poll(&p, 1, 10);
-		ssize_t k = read(fd, buf, sizeof buf);
+		if (fine)
+			break;
+		/* comandi periodici */
+		int64_t prossimo_evento = adesso + RT_MS(10);
+		for (int i = 0; i < n_per; i++) {
+			if (adesso >= per[i].prossimo) {
+				per[i].prossimo += per[i].periodo;
+				if (per[i].prossimo <= adesso)         /* in ritardo di più di un periodo: niente raffiche */
+					per[i].prossimo = adesso + per[i].periodo;
+				if (!per[i].solo_se_ricevi || frame_da_invio) {
+					per[i].mandati += (uint64_t)guida_manda(&g, &per[i].c, 0);
+				}
+				if (per[i].c.cmd == GD32_KEEPALIVE)
+					frame_da_invio = 0;
+			}
+			if (per[i].prossimo < prossimo_evento)
+				prossimo_evento = per[i].prossimo;
+		}
+		if (ip < n_passi && g.t0 + passi[ip].t < prossimo_evento)
+			prossimo_evento = g.t0 + passi[ip].t;
+		/* ricezione */
+		int attesa = (int)((prossimo_evento - rt_adesso()) / RT_NS_PER_MS);
+		struct pollfd p[2] = { { .fd = g.fd, .events = POLLIN }, { .fd = fd_cmd, .events = POLLIN } };
+		poll(p, fd_cmd >= 0 ? 2 : 1, attesa < 0 ? 0 : attesa);
+		if (fd_cmd >= 0 && (p[1].revents & POLLIN)) {
+			ssize_t r = read(fd_cmd, cmd_buf + cmd_n, sizeof cmd_buf - 1 - cmd_n);
+			if (r > 0)
+				cmd_n += (size_t)r;
+			char *nl;
+			while ((nl = memchr(cmd_buf, '\n', cmd_n))) {          /* una riga = un comando */
+				*nl = 0;
+				comando_t c;
+				char *riga = cmd_buf + strspn(cmd_buf, " \t");
+				if (*riga && *riga != '#') {
+					if (analizza_comando(riga, &c) == 0 && comando_ammesso(&c, sollevato, riga))
+						guida_manda(&g, &c, 1);
+					else
+						printf("%8.3f comando non valido: %s\n", guida_t_s(&g, rt_adesso()), riga);
+					fflush(stdout);
+				}
+				size_t usati = (size_t)(nl - cmd_buf) + 1;
+				memmove(cmd_buf, nl + 1, cmd_n - usati);
+				cmd_n -= usati;
+			}
+			if (cmd_n == sizeof cmd_buf - 1)                        /* riga troppo lunga: si butta */
+				cmd_n = 0;
+		}
+		ssize_t k = read(g.fd, buf, sizeof buf);
 		adesso = rt_adesso();
 		if (k > 0) {
-			if (reg)
-				reg_scrivi_record(reg, adesso, 0, REG_VERSO_SOC, buf, (uint16_t)k);
+			if (g.reg)
+				reg_scrivi_record(g.reg, adesso, 0, REG_VERSO_SOC, buf, (uint16_t)k);
 			uint64_t prima = dfr.frame_ok;
-			gd32_deframer_scrivi(&dfr, buf, (size_t)k, conta_guida, &conta);
-			if (dfr.frame_ok > prima) {
-				frame_da_invio += dfr.frame_ok - prima;
-				ultimo_rx = adesso;
-			}
+			gd32_deframer_scrivi(&dfr, buf, (size_t)k, guida_frame, &g);
+			frame_da_invio += dfr.frame_ok - prima;
+		}
+		if (g.scattato_ora || sic_controlla(&g.sic, adesso)) {
+			g.scattato_ora = 0;
+			guida_arresto(&g, g.sic.motivo);
+			esito = 4;
 		}
 		if (adesso >= prossima_riga) {
-			printf("%6.1f s  rx %llu frame (sensori %llu, hb GD32 %llu), ultimo rx %.1f s fa",
-			       (double)(adesso - t0) / RT_NS_PER_S, (unsigned long long)dfr.frame_ok,
-			       (unsigned long long)conta.sensori, (unsigned long long)conta.hb_gd32,
-			       (double)(adesso - ultimo_rx) / RT_NS_PER_S);
-			for (int i = 0; i < n_inv; i++)
-				printf(", 0x%02x mandati %llu", inv[i].cmd, (unsigned long long)inv[i].mandati);
-			putchar('\n');
-			fflush(stdout);
-			if (reg)
-				fflush(reg);
+			guida_riga_stato(&g, adesso, per, n_per);
+			if (tensione_minima && g.n_dv && g.somma_dv < (long)tensione_minima * g.n_dv) {
+				printf("%8.3f tensione media %.2f V sotto la minima %.1f V: esco\n", guida_t_s(&g, adesso),
+				       (double)g.somma_dv / g.n_dv / 10.0, tensione_minima / 10.0);
+				esito = 3;
+				break;
+			}
+			g.somma_dv = g.n_dv = 0;
+			if (g.reg)
+				fflush(g.reg);
+			if (g.csv)
+				fflush(g.csv);
 			prossima_riga += RT_S(1);
 		}
 	}
-	if (reg)
-		fclose(reg);
-	close(fd);
-	return 0;
+	guida_arresto(&g, fermati ? "segnale ricevuto, uscita" : "uscita");
+	guida_riga_stato(&g, rt_adesso(), per, n_per);
+	if (g.reg)
+		fclose(g.reg);
+	if (g.csv)
+		fclose(g.csv);
+	if (fd_cmd >= 0)
+		close(fd_cmd);
+	close(g.fd);
+	return esito;
 }
 
 

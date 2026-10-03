@@ -1,0 +1,13 @@
+# Fase 2, blocco C3 (seconda parte): spazzola centrale 30 e al contrario, aspirazione nelle tre varianti.
+# SOLO CON IL ROBOT SOLLEVATO. Il primo comando ai motori dopo 500 ms (prima non ci sono ancora frame dei sensori).
+500    0x6a:i8=30       # spazzola centrale
+3500   0x6a:i8=-30      # al contrario
+6500   0x6a:i8=0
+7500   0x86:u8=40       # aspirazione, PWM compensato con la tensione (packetBlowerPwmBattery)
+10500  0x86:u8=88       # valore dei log originali
+13500  0x86:u8=0
+14500  0x85:u8=40       # aspirazione, PWM puro (packetBlowerPwmOnly)
+17500  0x85:u8=0
+18500  0x68:i16=1000    # aspirazione, velocità/10 (packetBlowerSpeed)
+21500  0x68:i16=0
+22500  fine

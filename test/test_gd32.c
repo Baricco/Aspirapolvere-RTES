@@ -76,11 +76,80 @@ static void frame_intero(void)
 	CONTROLLA(memcmp(r.f[0].dati, SENSORI_VERO, 96) == 0);
 	CONTROLLA(d.frame_ok == 1 && d.checksum_errati == 0 && d.byte_scartati == 0);
 
-	gd32_batteria_t b;
-	CONTROLLA(gd32_leggi_batteria(&r.f[0], &b) == 0);
-	CONTROLLA(b.tensione_dv == 126 && b.sulla_base == 1 && b.in_carica == 0);
+	gd32_sensori_t s;
+	CONTROLLA(gd32_leggi_sensori(&r.f[0], &s) == 0);
+	CONTROLLA(s.tensione_dv == 126 && s.sulla_base == 1 && s.in_carica == 0);
 	gd32_frame_t hb = { .cmd = GD32_HEARTBEAT, .n_dati = 0 };
-	CONTROLLA(gd32_leggi_batteria(&hb, &b) == -1);
+	CONTROLLA(gd32_leggi_sensori(&hb, &s) == -1);
+	gd32_frame_t corto = { .cmd = GD32_SENSORI, .n_dati = 95 };
+	CONTROLLA(gd32_leggi_sensori(&corto, &s) == -1);
+}
+
+/* Frame 0x15 vero (spia, 2026-10-03): robot sollevato fuori dalla base, 16,2 V, cassetto presente. */
+static const uint8_t SENSORI_SOLLEVATO[96] = {
+	0x01, 0x00, 0x00, 0x0f, 0x04, 0x00, 0x00, 0x00, 0xa2, 0x1f, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+	0x78, 0x69, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x6d, 0x69, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xfb, 0xff, 0x09, 0x00,
+	0xff, 0xff, 0xda, 0xff, 0x00, 0x00, 0x00, 0x00, 0x64, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+	0x62, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0x00,
+	0x39, 0x00, 0x0e, 0x00, 0x02, 0x00, 0x00, 0x00, 0x03, 0x19, 0xfe, 0xff, 0xff, 0xff, 0xfb, 0xff,
+};
+
+/* Decodifica completa dei due frame veri: ogni campo con il valore atteso. */
+static void sensori_decodifica(void)
+{
+	gd32_frame_t f = { .cmd = GD32_SENSORI, .n_dati = 96 };
+	gd32_sensori_t s;
+
+	memcpy(f.dati, SENSORI_VERO, 96);           /* sulla base */
+	CONTROLLA(gd32_leggi_sensori(&f, &s) == 0);
+	CONTROLLA(s.stato == 1);
+	CONTROLLA(s.bumper_sx == 1 && s.bumper_dx == 1 && s.bumper_bit == 0x06);
+	CONTROLLA(s.cliff[0] && s.cliff[1] && s.cliff[2] && s.cliff[3]);
+	CONTROLLA(s.cassetto == 0);
+	CONTROLLA(s.in_carica == 0 && s.sulla_base == 1);
+	CONTROLLA(s.temperatura_c == 27);
+	CONTROLLA(s.encoder_sx == 0x6978 && s.encoder_dx == 0x6978);
+	CONTROLLA(s.vel_angolare[1] == -2 && s.angolo[1] == 30 && s.angolo[2] == 5);
+	CONTROLLA(s.gravita[0] == 0 && s.gravita[2] == 100);
+	CONTROLLA(s.controllo == 0x42 && s.led == 0x08);
+	CONTROLLA(s.correnti[2] == 3 && s.correnti[3] == 0x38 && s.correnti[5] == 3);
+	CONTROLLA(s.byte88 == 0x1903 && s.magnetico[0] == -3 && s.magnetico[2] == -2);
+
+	memcpy(f.dati, SENSORI_SOLLEVATO, 96);      /* sollevato, fuori dalla base */
+	CONTROLLA(gd32_leggi_sensori(&f, &s) == 0);
+	CONTROLLA(s.bumper_sx == 0 && s.bumper_dx == 0);
+	CONTROLLA(f.dati[3] == GD32_CLIFF_TUTTI_VUOTO && s.cliff[0] && s.cliff[3]);
+	CONTROLLA(s.cassetto == 1 && s.sulla_base == 0 && s.in_carica == 0);
+	CONTROLLA(s.tensione_dv == 162 && s.temperatura_c == 31);
+	CONTROLLA(s.encoder_dx == 0x696d);
+	CONTROLLA(s.vel_angolare[1] == -5 && s.angolo[1] == 9 && s.vel_angolare[2] == -1 && s.angolo[2] == -38);
+	CONTROLLA(s.controllo == 0x62 && s.led == 0x01);
+	CONTROLLA(s.magnetico[1] == -1 && s.magnetico[2] == -5);
+
+	/* campi con segno e scale, su un frame costruito apposta */
+	uint8_t d[96] = { 0 };
+	d[1] = 0x09;                /* solo i contatti "secondari": bit 3 (sx) e bit 0 (dx) */
+	d[3] = 0x08;                /* solo il bit 3: anti-caduta destro laterale */
+	d[6] = 0x4b;
+	d[7] = 0x01;                /* in carica => anche sulla base */
+	d[9] = 0xf6;                /* -10 °C */
+	d[16] = 0xff; d[17] = 0xff; d[18] = 0xff; d[19] = 0xff;   /* encoder -1 */
+	d[32] = 0x10; d[35] = 0x80; /* int32 negativo */
+	d[58] = 0x2c; d[59] = 0x01; /* 300 x 10 ms */
+	d[69] = 3;
+	f.n_dati = 96;
+	memcpy(f.dati, d, 96);
+	CONTROLLA(gd32_leggi_sensori(&f, &s) == 0);
+	CONTROLLA(s.bumper_sx == 1 && s.bumper_dx == 1);
+	CONTROLLA(s.cliff[0] == 0 && s.cliff[1] == 0 && s.cliff[2] == 0 && s.cliff[3] == 1);
+	CONTROLLA(s.ir_base_a == 4 && s.ir_base_b == 0x0b);
+	CONTROLLA(s.in_carica == 1 && s.sulla_base == 1);
+	CONTROLLA(s.temperatura_c == -10);
+	CONTROLLA(s.encoder_sx == -1);
+	CONTROLLA(s.vel_sx == (int32_t)0x80000010);
+	CONTROLLA(s.tasto_accensione_ms == 3000);
+	CONTROLLA(s.byte69_x100 == 300);
 }
 
 /* Lo stesso flusso di 3 frame, spezzato in blocchi di ogni dimensione da 1 a tutta la lunghezza. */
@@ -274,6 +343,8 @@ static void nomi(void)
 {
 	CONTROLLA(strcmp(gd32_nome_cmd(GD32_HEARTBEAT), "heartbeat") == 0);
 	CONTROLLA(strcmp(gd32_nome_cmd(GD32_MOTORE_LIDAR), "motore_lidar") == 0);
+	CONTROLLA(strcmp(gd32_nome_cmd(GD32_POMPA_ACQUA), "pompa_acqua") == 0);
+	CONTROLLA(strcmp(gd32_nome_cmd(GD32_ALIMENTAZIONE_SENSORI), "alimentazione_sensori") == 0);
 	CONTROLLA(gd32_nome_cmd(0xee) == NULL);
 }
 
@@ -282,6 +353,7 @@ int main(void)
 	ESEGUI(checksum_frame_veri);
 	ESEGUI(componi_heartbeat_e_velocita);
 	ESEGUI(frame_intero);
+	ESEGUI(sensori_decodifica);
 	ESEGUI(frame_spezzati_in_ogni_modo);
 	ESEGUI(frame_troncato_e_risincronizzazione);
 	ESEGUI(casi_limite);

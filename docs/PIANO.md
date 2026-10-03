@@ -15,8 +15,9 @@ I task dell'esame li scrive l'utente da solo, sopra un framework e un driver pre
 - **Persistenza senza flash:** binari in `/mnt/UDISK/rt/`, script in `/etc/init.d/` (overlay ext4).
 - **All'accensione, a lavoro finito, parte il nostro software**, con interruttore di sicurezza
   (`/mnt/UDISK/rt/enable`) e ritorno allo stack originale se il nostro non parte.
-- **Gestione della batteria nel driver:** il driver espone percentuale vera, corrente, temperatura e controllo
-  della carica già pronti; i task usano solo i valori.
+- **Gestione della batteria nel driver:** il driver espone tensione, temperatura, stato di carica e la percentuale
+  stimata dalla curva di scarica (il GD32 non dà la corrente); le soglie di sicurezza (fermare i motori, LED 6) stanno
+  nel driver; i task usano solo i valori.
 - **Robustezza:** stato sicuro all'avvio (motori, spazzole, aspirazione a zero prima di tutto), watchdog dei task
   (se un task critico salta le scadenze o non risponde, tutti i motori si fermano) e **stato di guasto ben
   riconoscibile** (colore del LED + suono dall'altoparlante). Il rilancio automatico del programma si aggiunge in
@@ -26,19 +27,30 @@ I task dell'esame li scrive l'utente da solo, sopra un framework e un driver pre
   aperiodico.
 - **Niente serbatoio dell'acqua:** pompa e sensori del serbatoio restano solo documentati.
 
+- **Architettura RT (decisa il 2026-10-03, fine della fase 2):**
+  - **driver** = livello fisso a **priorità massima, fuori dallo scheduling dei task**, su un core suo: seriale del
+    GD32 (keepalive, heartbeat, avvio, decodifica), blocco di sicurezza (`gd32/sicurezza.h`), lidar con la sua
+    regolazione di velocità (come AuxCtrl), soglie della batteria e **watchdog dei task** (deve stare sopra i task
+    che sorveglia: con RM un watchdog a 50 ms non girerebbe se un task a 20 ms si blocca sullo stesso core);
+  - **task con Rate Monotonic, partizionato** sui core (ogni task legato a un core; su ogni core vale l'analisi a un
+    processore: Liu e Layland, tempi di risposta), direttamente con i thread `SCHED_FIFO` di Linux e la libreria
+    `rt/`. Scartati: FreeRTOS POSIX (un solo core, scheduler simulato con i segnali, non più RT del Linux sotto),
+    EDF sopra `SCHED_FIFO` (fattibile con un dispatcher, ma più complesso), RM globale (analisi debole, niente
+    garanzie dei protocolli dei mutex fra core);
+  - **mutua esclusione con Priority Inheritance** (`PTHREAD_PRIO_INHERIT`, verificato sul robot; `PRIO_PROTECT` non
+    esiste in musl). Fra driver e task **nessun mutex**: scambio senza blocchi (doppio buffer con numero di versione),
+    così il driver non aspetta mai un task;
+  - task a 20 ms **svegliati dall'arrivo del frame** del GD32 (dati freschi, ogni frame una volta sola; nell'analisi
+    sono sporadici con T = intervallo minimo), gli altri **a timer**;
+  - **server aperiodico** per batteria (lettura), spazzole, aspirazione, LED, comandi da remoto;
+  - rete di sicurezza del kernel sui task RT (95% della CPU per secondo) lasciata attiva.
+
 ## Ancora da decidere
-- **Framework RT** (da chiarire nella fase 3). Requisiti: real-time **vero, non solo nel nome**; didatticamente
-  sensato (per questo l'idea di FreeRTOS); sfruttare al massimo l'hardware (4 core). Candidati:
-  - FreeRTOS ufficiale con il port POSIX: API identica, **un solo core**, niente interrupt veri, chiamate bloccanti
-    e `printf` da gestire, stack minimi (`PTHREAD_STACK_MIN`). La documentazione ufficiale dice che "non si comporta
-    da sistema real-time"; ma con il tick su un thread `SCHED_FIFO` a priorità massima e risvegli assoluti
-    (modifica di 10 righe) abbiamo misurato sul robot **−11…+13 µs di ritardo e 21 µs di jitter** (task a 10 ms,
-    3000 risvegli, task a bassa priorità che consuma CPU sullo stesso core) — 2026-10-02;
-  - uno strato con API stile FreeRTOS sopra i thread `SCHED_FIFO` di Linux (4 core, ma scheduler di Linux);
-  - un ibrido: FreeRTOS su un core per i task dell'esame, thread Linux per driver e rete.
-- **Server aperiodico** per i comandi dell'app: polling, deferrable o sporadic server (confrontabili con le misure).
-- **Tipo di app** (pagina web, Android, programma sul PC).
-- **Partizionamento dei task sui core** (per carico o per criticità), quando conosceremo WCET e periodi.
+- **Tipo di server aperiodico** (polling, deferrable, sporadic) e **tipo di app** (con l'home server, più avanti:
+  zone proibite, preferenze, programmazione della pulizia).
+- **Velocità del lidar** (6 giri/s come AuxCtrl, oppure più veloce con meno punti per giro: ~2050 misure al secondo
+  fisse; provare la potenza 100) e periodo della navigazione (100 o 200 ms).
+- **Assegnazione dei task ai core**, quando conosceremo i WCET (Worst-Fit sulle utilizzazioni per bilanciare).
 
 ## Architettura del software originale (dettagli in `RIEPILOGO.md`)
 ```
@@ -57,11 +69,12 @@ lidar → /dev/ttyS1 → AuxCtrl
    mancate (max 455,5 µs nel caso peggiore). `docs/fase0.md`, `docs/misure-lunghe.md`.
 1. **Reverse dei protocolli e accesso comodo** — FATTA. Spia sulle seriali e sui socket, frame dei sensori mappato
    con prove fisiche, canale AuxCtrl ↔ everest-server, watchdog. `docs/fase1.md`, `docs/RIEPILOGO.md`.
-2. **Caratterizzazione completa dell'hardware** (insieme, PROSSIMA) — ogni sensore, attuatore e comando capito e
-   provato: disassemblato di everest-server, lidar (scansioni), ruote, spazzole, aspirazione, comandi di avvio,
-   carica, batteria (corrente, temperatura, percentuale), IMU, IR analogici, audio. Banco di prova con interblocco
-   di sicurezza. Passi in `docs/fase2-piano.md`.
-3. **Driver e framework RT** (insieme) — il nostro driver al posto di AuxCtrl + parte di everest-server (keepalive,
+2. **Caratterizzazione completa dell'hardware** — FATTA (2026-10-03). Disassemblato di everest-server (tutti i
+   comandi, ogni byte del frame dei sensori), banco di prova con blocco di sicurezza (`spia guida`,
+   `gd32/sicurezza.h`), prove su lidar, ruote, spazzole, aspirazione, carica, LED, audio, IMU, anti-caduta, IR della
+   base. Aperti: carica ferma a 16,3 V (batteria degradata?), curva di scarica, scarto di ~8° del lidar.
+   `docs/fase2.md`, `docs/RIEPILOGO.md`.
+3. **Driver e framework RT** (insieme, PROSSIMA) — il nostro driver al posto di AuxCtrl + parte di everest-server (keepalive,
    avvio, sensori decodificati, attuatori, lidar, audio, batteria, stato sicuro, stato di guasto); scelta e
    preparazione del framework RT (vedi "Ancora da decidere"), con esempi e guida.
 4. **Task RT** (utente, da solo) — sicurezza, controllo del moto, lidar, comportamento, watchdog dei task, mappatura
@@ -73,17 +86,19 @@ lidar → /dev/ttyS1 → AuxCtrl
 Fasi trasversali: simulatore (a livello di protocollo, con i dati delle catture) e test sul PC.
 
 ## Bozza dei task (da rivedere nella fase 4)
-| Task | Tipo | Periodo/deadline | Criticità |
+Driver (fisso, priorità massima, fuori da RM): GD32 ogni 20 ms (keepalive 3 s, heartbeat 200 ms), blocco di
+sicurezza (bumper, anti-caduta, sensori assenti), lidar e regolazione della sua velocità (20 ms), soglie della
+batteria, watchdog dei task + stato di guasto (~50 ms).
+
+| Task (RM partizionato) | Attivazione | Periodo | Cosa fa |
 |---|---|---|---|
-| Comunicazione GD32 (sensori ogni 20 ms, keepalive `0x0d` ogni 3 s) | periodico | 20 ms | hard |
-| Sicurezza (bumper, anti-caduta, stop motori) | periodico/sporadico | entro un periodo dei sensori | hard |
-| Controllo moto (velocità `0x66`) | periodico | 20 ms | hard |
-| Watchdog dei task + stato di guasto | periodico | ~50 ms | hard |
-| Acquisizione lidar | periodico, guidato dai dati | ~1 giro (~200 ms) | soft/hard |
-| Mappatura (griglia + allineamento) | periodico | 1 giro del lidar | hard (tentativo) |
-| Batteria (nel driver) | periodico | ~1 s | soft |
-| Comandi dall'app | aperiodico, tramite server | budget del server | soft |
-| Telemetria e log | aperiodico | best effort | non RT |
+| Controllo del moto | frame del GD32 | 20 ms | odometria (encoder + imbardata dell'IMU) e v/ω verso l'obiettivo della navigazione, in anello chiuso sulle misure |
+| Sicurezza del moto | frame del GD32 | 20 ms | incastrato/slittamento (comandato vs encoder, correnti, IMU), bordo delle zone proibite: ferma il robot |
+| Lidar | timer | 200 ms | elaborazione del giro: ostacoli, distanze, dati per mappa e navigazione |
+| Navigazione | timer | 200 ms (forse 100) | dove andare: copertura, seguimuro, evitare ostacoli e zone proibite |
+| Mappatura | timer | 200 ms (500 se il WCET non ci sta) | griglia di occupazione + allineamento delle scansioni |
+| Comandi, LED, spazzole, aspirazione, stato | server aperiodico | budget del server | eventi dall'app e dall'home server |
+| Telemetria e log | sfondo | best effort | non RT |
 
 ## Comandi (`./rtes.sh`)
 | Comando | Cosa fa |

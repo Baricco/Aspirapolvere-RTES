@@ -205,9 +205,43 @@ terzo).
 | `tools/sensori.py base` / `diff` | salva lo stato dei 96 byte dei sensori come riferimento / mostra quali byte sono cambiati (per le prove fisiche) |
 | `tools/ritmo.py [secondi]` | trova i bit che cambiano a ritmo (azione ripetuta 3 volte) |
 | `tools/spia-robot.sh socket` / `socket-stato` / `socket-ferma` / `socket-scarica` | spia sul canale tra AuxCtrl ed everest-server/RobotApp (`spia socket`, vedi `protocollo.md`) |
-| `spia guida --invia 0x0d:3000 ...` (sul robot, stack fermo) | parla direttamente con il GD32 mandando solo i frame indicati (mai motori); usato per misurare il watchdog |
+| `spia guida ...` (sul robot, stack fermo) | banco di prova: parla direttamente con il GD32 (sezione 10) |
 | `spia termios /dev/ttyS3` (sul robot) | impostazioni della seriale (sul robot non c'è `stty`) |
 
 Tutto è in RAM: un riavvio del robot toglie la spia. Il registro contiene i byte grezzi così come sono arrivati,
 quindi si può rianalizzare quando i decodificatori migliorano. Formato: `spia/registro.h`.
 
+
+## 10. Il banco di prova (`spia guida`, fase 2)
+
+`spia guida` prende il posto dello stack originale e parla direttamente con il GD32: manda keepalive `0x0d`
+(3 s) e heartbeat `0x06` (200 ms), i comandi che gli chiedi, e registra tutto. Ogni comando passa dal **blocco di
+sicurezza** (`gd32/sicurezza.h`): ruote, spazzole e aspirazione diverse da zero partono solo con `--sollevato` e
+con il frame dei sensori che dice "sollevato" (anti-caduta `0f`, sensori alimentati, fuori dalla base); se smette
+di essere vero, o i sensori tacciono 100 ms, ferma tutti i motori fino alla fine. All'uscita ferma sempre i motori.
+
+| Comando (dal PC) | Cosa fa |
+|---|---|
+| `tools/banco-robot.sh avvia NOME [opzioni]` | ferma lo stack e avvia `spia guida -o NOME.reg --csv NOME.csv [opzioni]` sul robot; **quando finisce, per qualsiasi motivo, lo stack riparte da solo** |
+| `tools/banco-robot.sh lidar NOME [opzioni]` | come `avvia`, registrando anche la seriale del lidar (attenzione: ~45 MB/h in RAM) |
+| `tools/banco-robot.sh stato` / `segui` / `ferma` / `scarica NOME` | ultime righe / in diretta / termina (motori a zero) / copia i file in `build/robot/fase2/NOME/` |
+| `tools/finestra.py NOME [N] [campi]` | media, minimo e massimo degli ultimi N frame del CSV sul robot |
+| `tools/analizza-lidar.py NOME-lidar.reg [NOME.reg]` | velocità per potenza, settori e punti per giro, distanze |
+
+Opzioni di `spia guida`:
+
+| Opzione | Significato |
+|---|---|
+| `--una CMD[:DATI]` | comando singolo all'avvio. DATI: esadecimale (`0x97:01`) o tipi (`0x66:i32=828,i32=0`, tipi i8 u8 i16 u16 i32 u32) |
+| `--invia CMD[:DATI]@MS` | comando periodico |
+| `--sequenza FILE` | comandi a tempi stabiliti: righe `T cmd`, `T ogni MS cmd`, `T basta CMD`, `T fine` (esempi in `tools/sequenze/`) |
+| `--comandi FIFO` | comandi dal vivo, uno per riga: sul robot `echo 0x8d:08 > /tmp/rtes/comandi` |
+| `--sollevato` | ammette i motori (sempre sotto il blocco di sicurezza) |
+| `--tensione-minima DV` | esce (codice 3) se la tensione media scende sotto DV decimi di volt |
+| `--csv FILE [--csv-ogni MS]` | tutti i campi decodificati dei sensori (`gd32_sensori_t`) |
+| `--durata S`, `--senza-keepalive`, `--senza-heartbeat` | durata; prove sul watchdog del GD32 |
+
+Esempio: `tools/banco-robot.sh avvia prova --sollevato --sequenza tools/sequenze/c2-ruote.seq --tensione-minima 140`.
+Il primo comando ai motori deve venire dopo ≥ 500 ms (prima non ci sono frame dei sensori e viene rifiutato).
+Codici d'uscita: 0 normale, 2 opzioni sbagliate, 3 tensione minima, 4 blocco di sicurezza scattato.
+Le prove sul PC con un GD32 finto sono in `tools/prova-guida.py` (dentro `make test`).

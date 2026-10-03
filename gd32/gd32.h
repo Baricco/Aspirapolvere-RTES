@@ -35,36 +35,50 @@
 
 /*
  * Codici cmd. Lo stesso codice si usa per la richiesta (SoC -> GD32) e per la risposta (GD32 -> SoC).
- * Nomi dalle funzioni CSerialMessagePacket::packet* di AuxCtrl, oppure dal significato osservato.
+ * Nomi dalle funzioni CSerialMessagePacket::packet* di everest-server e AuxCtrl (fase 2, blocco A),
+ * oppure dal significato osservato. Formato dei dati e fonti in docs/protocollo.md.
  */
 enum {
+	GD32_CODICE_ERRORE       = 0x01,  /* GD32 -> SoC: codice di errore (everest lo salva; mai visto finora) */
 	GD32_SLEEP               = 0x04,  /* packetStm32Sleep; il GD32 conferma con 0x04 e smette di mandare i sensori */
-	GD32_WAKEUP_ACK          = 0x05,  /* GD32 -> SoC al risveglio (tasto premuto); il SoC conferma con 0x05 */
+	GD32_WAKEUP_ACK          = 0x05,  /* packetWakeupAck; GD32 -> SoC al risveglio (tasto premuto), il SoC conferma */
 	GD32_HEARTBEAT           = 0x06,  /* packetHeartBeat: SoC -> GD32 ogni 200 ms */
-	GD32_VERSIONE            = 0x07,  /* richiesta / risposta con la versione del firmware (ASCII) */
+	GD32_VERSIONE            = 0x07,  /* packetRequireSystemVersion; risposta con la versione del firmware (ASCII) */
 	GD32_IMU_ZERO            = 0x08,  /* packetSetIMUZero; risposta 01 */
 	GD32_RESET_ERRORI        = 0x0a,  /* packetResetErrorCode */
-	GD32_SOC_ATTIVO          = 0x0c,  /* 01 = SoC attivo, 00 = prima della sospensione; il GD32 risponde 0x0c 01 */
+	GD32_SORVEGLIA_SOC       = 0x0c,  /* packetTinaHaltedDetectOnce(bool): 01 all'avvio, 00 prima della sospensione */
 	GD32_KEEPALIVE           = 0x0d,  /* keepalive di AuxCtrl, ogni 3 s: basta da solo a evitare il reset del GD32 */
-	GD32_SENSORI             = 0x15,  /* GD32 -> SoC: stato dei sensori, 96 byte */
+	GD32_SENSORI             = 0x15,  /* GD32 -> SoC: stato dei sensori, 96 byte (gd32_sensori_t) */
+	GD32_IMU_GREZZA          = 0x17,  /* packetRequireIMURawData: 1 byte utile (01); everest ne manda 4 */
+	GD32_FUNZIONI_MACCHINA   = 0x18,  /* packetGetMachineFunctionList, senza dati */
+	GD32_CLIFF_RETROMARCIA   = 0x19,  /* packetCliffBack(bool): retromarcia automatica del GD32 sugli anti-caduta */
 	GD32_TIPO_CONTROLLO      = 0x65,  /* packetMotorControlType, 1 byte */
 	GD32_VELOCITA            = 0x66,  /* packetMotorVelocity: int32 v, int32 omega (tick/s) ogni 20 ms */
-	GD32_VELOCITA_RUOTE      = 0x67,  /* packetMotorSpeed: int32 sinistra, int32 destra */
-	GD32_ASPIRAZIONE         = 0x68,  /* packetBlowerSpeed, 2 byte */
+	GD32_VELOCITA_RUOTE      = 0x67,  /* packetMotorSpeed: int32 sinistra, int32 destra (stessa scala di v) */
+	GD32_ASPIRAZIONE         = 0x68,  /* packetBlowerSpeed: int16 = velocità / 10 (everest al massimo 30000) */
 	GD32_SPAZZOLA_LATERALE   = 0x69,  /* packetBrushSpeed, int8 */
 	GD32_SPAZZOLA_CENTRALE   = 0x6a,  /* packetRollingSpeed, int8 */
+	GD32_POMPA_ACQUA         = 0x6b,  /* packetWaterPumpSpeed, int8: everest manda 0. NON USARE (niente serbatoio) */
 	GD32_MOTORE_LIDAR        = 0x71,  /* controlLidarPwm: int32 potenza 0..100 */
 	GD32_CLIFF_IR            = 0x78,  /* packetCliffIRControl, bool */
 	GD32_CLIFF_IR_DIREZIONE  = 0x79,  /* packetCliffIRDirection, bool */
+	GD32_PARAMETRI_AUTONOMI  = 0x7a,  /* packetSelfControlParams: 24 byte (struttura da capire) */
+	GD32_MASCHERA_SENSORI    = 0x7c,  /* packetMaskSensorMotion: 3 byte (all'avvio 00 ff ff) */
+	GD32_BUMPER_MORBIDO      = 0x80,  /* packetBumperSmooth(bool) */
+	GD32_ASPIRAZIONE_MODO    = 0x84,  /* packetBlowerControlMode: int32 */
+	GD32_ASPIRAZIONE_PWM     = 0x85,  /* packetBlowerPwmOnly: uint8 */
+	GD32_ASPIRAZIONE_PWM_BAT = 0x86,  /* packetBlowerPwmBattery: uint8 (PWM compensato con la tensione) */
 	GD32_LED_TASTO           = 0x8d,  /* packetButtonLEDState, 1 byte */
 	GD32_ALIMENTAZIONE_LIDAR = 0x97,  /* packetLidarPower, bool */
-	GD32_ALIMENTAZIONE_SOC   = 0x99,  /* packetR16Power, bool */
-	GD32_RIAVVIA_SOC         = 0x9a,  /* packetRestartR16System */
-	GD32_CARICATORE          = 0x9b,  /* packetChargerPower, bool */
-	GD32_IMU_CALIBRA         = 0xa1,  /* packetIMUCalibaration */
+	GD32_ALIMENTAZIONE_SOC   = 0x99,  /* packetR16Power, bool. NON USARE */
+	GD32_RIAVVIA_SOC         = 0x9a,  /* packetRestartR16System. NON USARE */
+	GD32_CARICATORE          = 0x9b,  /* packetChargerPower (solo AuxCtrl), bool */
+	GD32_ALIMENTAZIONE_SENSORI = 0x9d, /* packetSensorPower(bool) */
+	GD32_IMU_CALIBRA         = 0xa1,  /* packetIMUFactoryCalibrate / packetIMUCalibaration */
 	GD32_IMU_STATO_CALIBRA   = 0xa2,  /* packetIMUFactoryCalibrateState */
-	GD32_MAGNETOMETRO_CALIBRA = 0xa3,
-	GD32_MAGNETOMETRO_STATO  = 0xa4,
+	GD32_MAGNETOMETRO_CALIBRA = 0xa3, /* packetGeoMagnetismCalibrate */
+	GD32_MAGNETOMETRO_STATO  = 0xa4,  /* packetGeoMagnetismCalibrateState */
+	GD32_DEBUG               = 0xab,  /* GD32 -> SoC: messaggio di debug (handleDebug1) */
 };
 
 /* Un frame decodificato: solo cmd e dati, l'intestazione e il checksum sono già stati verificati. */
@@ -119,16 +133,58 @@ void gd32_deframer_init(gd32_deframer_t *d);
 size_t gd32_deframer_scrivi(gd32_deframer_t *d, const uint8_t *b, size_t n, gd32_frame_cb cb, void *ctx);
 
 /*
- * Campi noti del frame dei sensori (0x15). Per ora solo quelli ricavati dal codice di AuxCtrl
- * (updateBatterySensor); gli altri sono in docs/protocollo.md come ipotesi.
+ * Frame dei sensori 0x15 (96 byte), decodificato.
+ *
+ * Fonte principale: CSerialMessageHandle::handleSensorMessage e update*Sensor di everest-server, che copia i
+ * byte 0..85 del frame in una struttura con gli stessi offset, IGNORA i byte 86..87 e sposta i byte 88..95.
+ * Tra parentesi: [V] verificato sul robot, [C] letto nel codice (tipo e scala certi, significato dal contesto),
+ * [?] significato da confermare (blocchi C e D della fase 2). Tabella completa in docs/protocollo.md.
  */
 typedef struct {
-	int in_carica;      /* dati[7] bit 0 */
-	int sulla_base;     /* dati[7] bit 1 (AuxCtrl considera "sulla base" anche quando bit 0 = 1) */
-	int tensione_dv;    /* dati[8]: tensione della batteria in decimi di volt */
-} gd32_batteria_t;
+	uint8_t stato;              /* byte 0 [C]: everest lo confronta con 1 (01 a riposo) */
+	int bumper_sx, bumper_dx;   /* byte 1 [V]: sx = bit2|bit3, dx = bit1|bit0 (everest fa questo OR) */
+	uint8_t bumper_bit;         /* byte 1 grezzo: bit3 e bit0 [?] secondo contatto di ogni lato */
+	uint8_t byte2;              /* byte 2 [?]: everest usa i bit 1 e 0; non cambiano sollevando il robot */
+	int cliff[4];               /* byte 3 [V]: da sinistra a destra = bit 0 sx laterale, 1 sx anteriore, 2 dx anteriore,
+	                               3 dx laterale; 1 = nessun pavimento (prove con la mano, fase 2 blocco D) */
+	int cassetto;               /* byte 4 bit 2 [V]: cassetto della polvere presente */
+	uint8_t byte4_altri;        /* byte 4 bit 1 e 0 [?] (serbatoio / mop: everest ha detectWaterboxLost, detectMoppingLost) */
+	uint8_t byte5;              /* byte 5 [?]: everest usa i bit 1 e 0 */
+	uint8_t ir_base_a, ir_base_b; /* byte 6 [V]: due ricevitori (nibble alto e basso); ogni bit 1/2/4/8 = un fascio della base */
+	int in_carica;              /* byte 7 bit 0 [V] */
+	int sulla_base;             /* byte 7 bit 0 | bit 1 [V] (bit 1 = contatto con la base, bit 0 = in carica) */
+	int tensione_dv;            /* byte 8 [V]: tensione della batteria in decimi di volt */
+	int temperatura_c;          /* byte 9 [C] int8: temperatura della batteria in °C (31 a riposo) */
+	int32_t encoder_sx, encoder_dx; /* byte 16 e 24 [V]: contatori assoluti (3616 tick per giro) */
+	int32_t vel_sx, vel_dx;     /* byte 32 e 36 [C]: velocità delle ruote (stessa unità di 0x67, da verificare) */
+	/* IMU [V] (fase 2, blocco D): indice 0 = imbardata (+ antiorario visto dall'alto), 1 = beccheggio (+ naso in giù),
+	   2 = rollio (+ fianco sinistro in giù) */
+	int16_t vel_angolare[3];    /* byte 40, 44, 48: velocità angolare in 0,01 gradi/s */
+	int16_t angolo[3];          /* byte 42, 46, 50: angolo integrato dal GD32 in 0,01 gradi (l'imbardata deriva) */
+	int16_t gravita[3];         /* byte 52, 54, 56 [V]: direzione "su" in centesimi di g, assi X indietro, Y destra, Z su */
+	int tasto_accensione_ms;    /* byte 58 [V]: durata della pressione (uint16 x 10 ms) */
+	int tasto_punto_ms;         /* byte 60 [C]: tasto "punto", assente su questo modello */
+	int tasto_casa_ms;          /* byte 62 [V] */
+	uint8_t controllo;          /* byte 64 [V]: bit 5 = sensori alimentati (0x9d); bit 0 e 1 [?] */
+	uint8_t led;                /* byte 65 [V]: stato del LED (copia dell'ultimo 0x8d) */
+	uint8_t byte66;             /* byte 66 [C]: everest usa solo i 4 bit bassi */
+	int8_t byte67;              /* byte 67 [C] int8 */
+	uint8_t byte68;             /* byte 68 [C] */
+	int byte69_x100;            /* byte 69 [C]: everest lo moltiplica per 100 */
+	uint8_t acqua;              /* byte 70 [?]: livello del serbatoio dell'acqua (VacuumTiger), qui assente */
+	uint16_t grezzo72;          /* byte 72 [C] uint16 */
+	uint16_t correnti[6];       /* byte 74..84 [C] uint16 (everest divide per 1000): correnti dei motori [?] */
+	int16_t byte88;             /* byte 88 [C]: everest guarda solo se > 0 (costante 0x1903) */
+	int16_t magnetico[3];       /* byte 90, 92, 94 [V]: copia delle velocità angolari (stessi valori), non un magnetometro */
+} gd32_sensori_t;
 
-/* Ritorna 0 se f è un frame dei sensori abbastanza lungo, -1 altrimenti. */
-int gd32_leggi_batteria(const gd32_frame_t *f, gd32_batteria_t *out);
+/* Ritorna 0 se f è un frame dei sensori di 96 byte (decodificato in *out), -1 altrimenti. */
+int gd32_leggi_sensori(const gd32_frame_t *f, gd32_sensori_t *out);
+
+/* Bit del byte 3 (anti-caduta) quando il robot è sollevato: tutti i sensori vedono "vuoto". */
+#define GD32_CLIFF_TUTTI_VUOTO 0x0f
+
+/* Byte 64 bit 5: sensori alimentati (0 dopo 0x9d 00; everest ignora anti-caduta e bumper quando è 0). */
+#define GD32_CONTROLLO_SENSORI_ACCESI 0x20
 
 #endif /* GD32_H */

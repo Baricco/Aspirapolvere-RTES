@@ -33,33 +33,46 @@ size_t gd32_componi(uint8_t cmd, const void *dati, size_t n, uint8_t *out, size_
 const char *gd32_nome_cmd(uint8_t cmd)
 {
 	switch (cmd) {
+	case GD32_CODICE_ERRORE:        return "codice_errore";
 	case GD32_SLEEP:                return "sleep";
 	case GD32_WAKEUP_ACK:           return "wakeup_ack";
 	case GD32_HEARTBEAT:            return "heartbeat";
 	case GD32_VERSIONE:             return "versione";
 	case GD32_IMU_ZERO:             return "imu_zero";
 	case GD32_RESET_ERRORI:         return "reset_errori";
-	case GD32_SOC_ATTIVO:           return "soc_attivo";
+	case GD32_SORVEGLIA_SOC:        return "sorveglia_soc";
 	case GD32_KEEPALIVE:            return "keepalive";
 	case GD32_SENSORI:              return "sensori";
+	case GD32_IMU_GREZZA:           return "imu_grezza";
+	case GD32_FUNZIONI_MACCHINA:    return "funzioni_macchina";
+	case GD32_CLIFF_RETROMARCIA:    return "cliff_retromarcia";
 	case GD32_TIPO_CONTROLLO:       return "tipo_controllo";
 	case GD32_VELOCITA:             return "velocita";
 	case GD32_VELOCITA_RUOTE:       return "velocita_ruote";
 	case GD32_ASPIRAZIONE:          return "aspirazione";
 	case GD32_SPAZZOLA_LATERALE:    return "spazzola_laterale";
 	case GD32_SPAZZOLA_CENTRALE:    return "spazzola_centrale";
+	case GD32_POMPA_ACQUA:          return "pompa_acqua";
 	case GD32_MOTORE_LIDAR:         return "motore_lidar";
 	case GD32_CLIFF_IR:             return "cliff_ir";
 	case GD32_CLIFF_IR_DIREZIONE:   return "cliff_ir_direzione";
+	case GD32_PARAMETRI_AUTONOMI:   return "parametri_autonomi";
+	case GD32_MASCHERA_SENSORI:     return "maschera_sensori";
+	case GD32_BUMPER_MORBIDO:       return "bumper_morbido";
+	case GD32_ASPIRAZIONE_MODO:     return "aspirazione_modo";
+	case GD32_ASPIRAZIONE_PWM:      return "aspirazione_pwm";
+	case GD32_ASPIRAZIONE_PWM_BAT:  return "aspirazione_pwm_bat";
 	case GD32_LED_TASTO:            return "led_tasto";
 	case GD32_ALIMENTAZIONE_LIDAR:  return "alimentazione_lidar";
 	case GD32_ALIMENTAZIONE_SOC:    return "alimentazione_soc";
 	case GD32_RIAVVIA_SOC:          return "riavvia_soc";
 	case GD32_CARICATORE:           return "caricatore";
+	case GD32_ALIMENTAZIONE_SENSORI: return "alimentazione_sensori";
 	case GD32_IMU_CALIBRA:          return "imu_calibra";
 	case GD32_IMU_STATO_CALIBRA:    return "imu_stato_calibra";
 	case GD32_MAGNETOMETRO_CALIBRA: return "magnetometro_calibra";
 	case GD32_MAGNETOMETRO_STATO:   return "magnetometro_stato";
+	case GD32_DEBUG:                return "debug";
 	default:                        return NULL;
 	}
 }
@@ -161,12 +174,55 @@ size_t gd32_deframer_scrivi(gd32_deframer_t *d, const uint8_t *b, size_t n, gd32
 	return trovati;
 }
 
-int gd32_leggi_batteria(const gd32_frame_t *f, gd32_batteria_t *out)
+/* Campi little-endian dentro i dati */
+static uint16_t u16(const uint8_t *b) { return (uint16_t)(b[0] | b[1] << 8); }
+static int32_t i32(const uint8_t *b) { return (int32_t)((uint32_t)b[0] | (uint32_t)b[1] << 8 | (uint32_t)b[2] << 16 | (uint32_t)b[3] << 24); }
+
+int gd32_leggi_sensori(const gd32_frame_t *f, gd32_sensori_t *o)
 {
-	if (f->cmd != GD32_SENSORI || f->n_dati < 9)
+	const uint8_t *d = f->dati;
+	if (f->cmd != GD32_SENSORI || f->n_dati < 96)
 		return -1;
-	out->in_carica = f->dati[7] & 1;
-	out->sulla_base = (f->dati[7] >> 1) & 1;
-	out->tensione_dv = f->dati[8];
+	memset(o, 0, sizeof(*o));
+	o->stato = d[0];
+	o->bumper_bit = d[1];
+	o->bumper_sx = (d[1] >> 2 | d[1] >> 3) & 1;
+	o->bumper_dx = (d[1] >> 1 | d[1]) & 1;
+	o->byte2 = d[2];
+	for (int i = 0; i < 4; i++)
+		o->cliff[i] = (d[3] >> i) & 1;
+	o->cassetto = (d[4] >> 2) & 1;
+	o->byte4_altri = d[4] & 3;
+	o->byte5 = d[5];
+	o->ir_base_a = d[6] >> 4;
+	o->ir_base_b = d[6] & 0x0f;
+	o->in_carica = d[7] & 1;
+	o->sulla_base = (d[7] | d[7] >> 1) & 1;
+	o->tensione_dv = d[8];
+	o->temperatura_c = (int8_t)d[9];
+	o->encoder_sx = i32(d + 16);
+	o->encoder_dx = i32(d + 24);
+	o->vel_sx = i32(d + 32);
+	o->vel_dx = i32(d + 36);
+	for (int i = 0; i < 3; i++) {
+		o->vel_angolare[i] = (int16_t)u16(d + 40 + 4 * i);
+		o->angolo[i] = (int16_t)u16(d + 42 + 4 * i);
+		o->gravita[i] = (int16_t)u16(d + 52 + 2 * i);
+		o->magnetico[i] = (int16_t)u16(d + 90 + 2 * i);
+	}
+	o->tasto_accensione_ms = u16(d + 58) * 10;
+	o->tasto_punto_ms = u16(d + 60) * 10;
+	o->tasto_casa_ms = u16(d + 62) * 10;
+	o->controllo = d[64];
+	o->led = d[65];
+	o->byte66 = d[66] & 0x0f;
+	o->byte67 = (int8_t)d[67];
+	o->byte68 = d[68];
+	o->byte69_x100 = d[69] * 100;
+	o->acqua = d[70];
+	o->grezzo72 = u16(d + 72);
+	for (int i = 0; i < 6; i++)
+		o->correnti[i] = u16(d + 74 + 2 * i);
+	o->byte88 = (int16_t)u16(d + 88);
 	return 0;
 }

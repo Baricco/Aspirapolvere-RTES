@@ -20,8 +20,8 @@ LDFLAGS_ARM   = -static
 
 RT_SRC  = rt/rt.c
 RT_HDR  = rt/rt.h rt/rt_tempo.h
-GD32_SRC = gd32/gd32.c
-GD32_HDR = gd32/gd32.h
+GD32_SRC = gd32/gd32.c gd32/sicurezza.c
+GD32_HDR = gd32/gd32.h gd32/sicurezza.h
 LIDAR_SRC = lidar/lidar.c
 LIDAR_HDR = lidar/lidar.h
 # Librerie dei protocolli: ogni test e ogni strumento le compila tutte (sono piccole).
@@ -30,7 +30,7 @@ PROTO_HDR = $(GD32_HDR) $(LIDAR_HDR)
 
 PROGRAMMI = latenza carico
 STRUMENTI = spia
-TEST      = test_rt_tempo test_rt_task test_gd32 test_lidar test_registro
+TEST      = test_rt_tempo test_rt_task test_gd32 test_sicurezza test_lidar test_registro
 
 SPIA_SRC = spia/spia.c spia/registro.c spia/everest.c
 SPIA_HDR = spia/registro.h spia/everest.h
@@ -69,11 +69,13 @@ build/arm/test_%: test/test_%.c $(RT_SRC) $(RT_HDR) $(PROTO_SRC) $(PROTO_HDR) $(
 	$(CC_ARM) $(CFLAGS_ARM) -o $@ $< $(RT_SRC) $(PROTO_SRC) spia/registro.c $(LDFLAGS_ARM)
 
 # Esegue tutti i test sul PC.
-# Poi le prove complete della spia con periferiche e socket finti (tools/prova-spia*.py, ~3 s).
+# Poi le prove complete della spia con periferiche e socket finti (tools/prova-spia*.py, ~3 s)
+# e del banco di prova "spia guida" con un GD32 finto (tools/prova-guida.py, ~35 s).
 test: $(addprefix build/host/,$(TEST)) build/host/spia
 	@set -e; for t in $(addprefix build/host/,$(TEST)); do echo "== $$t"; ./$$t; done
 	@echo "== tools/prova-spia.py"; python3 tools/prova-spia.py build/host/spia 2 | tail -1
 	@echo "== tools/prova-spia-socket.py"; python3 tools/prova-spia-socket.py build/host/spia | tail -1
+	@echo "== tools/prova-guida.py"; python3 tools/prova-guida.py build/host/spia | tail -1
 
 # Esegue i test compilati per ARM sul PC tramite l'emulatore qemu-arm-static.
 # Verifica che il binario del robot funzioni, ma i tempi non sono significativi.

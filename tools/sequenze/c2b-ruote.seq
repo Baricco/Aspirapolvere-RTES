@@ -1,0 +1,24 @@
+# Fase 2, blocco C2 (seconda parte): retromarcia automatica 0x19, timeout del GD32 senza velocità né heartbeat,
+# tipi di controllo 0x65 e comando 0x67. SOLO CON IL ROBOT SOLLEVATO (--sollevato).
+# Uso: tools/banco-robot.sh avvia c2b --sollevato --sequenza tools/sequenze/c2b-ruote.seq --tensione-minima 140
+0      ogni 20 0x66:i32=0,i32=0
+500    0x65:02
+1000   0x19:00                       # disattiva la retromarcia automatica sugli anti-caduta (packetCliffBack)
+1500   ogni 20 0x66:i32=828,i32=0    # avanti a 5 cm/s: adesso va avanti?
+4000   ogni 20 0x66:i32=0,i32=0
+4500   0x19:01                       # la riattiva (everest la attiva all'avvio)
+5000   ogni 20 0x66:i32=-828,i32=0   # indietro a 5 cm/s
+7000   basta 0x66                    # niente più velocità...
+7000   basta 0x06                    # ...e niente heartbeat (il keepalive 0x0d continua): il GD32 si ferma?
+15000  0x66:i32=0,i32=0
+15100  ogni 200 0x06                 # riprende l'heartbeat
+15200  ogni 20 0x66:i32=0,i32=0
+16000  0x65:01
+16500  ogni 20 0x67:i32=828,i32=0    # 0x67 con il tipo di controllo 1
+19000  ogni 20 0x67:i32=0,i32=0
+19500  basta 0x67
+19500  0x65:00
+20000  ogni 20 0x66:i32=-828,i32=0   # 0x66 con il tipo di controllo 0
+22000  ogni 20 0x66:i32=0,i32=0
+22500  0x65:02
+23000  fine
