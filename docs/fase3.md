@@ -368,21 +368,50 @@ Altre misure a terra:
 - Dopo aver detto all'utente di rimettere il robot sulla base, `primo` è partito senza controllare: il robot era a terra
   ed è andato avanti ~70 cm senza nessuno a guardarlo (nessun danno). Fermato subito.
 
-## Cosa resta della fase 3
+## 2026-10-06 notte: chiusura (domande all'utente, poi da soli)
 
-Fatto il 5/10 sera (sopra): accensione, carica con il driver, suono di guasto, ruote e spazzole, prove di sicurezza a
-terra (salvo il gradino), aspirazione e blocco senza cassetto, scarto e posizione del lidar, registrazioni a terra e
-taratura, fattore fra PC e robot, registrazione grezza nel driver, `prepara`. La seriale a "bassa latenza" non si fa
-(scelta dell'utente). Restano, nessuno indispensabile per la fase 4:
+Risposte dell'utente:
+- **robot sollevato da un lato mentre ruota**: si lascia com'è (la rotazione resta permessa con un anti-caduta sul
+  vuoto o il bumper premuto: serve a staccarsi da un bordo);
+- **IR della base**: Claude muove il robot da solo (fatto, sotto);
+- **spazzola laterale**: NON montata (si muoveva solo il motorino);
+- **push**: lo fa l'utente;
+- misure fisiche e gradino: l'utente non li fa. Le misure restano stimate in `sim/robot.h` ([?]); gli anti-caduta a
+  terra sono provati in fase 2 e nel simulatore.
 
-1. **Curve della batteria con l'aspirazione** nel driver (`driver/batteria.c`): coefficienti già estratti
-   (`hardware.md`); mancano le soglie in giri/min che scelgono la curva, i filtri e i cali a tempo di ogni stato, poi
-   test e controllo con la registrazione a1.
-2. **Rotazione con il robot sollevato da un lato**: oggi `sic_terra_limita` la permette (serve per staccarsi da un
-   bordo). Decidere se fermarla quando qualcuno solleva il robot.
-3. **IR della base** (byte 6) per il simulatore: robot fermo davanti alla base a varie distanze e angoli (resta la
-   registrazione `irbase` della fase 2 da guardare).
-4. **Misure fisiche ancora stimate** in `sim/robot.h`: altezze di corpo e torretta, posizione degli anti-caduta,
-   dimensioni della base (online si trovano solo diametro 345–349 mm e altezza 94–95 mm).
-5. **Gradino** per gli anti-caduta a terra con il nostro driver.
-6. **`Script/trova-robot.sh`** non ha trovato il robot all'accensione (voce ARP "STALE" su 192.168.1.101): capire perché.
+**Curve della batteria con l'aspirazione** (`driver/batteria.c`): lo stato si sceglie dai giri della ventola come in
+`batteryCapacity` (≥ 20 000 giri/min 2600 Pa, ≥ 19 000 2000, ≥ 17 000 1500, ≥ 15 000 1200, ≥ 14 000 1000, ≥ 12 000
+800, oltre 1000 600 Pa; poi "in movimento" solo con la ventola a 0, altrimenti "fermo"); per ogni stato curva, calo a
+tempo (da 4900 frame a 600 Pa a 2250 a 2600 Pa) e, nei tre stati più forti, discesa 10 volte più lenta sopra 15,5 V e
+1,05 da 15,6 V. Segni dei coefficienti verificati nel disassemblato (1500 Pa) e con la continuità ai confini. Test
+nuovi in `test_driver_logica` (80 controlli).
+
+**IR della base** (prova ir1, robot mosso da solo, `build/robot/fase3/ir1/`): giro completo per trovarla (IR visto
+con l'imbardata fra 100° e 149°), poi spazzate di ±40-55° a 1,6 / 1,2 / 0,8 / 0,5 m sull'asse e a 1,1 m spostati di
+0,5 m a sinistra e 0,2 m a destra:
+- **nibble basso = ricevitore sinistro, nibble alto = destro** (`unpacketDockIR` prende il bit più basso acceso);
+- ognuno vede la base entro un campo di ~40° (sinistro da −3° a +38°, destro da −16° a +30° rispetto al davanti);
+- sull'asse: a 1,6 m solo il fascio 1; a ~1 m i fasci 1 e 2; sotto 0,8 m domina il 2;
+- spostati verso la destra del robot (che guarda la base): fasci 1 e 4; verso la sinistra: solo il 2; l'8 non si è
+  visto (per simmetria il simulatore lo mette dalla parte opposta al 4) [?];
+- la base per il lidar è **scura** (intensità ~60–90 contro ~150 delle pareti, con una parte centrale lucida): così la
+  si riconosce nel giro del lidar; da più di ~1 m spesso non dà eco.
+Il modello è in `sim/gd32sim.c` (`fasci_base`, `calcola_ir_base`), con un ricevitore per lato.
+
+**Prova di aggancio alla base** (dock1, da soli): trovata la faccia della base con il lidar (punti scuri), il robot si è
+messo sul suo asse a 0,455 m, di spalle, con 1,6 cm di errore laterale e ~7° di inclinazione (corretta a metà), ed è
+andato indietro a 5 cm/s. Ha toccato la base storto ed è ruotato di ~30° (gli encoder non segnano rotazione: l'ha
+girato il contatto), senza chiudere i contatti. Agganciarsi richiede l'avvicinamento guidato dall'IR durante la
+retromarcia, come fa l'originale: è un compito per i task (fase 4 o 5). Il robot è rimasto a terra, vicino alla base.
+
+**`Script/trova-robot.sh`**: se la voce ARP del robot è vecchia (STALE) e il robot risponde lento all'ARP, ora prova un
+ping all'indirizzo e lo accetta se il MAC corrisponde (all'inizio della serata del 5/10 non lo trovava).
+
+## Fase 3: chiusa
+
+Tutto quello che era nel piano della fase 3 è fatto, salvo due scelte dell'utente: la seriale a "bassa latenza" (non
+si fa) e le misure fisiche col metro (restano stimate, segnate [?] in `sim/robot.h`). Cose aperte che passano alle
+fasi successive:
+- aggancio alla base con l'IR (task, fase 4 o 5);
+- IR della base: il fascio 8 e i confini esatti dei fasci (si affinano quando un task si avvicina alla base);
+- gli anti-caduta con il nostro driver su un gradino vero.

@@ -636,7 +636,7 @@ static void frame_gd32(const gd32_frame_t *f, void *ctx)
 		d.sensori_secondo[0]++;
 		/* "in movimento" come l'originale: v + |ω| misurati (byte 32 e 36) maggiori di zero */
 		int in_moto = d.s.vel_sx / SCALA_V + fabs(d.s.vel_dx / SCALA_W) > 0;
-		int liv = batteria_aggiorna(&d.bat, d.s.tensione_dv, d.s.in_carica, d.s.sulla_base, in_moto);
+		int liv = batteria_aggiorna(&d.bat, d.s.tensione_dv, d.s.in_carica, d.s.sulla_base, in_moto, d.s.byte69_x100);
 		if (liv != d.bat_prec) {
 			static const char *nomi[] = { "normale", "BASSA (LED 6)", "CRITICA: motori fermi" };
 			evento("batteria %s, %.2f V", nomi[liv], batteria_volt(&d.bat));

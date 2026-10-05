@@ -166,7 +166,8 @@ typedef struct {
 	int cassetto;               /* byte 4 bit 2 [V]: cassetto della polvere presente */
 	uint8_t byte4_altri;        /* byte 4 bit 1 e 0 [?] (serbatoio / mop: everest ha detectWaterboxLost, detectMoppingLost) */
 	uint8_t byte5;              /* byte 5 [?]: everest usa i bit 1 e 0 */
-	uint8_t ir_base_a, ir_base_b; /* byte 6 [V]: due ricevitori (nibble alto e basso); ogni bit 1/2/4/8 = un fascio della base */
+	uint8_t ir_base_a, ir_base_b; /* byte 6 [V]: due ricevitori, a = nibble alto = DESTRO, b = nibble basso = SINISTRO;
+	                                 ogni bit 1/2/4/8 = un fascio della base (fase 3, prova ir1) */
 	int in_carica;              /* byte 7 bit 0 [V] */
 	int sulla_base;             /* byte 7 bit 0 | bit 1 [V] (bit 1 = contatto con la base, bit 0 = in carica) */
 	int tensione_dv;            /* byte 8 [V]: tensione della batteria in decimi di volt */

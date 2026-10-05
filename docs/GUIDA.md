@@ -390,7 +390,7 @@ La versione breve (c2) è dentro `make test`; val1 (circa 5 minuti) si lancia a 
 - raggio della torretta (la posizione del lidar invece è misurata: 11,2 cm dietro il centro);
 - posizione degli anti-caduta (±18° e ±50° a 15 cm);
 - forma e altezza della base;
-- codici dell'IR della base;
+- confini esatti dei fasci dell'IR della base (modello dalla prova ir1, fase 3; il fascio 8 non si è mai visto);
 - corrente di carica e consumo del SoC;
 - dinamica a terra;
 - il fatto che il GD32 ignori gli anti-caduta con i sensori spenti (serve per uscire dalla base).

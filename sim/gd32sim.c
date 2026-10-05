@@ -339,8 +339,28 @@ static void metti16(uint8_t *b, int v) { b[0] = (uint8_t)v; b[1] = (uint8_t)(v >
 static void metti32(uint8_t *b, int32_t v) { for (int i = 0; i < 4; i++) b[i] = (uint8_t)((uint32_t)v >> (8 * i)); }
 static int satura16(double v) { return v > 32767 ? 32767 : v < -32768 ? -32768 : (int)lround(v); }
 
-/* IR della base (byte 6). NON misurato nei dettagli: i due ricevitori sono davanti (fase 2, D2); vedono i fasci della
- * base se il robot la guarda (entro ~30°) ed è nel suo cono di emissione. bit 1 = fascio largo, 4 / 8 = laterali. */
+/* IR della base (byte 6) [misura del 6/10, prova ir1, docs/fase3.md; parziale]. La base manda 4 fasci codificati
+ * (bit 1, 2, 4, 8); ogni ricevitore del robot riporta quelli che lo raggiungono (everest prende il bit più basso:
+ * unpacketDockIR). fi = posizione del ricevitore vista dalla base, rispetto alla sua normale (+ = a destra del robot
+ * che guarda la base), d = distanza dalla base:
+ *   fascio 1: |fi - 5°| < 20°, da 0,5 a ~2,5 m (sull'asse si vede da solo a 1,6 m; vicinissimo quasi sparisce);
+ *   fascio 2: |fi + 12°| < 20°, fino a ~1,3 m; sotto 0,7 m anche |fi| < 35° (vicino alla base domina lui);
+ *   fascio 4: fi da +8° a +45°, da 0,7 a 2 m (visto a 0,2 m dall'asse, a 1,1 m; mai vicino alla base);
+ *   fascio 8: fi da -60° a -25° [?: mai visto stanotte, per simmetria con il 4].
+ * I due ricevitori sono davanti: nibble BASSO = sinistro, ALTO = destro. Ognuno vede la base solo se è nel suo campo:
+ * il sinistro da -3° a +38°, il destro da -16° a +30° (angolo della base rispetto al davanti, + = a sinistra). */
+static uint8_t fasci_base(const mondo_t *m, double x, double y)
+{
+	double dx = x - m->base_x, dy = y - m->base_y, d = hypot(dx, dy);
+	double fi = angolo_norm(atan2(dy, dx) - m->base_dir) * 180 / M_PI;
+	uint8_t f = 0;
+	if (fabs(fi - 5) < 20 && d > 0.5 && d < 2.5) f |= 1;
+	if ((fabs(fi + 12) < 20 && d < 1.3) || (fabs(fi) < 35 && d < 0.7)) f |= 2;
+	if (fi > 8 && fi < 45 && d > 0.7 && d < 2.0) f |= 4;
+	if (fi > -60 && fi < -25 && d < 2.0) f |= 8;
+	return f;
+}
+
 static uint8_t calcola_ir_base(const gd32sim_t *g, const mondo_t *m)
 {
 	if (!m->ha_base || !g->sensori_accesi)
@@ -348,18 +368,19 @@ static uint8_t calcola_ir_base(const gd32sim_t *g, const mondo_t *m)
 	double dx = g->x - m->base_x, dy = g->y - m->base_y, d = hypot(dx, dy);
 	if (d > 3.0 || d < 0.05)
 		return 0;
-	double fi = angolo_norm(atan2(dy, dx) - m->base_dir);
-	double guarda = angolo_norm(atan2(-dy, -dx) - g->dir);
-	if (fabs(fi) > 70 * M_PI / 180 || fabs(guarda) > 30 * M_PI / 180)
-		return 0;
 	double px = m->base_x + 0.01 * cos(m->base_dir), py = m->base_y + 0.01 * sin(m->base_dir);
 	if (mondo_raggio(m, px, py, atan2(dy, dx), 0.05, d) < d - ROBOT_RAGGIO)
-		return 0;
-	uint8_t b = 0x2;
-	if (fi < 15 * M_PI / 180) b |= 0x4;
-	if (fi > -15 * M_PI / 180) b |= 0x8;
-	uint8_t a = (d < 1.0 && fabs(guarda) < 15 * M_PI / 180) ? (uint8_t)(b & 0xA) : 0;
-	return (uint8_t)(a << 4 | b);
+		return 0;                                   /* qualcosa fra la base e il robot */
+	uint8_t nib[2] = { 0, 0 };
+	for (int r = 0; r < 2; r++) {                   /* 0 = sinistro (nibble basso), 1 = destro (alto) */
+		double ly = r == 0 ? 0.08 : -0.08;          /* ricevitori sul davanti, ~8 cm a lato [?] */
+		double rx = g->x + 0.15 * cos(g->dir) - ly * sin(g->dir), ry = g->y + 0.15 * sin(g->dir) + ly * cos(g->dir);
+		double guarda = angolo_norm(atan2(m->base_y - ry, m->base_x - rx) - g->dir) * 180 / M_PI;
+		int vede = r == 0 ? (guarda > -3 && guarda < 38) : (guarda > -16 && guarda < 30);
+		if (vede)
+			nib[r] = fasci_base(m, rx, ry);
+	}
+	return (uint8_t)(nib[1] << 4 | nib[0]);
 }
 
 /* Velocità misurata dal GD32 (byte 32 e 36): dagli encoder, nella finestra di ~70 ms. */

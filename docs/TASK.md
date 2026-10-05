@@ -274,7 +274,7 @@ nuovo), `s.t_ns` (quando è arrivato, nello stesso orologio di `rt_adesso()`) e 
 | `bumper_sx`, `bumper_dx` | 0/1 | bumper sinistro e destro premuti |
 | `cliff[0..3]` | 0/1 | anti-caduta, 1 = vuoto. Da sinistra a destra: 0 sinistro laterale, 1 sinistro anteriore, 2 destro anteriore, 3 destro laterale. Sulla base leggono tutti 1 |
 | `cassetto` | 0/1 | cassetto della polvere presente |
-| `ir_base_a`, `ir_base_b` | bit | due ricevitori IR davanti: ogni bit (1, 2, 4, 8) è un fascio della base visto. Si accendono solo guardando la base |
+| `ir_base_a`, `ir_base_b` | bit | due ricevitori IR davanti: `ir_base_b` (nibble basso) è il **sinistro**, `ir_base_a` il **destro**; ognuno vede la base entro ~40°. Ogni bit è un fascio della base: 1 centrale e lungo (da solo oltre ~1,5 m), 2 corto (domina sotto ~0,8 m), 4 verso la destra del robot che guarda la base, 8 [?]. Dettagli e modello del simulatore in `docs/fase3.md` (prova ir1). Per agganciarsi la base va avvicinata così e poi si entra **all'indietro** (i contatti sono dietro) |
 | `in_carica` | 0/1 | in carica |
 | `sulla_base` | 0/1 | sui contatti della base (o in carica). I contatti sono dietro |
 | `tensione_dv` | 0,1 V | tensione della batteria (meglio `drv_stato().volt`, già mediata) |

@@ -78,13 +78,15 @@ lidar → /dev/ttyS1 → AuxCtrl
    `gd32/sicurezza.h`), prove su lidar, ruote, spazzole, aspirazione, carica, LED, audio, IMU, anti-caduta, IR della
    base. Aperti: carica ferma a 16,3 V (batteria degradata?), curva di scarica, scarto di ~8° del lidar (risolto il 5/10: 14,5°, angoli orari, vedi fase3.md).
    `docs/fase2.md`, `docs/RIEPILOGO.md`.
-3. **Driver, framework RT e simulatore** — QUASI FATTA (notte del 4-5/10, `docs/fase3.md`). Driver (`driver/`: avvio,
+3. **Driver, framework RT e simulatore** — FATTA (4-6/10, `docs/fase3.md`). Driver (`driver/`: avvio,
    keepalive, heartbeat, sensori, lidar regolato, batteria, limiti di sicurezza "a terra", watchdog dei task, stato di
    guasto con LED 8 e suono), framework (`rt/`: task sporadici, watchdog, priorità RM), simulatore con pagina web,
    guida (`GUIDA.md` sezioni 11–13). Provato sul robot **senza motori** (0 scadenze mancate, ritardo del ciclo
    < 160 µs, poi < 110 µs con il driver a due thread). Il 5/10 il simulatore è diventato fedele: geometria vera, dinamica
-   tarata sulle registrazioni e validata contro di esse, stanza a oggetti con editor, ispettore dei messaggi. Manca, con
-   l'utente: ruote e spazzole attraverso il driver, a terra e sollevato, e le verifiche elencate in `fase3.md`.
+   tarata sulle registrazioni e validata contro di esse, stanza a oggetti con editor, ispettore dei messaggi. Il 5-6/10
+   prove con il robot a terra: corretti il verso del lidar e le scale di velocità (~3,6 volte), aspirazione con blocco
+   senza cassetto e curve della batteria della ventola, IR della base, registrazione grezza nel driver, simulatore
+   validato anche a terra. Aperti per le fasi dopo: aggancio alla base con l'IR, gradino.
 4. **Task RT** (utente, da solo) — sicurezza, controllo del moto, lidar, comportamento, watchdog dei task, mappatura
    in hard RT; WCET, jitter, analisi di schedulabilità.
 5. **App e server aperiodico** (insieme) — scelta del tipo di app e del server; comandi e telemetria.

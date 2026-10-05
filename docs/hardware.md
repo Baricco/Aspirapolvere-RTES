@@ -76,7 +76,7 @@ fasi 1–3; [utente]; [?] stima da verificare.
 | Batteria | Li-ion 4S, 14,8 V nominali, 3200 mAh; ~2,45 Ah utili fra 16,3 e 13,8 V | [scheda], [misura c8scarica] |
 | Ruote | carreggiata 241,5 mm; **~4580 tick per metro** (everest dice raggio 34,75 mm e 3616 tick per giro, cioè 16 561 tick/m: SBAGLIATO di 3,6 volte); 1 unità di `0x66` = 1 tick/s per ruota; ω di `0x66`: 553 unità per rad/s | [firmware], [misura c2], [misura 5/10 con lidar e IMU] |
 | Contatti di carica | **dietro**, sul lato opposto al bumper: il robot entra in base all'indietro | [utente] |
-| Ricevitori IR della base | davanti | [misura, fase 2 D2] |
+| Ricevitori IR della base | davanti, due: nibble basso del byte 6 = sinistro, alto = destro; campo ~40° ciascuno; la base manda 4 fasci (1 centrale e lungo, 2 corto e verso la sinistra del robot, 4 verso la destra, 8 [?]) | [misura, fase 2 D2 e fase 3 ir1] |
 | Anti-caduta | 4 sul davanti, da sinistra a destra = bit 0..3; portata 2–15 cm | [misura D3], [firmware hwdrivers.ini] |
 | Bumper | arco anteriore, sinistro e destro; everest segna l'ostacolo 2 cm oltre il contorno, settori di 15° | [misura], [firmware] |
 | Torretta del lidar | senza interruttori: sotto un mobile basso il robot si incastra senza bumper | [misura] |
@@ -115,9 +115,10 @@ valori, quindi sul robot valevano i predefiniti.
 - Tensione: media degli ultimi 5000 frame (100 s). La media riparte da zero quando il carico aumenta (per esempio da
   fermo a in movimento, o verso la base); non riparte quando il carico diminuisce.
 - Stato di carico: **sulla base** se il byte 7 ha il bit 0 o il bit 1 acceso, oppure se il bit 0 ("in carica") è stato
-  acceso per più dell'80 % degli ultimi 30 s; altrimenti, con l'aspirazione accesa, uno degli 8 stati della ventola
-  (da 1000 a oltre 20 000 giri/min, ognuno con la sua curva: non ancora riprodotti nel driver); altrimenti **in movimento** se
-  v + |ω| misurati (byte 32 e 36) sono maggiori di zero (la retromarcia dritta conta come "fermo"); altrimenti **fermo**.
+  acceso per più dell'80 % degli ultimi 30 s; altrimenti, con la ventola oltre 1000 giri/min, uno dei 7 stati della
+  ventola (ognuno con la sua curva, sotto; nel driver dal 6/10); altrimenti **in movimento** se
+  v + |ω| misurati (byte 32 e 36) sono maggiori di zero e la ventola è a 0 (la retromarcia dritta conta come "fermo");
+  altrimenti **fermo**.
 - Curve da tensione V (media) a carica (0..1), tre tratti:
 
   | | V ≥ 14,3 | 13,3 ≤ V < 14,3 | V < 13,3 |
@@ -129,8 +130,10 @@ valori, quindi sul robot valevano i predefiniti.
   27 / 39 %; 13,8 V → 16 / 22 %; 13,3 V → 6 / 11 %; 12,0 V → 1 / 2 %.
 - Con l'**aspirazione accesa** (estratte il 5/10, **non ancora nel driver**): sette curve
   `calculate600PaStateCapacity` … `calculate2600PaStateCapacity` (0x669108–0x669f70), scelte in `batteryCapacity` in
-  base ai giri della ventola (soglie da estrarre). Stessi tre tratti; segni dei termini ricavati dalla continuità a 13,3 e
-  14,3 V (si raccordano entro l'1 %) [?: da confermare istruzione per istruzione]:
+  base ai giri della ventola: ≥ 20 000 giri/min 2600 Pa, ≥ 19 000 2000 Pa, ≥ 17 000 1500 Pa, ≥ 15 000 1200 Pa,
+  ≥ 14 000 1000 Pa, ≥ 12 000 800 Pa, oltre 1000 600 Pa; sotto, "fermo" o "in movimento" (questo solo con la ventola a
+  0). Stessi tre tratti (segni verificati nel disassemblato della curva da 1500 Pa; ai confini saltano meno del 2 %).
+  **Nel driver dal 6/10** (`driver/batteria.c`):
 
   | Stato | V ≥ 14,3 | 13,3 ≤ V < 14,3 | V < 13,3 |
   |---|---|---|---|
@@ -142,8 +145,9 @@ valori, quindi sul robot valevano i predefiniti.
   | 2000 Pa | 0,2512 V − 3,0092 (1,05 da 15,6 V) | −0,2143 V² + 6,2383 V − 44,819 | 0,103 V² − 2,4044 V + 14,006 |
   | 2600 Pa | 0,2673 V − 3,2609 (1,05 da 15,6 V) | −0,0957 V² + 3,0044 V − 22,825 | 0,1469 V² − 3,5625 V + 21,608 |
 
-  Nei tre stati più forti cambiano anche il filtro (2·10⁻⁵ invece di 2·10⁻⁴ per frame) e il calo a tempo (1 % ogni
-  2751 frame, ~55 s, nello stato da 1500 Pa). L'originale comanda la ventola con `0x68` (`setBlowerSpeed` →
+  Calo a tempo dell'1 % ogni 4900 / 4050 / 3500 / 3250 / 2750 / 2400 / 2250 frame (da 600 a 2600 Pa; fermo 16 200,
+  in movimento 8500). Nei tre stati più forti, sopra 15,5 V, la discesa verso la curva è 10 volte più lenta (2·10⁻⁵
+  invece di 2·10⁻⁴ per frame). L'originale comanda la ventola con `0x68` (`setBlowerSpeed` →
   `packetBlowerSpeed`; `hwdrivers.ini`: `enable_blower_speed=1`) ai livelli di `controller.ini` (profilo Proscenic):
   eco 12 800, normale 15 500, massimo 19 500 giri/min.
 - Lontano dalla base la stima **non sale mai**:

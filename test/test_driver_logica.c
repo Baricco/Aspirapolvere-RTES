@@ -100,7 +100,7 @@ static int riempi(batteria_t *b, int dv, int carica, int n)
 {
 	int l = 0;
 	for (int i = 0; i < n; i++)
-		l = batteria_aggiorna(b, dv, carica, carica, 0);
+		l = batteria_aggiorna(b, dv, carica, carica, 0, 0);
 	return l;
 }
 
@@ -108,7 +108,7 @@ static int riempi(batteria_t *b, int dv, int carica, int n)
 static int scarica(batteria_t *b, int dv, int moto, int n)
 {
 	for (int i = 0; i < n; i++)
-		batteria_aggiorna(b, dv, 0, 0, moto);
+		batteria_aggiorna(b, dv, 0, 0, moto, 0);
 	return batteria_percentuale(b);
 }
 
@@ -121,6 +121,28 @@ static void batteria(void)
 	CONTROLLA(fabs(batteria_curva(BAT_STATO_MOTO, 15.0) - 0.7168) < 1e-4);
 	CONTROLLA(fabs(batteria_curva(BAT_STATO_MOTO, 13.8) - 0.2241) < 1e-3);
 	CONTROLLA(batteria_curva(BAT_STATO_FERMO, 14.6) < batteria_curva(BAT_STATO_FERMO, 14.7));
+
+	/* aspirazione: lo stato si sceglie dai giri della ventola, come in batteryCapacity (0x66a2b0) */
+	CONTROLLA(batteria_stato_carico(0, 20000) == BAT_STATO_2600PA && batteria_stato_carico(1, 19500) == BAT_STATO_2000PA);
+	CONTROLLA(batteria_stato_carico(0, 17000) == BAT_STATO_1500PA && batteria_stato_carico(0, 16999) == BAT_STATO_1200PA);
+	CONTROLLA(batteria_stato_carico(0, 14000) == BAT_STATO_1000PA && batteria_stato_carico(0, 12000) == BAT_STATO_800PA);
+	CONTROLLA(batteria_stato_carico(1, 1001) == BAT_STATO_600PA && batteria_stato_carico(1, 1000) == BAT_STATO_FERMO);
+	CONTROLLA(batteria_stato_carico(1, 0) == BAT_STATO_MOTO && batteria_stato_carico(0, 0) == BAT_STATO_FERMO);
+	/* ogni curva salta al massimo del 5 % ai confini di 13,3 V e 14,3 V (le curve dell'originale "fermo" e "in
+	   movimento" saltano fino al 4,4 %, quelle della ventola meno del 2 %): un segno sbagliato darebbe salti enormi */
+	int continua = 1;
+	for (int st = 1; st <= 10; st++) {
+		if (st == 2)
+			continue;
+		for (int k = 0; k < 2; k++) {
+			double v = k ? 14.3 : 13.3;
+			if (fabs(batteria_curva(st, v) - batteria_curva(st, v - 1e-9)) > 0.05)
+				continua = 0;
+		}
+	}
+	CONTROLLA(continua);
+	CONTROLLA(batteria_curva(BAT_STATO_1500PA, 15.6) == 1.05 && batteria_curva(BAT_STATO_1200PA, 15.6) < 1.05);
+	CONTROLLA(fabs(batteria_curva(BAT_STATO_800PA, 14.0) - (0.1327 * 196 - 3.2947 * 14 + 20.455)) < 1e-9);
 
 	/* soglie */
 	batteria_t b;
@@ -166,6 +188,16 @@ static void batteria(void)
 	CONTROLLA(fabs(b.stima - s0) < 1e-12);
 	scarica(&b, 150, 0, 1);
 	CONTROLLA(fabs(b.stima - (s0 - 0.01)) < 1e-12);
+	/* con la ventola a 18 000 giri/min (1500 Pa) il calo a tempo è ogni 2752 frame (~55 s) */
+	batteria_init(&b);
+	batteria_aggiorna(&b, 145, 0, 0, 0, 18000);
+	s0 = b.stima;
+	CONTROLLA(b.stato == BAT_STATO_1500PA && fabs(s0 - batteria_curva(BAT_STATO_1500PA, 14.5)) < 1e-12);
+	for (int i = 0; i < 2751; i++)
+		batteria_aggiorna(&b, 150, 0, 0, 0, 18000);
+	CONTROLLA(fabs(b.stima - s0) < 1e-12);
+	batteria_aggiorna(&b, 150, 0, 0, 0, 18000);
+	CONTROLLA(fabs(b.stima - (s0 - 0.01)) < 1e-12);
 	/* in movimento si usa l'altra curva */
 	batteria_init(&b);
 	CONTROLLA(scarica(&b, 150, 1, 1) == 72);
@@ -176,21 +208,21 @@ static void batteria(void)
 
 	/* sulla base: prima stima dalla curva di carica (tensione - 0,4 V), poi +1 % ogni 5002 frame sopra 15 V */
 	batteria_init(&b);
-	batteria_aggiorna(&b, 163, 1, 1, 0);
+	batteria_aggiorna(&b, 163, 1, 1, 0, 0);
 	CONTROLLA(batteria_percentuale(&b) == 91);
 	for (int i = 0; i < 5001; i++)
-		batteria_aggiorna(&b, 163, 1, 1, 0);
+		batteria_aggiorna(&b, 163, 1, 1, 0, 0);
 	CONTROLLA(batteria_percentuale(&b) == 91);
-	batteria_aggiorna(&b, 163, 1, 1, 0);
+	batteria_aggiorna(&b, 163, 1, 1, 0, 0);
 	CONTROLLA(batteria_percentuale(&b) == 92);
 	batteria_init(&b);
-	batteria_aggiorna(&b, 165, 1, 1, 0);
+	batteria_aggiorna(&b, 165, 1, 1, 0, 0);
 	CONTROLLA(batteria_percentuale(&b) == 97);          /* sopra 16,4 V: 97 % */
 	/* scendendo dalla base: per 6 s conta ancora come "in carica" (bit acceso per più dell'80 % degli ultimi 30 s),
 	 * poi la stima parte dal valore raggiunto e scende piano verso la curva */
 	batteria_init(&b);
 	for (int i = 0; i < 40000; i++)
-		batteria_aggiorna(&b, 163, 1, 1, 0);
+		batteria_aggiorna(&b, 163, 1, 1, 0, 0);
 	CONTROLLA(batteria_percentuale(&b) == 98);
 	scarica(&b, 162, 0, 300);
 	CONTROLLA(b.stato == BAT_STATO_CARICA);
