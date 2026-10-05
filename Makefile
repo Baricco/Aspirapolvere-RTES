@@ -73,6 +73,17 @@ build/arm/%: tasks/%.c $(TASK_LIB) $(TASK_HDR)
 	@mkdir -p $(@D)
 	$(CC_ARM) $(CFLAGS_ARM) -I. -o $@ $< $(TASK_LIB) -lm $(LDFLAGS_ARM)
 
+# Un programma diviso in più file: la cartella tasks/<nome>/ con main.c e gli altri .c e .h (per esempio uno per
+# task) diventa build/host/<nome> e build/arm/<nome>. Si compilano tutti i .c della cartella.
+.SECONDEXPANSION:
+build/host/%: tasks/%/main.c $$(wildcard tasks/$$*/*.c tasks/$$*/*.h) $(TASK_LIB) $(TASK_HDR)
+	@mkdir -p $(@D)
+	$(CC_HOST) $(CFLAGS_HOST) -I. -o $@ $(wildcard tasks/$*/*.c) $(TASK_LIB) -lm
+
+build/arm/%: tasks/%/main.c $$(wildcard tasks/$$*/*.c tasks/$$*/*.h) $(TASK_LIB) $(TASK_HDR)
+	@mkdir -p $(@D)
+	$(CC_ARM) $(CFLAGS_ARM) -I. -o $@ $(wildcard tasks/$*/*.c) $(TASK_LIB) -lm $(LDFLAGS_ARM)
+
 # La spia (spia/): intercetta e registra il traffico con GD32 e lidar.
 build/host/spia: $(SPIA_SRC) $(SPIA_HDR) $(RT_SRC) $(RT_HDR) $(PROTO_SRC) $(PROTO_HDR)
 	@mkdir -p $(@D)

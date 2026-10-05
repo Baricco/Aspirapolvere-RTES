@@ -1,0 +1,5 @@
+-std=gnu11
+-I.
+-Wall
+-Wextra
+-pthread

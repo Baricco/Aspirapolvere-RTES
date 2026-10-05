@@ -465,6 +465,8 @@ le misure prese sul robot.
 
 ## 13. Scrivere un task (fase 4)
 
+Guida pratica passo per passo, con l'esempio `tasks/primo.c` e il riferimento di sensori e attuatori: **`docs/TASK.md`**.
+
 Un programma con i tuoi task ha questa forma (i nomi sono esempi):
 
 ```c
