@@ -20,6 +20,7 @@ typedef struct {
 	double ruote_ritardo_ms;                  /* dal comando all'inizio del movimento */
 	double rampa_v_su, rampa_v_giu;           /* tick/s² */
 	double rampa_w_su, rampa_w_giu;
+	double tau_v_terra, tau_w_terra;          /* s: A TERRA la risposta non è a rampa ma del primo ordine (fase 3) */
 	double ruote_finestra_ms;                 /* finestra della velocità misurata (byte 32/36) */
 	double ruote_timeout_hb;                  /* s senza heartbeat 0x06 prima che il GD32 tolga potenza */
 	double ruote_inerzia;                     /* tick/s²: senza potenza le ruote si fermano da sole */

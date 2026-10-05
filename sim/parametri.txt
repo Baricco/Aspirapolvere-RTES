@@ -4,12 +4,13 @@ gd32_periodo_ms = 20.00056    # sessione d, 47877 frame
 arrivo_probabilita = 0 0.01 0.05 0.1 0.25 0.5 0.75 0.9 0.95 0.99 0.999 0.9999 1    # quantili della distribuzione qui sotto
 arrivo_ritardo_ms = 0.000 0.293 0.324 0.329 0.334 0.342 0.352 0.361 0.365 0.375 0.407 0.800 5.000    # sessione d (spia guida, lidar acceso) + coda fino a 5 ms vista dal driver in fase 3 (r7)
 ruote_ritardo_ms = 29    # c2/c2b: dal gradino al 10% della risposta, meno un frame
-ruote_rampa_v = 16584 16761    # c2/c2b: tick/s² per ruota, accelerando e rallentando (SOLLEVATO: a terra [?])
+ruote_rampa_v = 16584 16761    # c2/c2b: tick/s² per ruota, accelerando e rallentando, robot SOLLEVATO (a terra: ruote_tau_terra_s)
 ruote_rampa_w = 2214 2223    # c2/c2b: idem per la rotazione (il GD32 frena piano in rotazione)
 ruote_finestra_misura_ms = 70    # v e omega dei byte 32/36: passi di ~7 unità = 0,5 tick / 70 ms (c2)
 ruote_corrente_base_ma = 64    # mediana in movimento, robot sollevato (c2)
 ruote_corrente_picchi_ma = 290    # 90° percentile: picchi sparsi (c2)
 ruote_corrente_avvio_ma = 772    # picco alla partenza (c2/c2b)
+ruote_tau_terra_s = 0.109 0.073    # val1 (fase 3, a terra): risposta del primo ordine di v e omega
 ruote_timeout_heartbeat_s = 2.04    # c2b: senza 0x06 il GD32 toglie potenza ai motori dopo...
 ruote_inerzia = 1879    # c2b: decelerazione delle ruote senza potenza (si fermano da sole), tick/s²
 imu_deriva_gradi_s = -0.000083    # c8scarica: 5 h fermo, pendenza dell'angolo di imbardata

@@ -314,7 +314,11 @@ Con `rtes-driver --banco [--cliff-atteso X]` vale invece il blocco del banco di 
 **`rtes-driver`** (il driver comandato a mano): una riga di stato al secondo e comandi da tastiera o da FIFO:
 `v 0.1 0`, `stop`, `spazzole 0 30`, `led 3`, `lidar 1`, `esci_base 1`, `azzera`, `suono sound_beep_beep`,
 `salva_giro giro.csv`, `blocca` (con `--task-prova`: blocca un task per provare il watchdog), `fine`.
-Opzioni utili: `--senza-motori`, `--aspirazione`, `--task-prova`, `--durata S`, `--csv FILE`, `--ogni MS`.
+Opzioni utili: `--senza-motori`, `--aspirazione`, `--task-prova`, `--durata S`, `--csv FILE`, `--ogni MS`,
+`--registra FILE` (i byte grezzi di GD32 e lidar nel formato della spia: si rileggono con `tools/estrai-frame.py` e
+servono a `./rtes.sh taratura` e `./rtes.sh valida-sim`; li scrive un thread non real-time, il driver non si blocca).
+La riga di stato mostra anche v e ω misurati dal GD32, l'imbardata dell'IMU, il cassetto, l'IR della base e i giri
+della ventola (con il motivo, se l'aspirazione chiesta è ferma).
 
 Sul robot (stanotte senza lo stack originale: al suo posto gira il **custode**, `spia guida` con solo keepalive e
 heartbeat, che riparte da solo quando il driver termina):
@@ -323,8 +327,9 @@ heartbeat, che riparte da solo quando il driver termina):
 |---|---|
 | `tools/driver-robot.sh avvia NOME [opzioni di rtes-driver]` | ferma il custode e avvia `rtes-driver` in background (`/tmp/rtes/NOME.out`, `NOME.csv`) |
 | `tools/driver-robot.sh comando "lidar 1"` | manda un comando al driver che gira |
-| `tools/driver-robot.sh stato` / `segui` / `ferma` / `scarica NOME` | ultime righe / in diretta / termina / copia in `build/robot/fase3/NOME/` |
+| `tools/driver-robot.sh stato` / `segui` / `ferma` / `scarica NOME` | ultime righe / in diretta / termina / copia in `build/robot/fase3/NOME/` (anche `NOME.reg`, se c'è) |
 | `tools/driver-robot.sh custode` | fa partire il custode se nessuno sorveglia il GD32 |
+| `tools/driver-robot.sh prepara` | all'inizio di una sessione, dopo un'accensione: ferma lo stack originale e avvia il custode in un solo comando |
 
 ## 12. Il simulatore (`sim/`)
 
@@ -356,7 +361,10 @@ robot e confrontato con esse automaticamente. Le prove di sicurezza sul robot si
 |---|---|---|
 | ritardo di consegna dei frame | quasi sempre ~0,34 ms, coda fino a 5 ms: intervalli da ~15 a ~25 ms | d (16 min) + fase 3 r7 |
 | comando delle ruote | vale dopo 29 ms | c2, c2b |
-| rampe | v ~16 600 tick/s²; ω ~2 200 tick/s² (in rotazione il GD32 è lento) | c2, c2b |
+| risposta a terra | del primo ordine: costante di tempo 109 ms per v, 73 ms per ω; al massimo 1772 tick/s (~0,39 m/s) | val1 (fase 3) |
+| rampe da sollevato | v ~16 600 tick/s²; ω ~2 200 tick/s² (in rotazione il GD32 è lento) | c2, c2b |
+| scale di `0x66` | ~4580 tick per metro, 553 unità per rad/s (`gd32/gd32.h`) | lidar e IMU, fase 3 |
+| lidar sul robot | angoli orari, scarto 14,5°, 11,2 cm dietro il centro, scostamento ottico 2,5 cm | fase 3, kaiaai |
 | velocità misurata (byte 32/36) | sugli encoder in 70 ms (passi di ~7 unità) | c2 |
 | senza heartbeat | potenza tolta dopo 2,04 s, poi le ruote si fermano per inerzia (~1 880 tick/s²) | c2b |
 | IMU | deriva dell'imbardata −0,3°/h; beccheggio −0,55°, rollio +0,38° a riposo | c8scarica (5 h) |
@@ -365,22 +373,21 @@ robot e confrontato con esse automaticamente. Le prove di sicurezza sul robot si
 | batteria | curva di scarica; ~2,45 Ah utili fra 16,3 e 13,8 V | c8scarica |
 | byte non calcolati | presi da un frame vero a riposo (es. byte 88 = 6403) | d |
 
-**Validazione.** `./rtes.sh valida-sim c2 c2b c3 c1` rimanda al simulatore, con i tempi originali, i comandi registrati sul
-robot e confronta le uscite. Risultati al 5/10:
+**Validazione.** `./rtes.sh valida-sim c2 c2b c3 c1 val1` rimanda al simulatore, con i tempi originali, i comandi
+registrati sul robot e confronta le uscite. Risultati al 5/10 (val1 è a terra, registrata dal driver con `--registra`):
 
 | Prova | Risultato |
 |---|---|
-| encoder | 0,1% (c2) e 1% (c2b) |
+| encoder | 0,2% (c2) e 1% (c2b) da sollevato; **1% (val1) a terra** |
 | velocità misurata | 16 unità di scarto quadratico medio (828 = 5 cm/s) |
 | spazzola, ventola, correnti | identiche |
 | velocità del lidar | scarto 0,00 giri/s |
 
-La versione breve (c2) è dentro `make test`. Le registrazioni sono tutte a robot **sollevato**: la dinamica a terra è da
-verificare.
+La versione breve (c2) è dentro `make test`; val1 (circa 5 minuti) si lancia a mano.
 
 **Cosa resta stimato [?]** (elenco aggiornato in `docs/fase3.md`):
 - altezze di corpo (7,5 cm), torretta (9,5 cm) e piano del lidar (8,7 cm);
-- raggio della torretta e posizione del lidar (al centro);
+- raggio della torretta (la posizione del lidar invece è misurata: 11,2 cm dietro il centro);
 - posizione degli anti-caduta (±18° e ±50° a 15 cm);
 - forma e altezza della base;
 - codici dell'IR della base;
@@ -531,5 +538,5 @@ Cose da sapere:
 - **Comandi**: `drv_velocita(v, w)` (m/s, rad/s), `drv_spazzole(lat, cen)`, `drv_aspirazione(giri)` (serve
   `c.aspirazione = 1`), `drv_led(modo)`, `drv_lidar(acceso, giri_s)`, `drv_esci_dalla_base(1)`, `drv_suono(nome)`.
   Il driver applica sempre i limiti: guarda `drv_stato().limiti` per sapere perché un comando non passa.
-- **Unità dei sensori** (`gd32_sensori_t` in `gd32/gd32.h`): encoder in tick (3616 per giro, 60,4 µm per tick),
+- **Unità dei sensori** (`gd32_sensori_t` in `gd32/gd32.h`): encoder in tick (~4580 per metro, `GD32_SCALA_V`),
   imbardata in 0,01° (positiva in senso antiorario, deriva), velocità angolare in 0,01 °/s, tensione in decimi di volt.

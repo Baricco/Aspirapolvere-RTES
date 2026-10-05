@@ -74,24 +74,28 @@ fasi 1–3; [utente]; [?] stima da verificare.
 |---|---|---|
 | Diametro, altezza, peso | 349 mm (13,75"), 95 mm (3,75") con la torretta, 3,4 kg | [scheda] |
 | Batteria | Li-ion 4S, 14,8 V nominali, 3200 mAh; ~2,45 Ah utili fra 16,3 e 13,8 V | [scheda], [misura c8scarica] |
-| Ruote | raggio 34,75 mm, carreggiata 241,5 mm, 3616 tick per giro: **1 unità di `0x66` = 1 tick/s per ruota** | [firmware], [misura c2] |
+| Ruote | carreggiata 241,5 mm; **~4580 tick per metro** (everest dice raggio 34,75 mm e 3616 tick per giro, cioè 16 561 tick/m: SBAGLIATO di 3,6 volte); 1 unità di `0x66` = 1 tick/s per ruota; ω di `0x66`: 553 unità per rad/s | [firmware], [misura c2], [misura 5/10 con lidar e IMU] |
 | Contatti di carica | **dietro**, sul lato opposto al bumper: il robot entra in base all'indietro | [utente] |
 | Ricevitori IR della base | davanti | [misura, fase 2 D2] |
 | Anti-caduta | 4 sul davanti, da sinistra a destra = bit 0..3; portata 2–15 cm | [misura D3], [firmware hwdrivers.ini] |
 | Bumper | arco anteriore, sinistro e destro; everest segna l'ostacolo 2 cm oltre il contorno, settori di 15° | [misura], [firmware] |
 | Torretta del lidar | senza interruttori: sotto un mobile basso il robot si incastra senza bumper | [misura] |
-| Altezze di corpo, torretta, piano del lidar | 7,5 / 9,5 / 8,7 cm | [?] |
-| Posizione del lidar e degli anti-caduta | lidar al centro; anti-caduta a ±18° e ±50°, 15 cm dal centro | [?] |
+| Altezze di corpo, torretta, piano del lidar | 7,5 / 9,5 / 8,7 cm (altezza totale 94-95 mm dalle recensioni) | [scheda], [?] |
+| Lidar | centro **11,2 cm dietro** il centro del robot; angoli in senso **orario** (0° = dietro, 90° = sinistra); scarto dello 0 di 14,5°; scostamento ottico 2,5 cm | [misura 5/10], kaiaai/VacuumTiger |
+| Anti-caduta | a ±18° e ±50°, 15 cm dal centro | [?] |
 | Soglie superabili | fino a ~2 cm | [scheda] |
 
-Dinamica del GD32 misurata sulle registrazioni (robot sollevato: a terra [?]):
+Dinamica del GD32 misurata sulle registrazioni (fase 2 da sollevato; fase 3, val1, a terra):
 
 | Cosa | Valore | Registrazione |
 |---|---|---|
 | Periodo del frame dei sensori | 20,00056 ms | d |
 | Ritardo con cui i frame arrivano al SoC | quasi sempre ~0,34 ms; raramente fino a 3,3 ms (5 ms con il nostro driver e il lidar acceso) | d, fase 3 r7 |
 | Ritardo del comando di velocità | 29 ms | c2, c2b |
-| Rampe | v: ~16 600 tick/s² su e giù; ω: ~2 200 tick/s² (molto più lenta) | c2, c2b |
+| Rampe da sollevato | v: ~16 600 tick/s² su e giù; ω: ~2 200 tick/s² (molto più lenta) | c2, c2b |
+| Risposta a terra | del primo ordine, non a rampa: costante di tempo ~110 ms per v e ~73 ms per ω, qualunque gradino | val1 (fase 3) |
+| Velocità massima | 1772 tick/s (~0,39 m/s): comandi più alti vengono tagliati | fase 3, gradini a terra |
+| IMU contro lidar | l'imbardata dell'IMU segna il ~3 % in meno della rotazione vera | fase 3 (40,7° / 42°, 201,6° / 208°, 87,9° / 90°) |
 | Velocità misurata (byte 32/36) | dagli encoder in ~70 ms: passi di ~7 unità | c2 |
 | Senza heartbeat `0x06` | potenza tolta dopo **2,04 s**, poi le ruote si fermano da sole (~1 880 tick/s², ~0,5 s) | c2b |
 | Correnti delle ruote (a vuoto) | ~64 mA in moto, picchi fino a ~290, ~770 alla partenza | c2 |
@@ -123,6 +127,25 @@ valori, quindi sul robot valevano i predefiniti.
 
   Alcuni valori: 16,3 V → 91 % fermo (oltre il 100 % in movimento, limitato a 100); 15,0 V → 54 / 72 %; 14,2 V →
   27 / 39 %; 13,8 V → 16 / 22 %; 13,3 V → 6 / 11 %; 12,0 V → 1 / 2 %.
+- Con l'**aspirazione accesa** (estratte il 5/10, **non ancora nel driver**): sette curve
+  `calculate600PaStateCapacity` … `calculate2600PaStateCapacity` (0x669108–0x669f70), scelte in `batteryCapacity` in
+  base ai giri della ventola (soglie da estrarre). Stessi tre tratti; segni dei termini ricavati dalla continuità a 13,3 e
+  14,3 V (si raccordano entro l'1 %) [?: da confermare istruzione per istruzione]:
+
+  | Stato | V ≥ 14,3 | 13,3 ≤ V < 14,3 | V < 13,3 |
+  |---|---|---|---|
+  | 600 Pa | 0,2956 V − 3,7757 | 0,1436 V² − 3,6098 V + 22,711 | 0,1 V² − 2,4568 V + 15,09 |
+  | 800 Pa | 0,2964 V − 3,7618 | 0,1327 V² − 3,2947 V + 20,455 | 0,0938 V² − 2,3008 V + 14,107 |
+  | 1000 Pa | 0,2979 V − 3,749 | −0,0749 V² + 2,4066 V − 18,576 | 0,1281 V² − 3,0971 V + 18,716 |
+  | 1200 Pa | 0,2748 V − 3,4517 | −0,0307 V² + 1,1779 V − 10,069 | 0,1167 V² − 2,8292 V + 17,156 |
+  | 1500 Pa | 0,2544 V − 3,0593 (1,05 da 15,6 V) | −0,0909 V² + 2,8659 V − 21,825 | 0,1228 V² − 2,9405 V + 17,602 |
+  | 2000 Pa | 0,2512 V − 3,0092 (1,05 da 15,6 V) | −0,2143 V² + 6,2383 V − 44,819 | 0,103 V² − 2,4044 V + 14,006 |
+  | 2600 Pa | 0,2673 V − 3,2609 (1,05 da 15,6 V) | −0,0957 V² + 3,0044 V − 22,825 | 0,1469 V² − 3,5625 V + 21,608 |
+
+  Nei tre stati più forti cambiano anche il filtro (2·10⁻⁵ invece di 2·10⁻⁴ per frame) e il calo a tempo (1 % ogni
+  2751 frame, ~55 s, nello stato da 1500 Pa). L'originale comanda la ventola con `0x68` (`setBlowerSpeed` →
+  `packetBlowerSpeed`; `hwdrivers.ini`: `enable_blower_speed=1`) ai livelli di `controller.ini` (profilo Proscenic):
+  eco 12 800, normale 15 500, massimo 19 500 giri/min.
 - Lontano dalla base la stima **non sale mai**:
   - se la curva dice più dell'1 % in meno, la stima scende verso la curva del 0,02 % dello scarto a ogni frame
     (costante di tempo 100 s);

@@ -17,22 +17,29 @@
 
 #include <math.h>
 
+#include "../gd32/gd32.h"
+#include "../driver/lidar_giro.h"
+
 /* forma */
 #define ROBOT_RAGGIO          0.1745     /* [scheda] diametro 349 mm */
 #define ROBOT_ALTEZZA         0.095      /* [scheda] con la torretta del lidar */
 #define ROBOT_ALTEZZA_CORPO   0.075      /* [?] sopra c'è solo la torretta del lidar, che NON ha interruttori [misura] */
 #define TORRETTA_RAGGIO       0.050      /* [?] raggio della torretta del lidar */
 #define LIDAR_ALTEZZA         0.087      /* [?] altezza del piano di misura del lidar */
-#define LIDAR_X               0.0        /* [?] posizione del lidar nel robot */
-#define LIDAR_Y               0.0
+#define LIDAR_X               LIDAR_X_M  /* [misura] centro del lidar: 11,2 cm dietro il centro (driver/lidar_giro.h) */
+#define LIDAR_Y               LIDAR_Y_M
+#define LIDAR_OTTICO          LIDAR_OTTICO_M   /* [kaiaai + misura] scostamento ottico del triangolatore */
 
 /* ruote e odometria */
-#define RUOTA_RAGGIO          0.03475    /* [firmware] */
-#define CARREGGIATA           0.2415     /* [firmware] distanza fra le ruote */
-#define TICK_GIRO             3616       /* [firmware] + [misura] */
-#define SCALA_V               16561.27   /* [firmware] 0x66: tick/s per m/s */
-#define SCALA_W               1999.77    /* [firmware] 0x66: tick/s per rad/s */
-#define V_MAX                 0.5        /* [firmware] limiti di everest */
+/* RUOTA_RAGGIO e TICK_GIRO sono i valori di everest (CRobotParams), che NON tornano con la misura del 5/10: i tick per
+ * metro veri sono ~4580 (gd32/gd32.h). Il simulatore usa solo le scale misurate. */
+#define RUOTA_RAGGIO          0.03475    /* [firmware] (non usato) */
+#define TICK_GIRO             3616       /* [firmware] (non usato) */
+#define CARREGGIATA           GD32_CARREGGIATA   /* [firmware] distanza fra le ruote */
+#define SCALA_V               GD32_SCALA_V       /* [misura] 0x66: tick/s per m/s (~4580) */
+#define SCALA_W               GD32_SCALA_W       /* [misura] 0x66: unità di ω per rad/s */
+#define V_MAX                 (1772 / SCALA_V)   /* [misura 5/10] il GD32 non va oltre 1772 tick/s (~0,39 m/s), anche
+                                                  se gli si chiede di più (prove a terra con 3312 e 4968) */
 #define W_MAX                 (2 * M_PI)
 
 /* bumper: arco anteriore, due contatti (sinistro, destro) [misura]; everest segna l'ostacolo 2 cm oltre il contorno

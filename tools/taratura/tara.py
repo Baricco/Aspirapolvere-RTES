@@ -97,12 +97,48 @@ def tara_ruote():
          f"omega su {wa:.0f} giù {wd:.0f} ({ {k: len(v) for k, v in rampe.items()} }); picco di corrente "
          f"{st.median(picchi):.0f} mA, a regime mediana {st.median(base):.0f} mA (90% {sorted(base)[int(.9 * len(base))]:.0f})")
     scrivi("ruote_ritardo_ms", f"{max(st.median(ritardi), 5):.0f}", "c2/c2b: dal gradino al 10% della risposta, meno un frame")
-    scrivi("ruote_rampa_v", f"{va:.0f} {vd:.0f}", "c2/c2b: tick/s² per ruota, accelerando e rallentando (SOLLEVATO: a terra [?])")
+    scrivi("ruote_rampa_v", f"{va:.0f} {vd:.0f}", "c2/c2b: tick/s² per ruota, accelerando e rallentando, robot SOLLEVATO (a terra: ruote_tau_terra_s)")
     scrivi("ruote_rampa_w", f"{wa:.0f} {wd:.0f}", "c2/c2b: idem per la rotazione (il GD32 frena piano in rotazione)")
     scrivi("ruote_finestra_misura_ms", "70", "v e omega dei byte 32/36: passi di ~7 unità = 0,5 tick / 70 ms (c2)")
     scrivi("ruote_corrente_base_ma", f"{st.median(base):.0f}", "mediana in movimento, robot sollevato (c2)")
     scrivi("ruote_corrente_picchi_ma", f"{sorted(base)[int(.9 * len(base))]:.0f}", "90° percentile: picchi sparsi (c2)")
     scrivi("ruote_corrente_avvio_ma", f"{st.median(picchi):.0f}", "picco alla partenza (c2/c2b)")
+
+
+def tara_ruote_terra():
+    """val1 (fase 3, robot A TERRA, registrata dal driver): il GD32 risponde ai gradini di v e omega come un sistema
+    del primo ordine (stesso tempo dal 10 al 90% per gradini piccoli e grandi), non con una rampa: tau = t(10-90) / ln 9.
+    Le rampe di c2/c2b (sollevato) restano per il robot sollevato."""
+    f = os.path.join(os.path.dirname(DIR), "fase3/val1/val1.reg")
+    if not os.path.exists(f):
+        info("ruote a terra: manca build/robot/fase3/val1/val1.reg, restano i valori di default")
+        return
+    r = leggi_registro(f)["gd32"]
+    tx = [(t, i32(d, 0), i32(d, 4)) for t, c, d in frame_gd32(r, DAL_SOC) if c == 0x66]
+    rx = [(t, i32(d, 16), i32(d, 24)) for t, c, d in frame_gd32(r, VERSO_SOC) if c == 0x15]
+    tau = {"v": [], "w": []}
+    for i in range(1, len(tx)):
+        if tx[i][1:] == tx[i - 1][1:]:
+            continue
+        tg = tx[i][0]
+        fin = [x for x in rx if tg - 60e6 <= x[0] <= tg + 600e6]
+        serie = []
+        for a, b in zip(fin, fin[1:]):
+            dt = (b[0] - a[0]) / 1e9
+            sx, dx = (b[1] - a[1]) / dt, (b[2] - a[2]) / dt
+            serie.append(((b[0] - tg) / 1e6, (sx + dx) / 2, (dx - sx) / 2))
+        for k, n in ((1, "v"), (2, "w")):
+            prima = [x[k] for x in serie if x[0] < 0]
+            dopo = [x[k] for x in serie if x[0] > 400]
+            if not prima or not dopo or abs(st.mean(dopo) - st.mean(prima)) < 200:
+                continue
+            p0, salto = st.mean(prima), st.mean(dopo) - st.mean(prima)
+            t10 = next(x[0] for x in serie if x[0] > 0 and (x[k] - p0) / salto >= 0.1)
+            t90 = next(x[0] for x in serie if x[0] > 0 and (x[k] - p0) / salto >= 0.9)
+            tau[n].append((t90 - t10) / 1000 / math.log(9))
+    tv, tw = st.median(tau["v"]), st.median(tau["w"])
+    info(f"ruote a terra: tau v {tv * 1000:.0f} ms ({len(tau['v'])} gradini), tau omega {tw * 1000:.0f} ms ({len(tau['w'])})")
+    scrivi("ruote_tau_terra_s", f"{tv:.3f} {tw:.3f}", "val1 (fase 3, a terra): risposta del primo ordine di v e omega")
 
 
 def tara_inerzia():
@@ -307,6 +343,7 @@ def main():
     print("# Formato: chiave = valore    # fonte. Il simulatore li legge all'avvio (sim/parametri.c).")
     tara_arrivi()
     tara_ruote()
+    tara_ruote_terra()
     tara_inerzia()
     tara_riposo()
     tara_lidar()

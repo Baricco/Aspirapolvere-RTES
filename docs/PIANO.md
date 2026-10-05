@@ -76,7 +76,7 @@ lidar → /dev/ttyS1 → AuxCtrl
 2. **Caratterizzazione completa dell'hardware** — FATTA (2026-10-03). Disassemblato di everest-server (tutti i
    comandi, ogni byte del frame dei sensori), banco di prova con blocco di sicurezza (`spia guida`,
    `gd32/sicurezza.h`), prove su lidar, ruote, spazzole, aspirazione, carica, LED, audio, IMU, anti-caduta, IR della
-   base. Aperti: carica ferma a 16,3 V (batteria degradata?), curva di scarica, scarto di ~8° del lidar.
+   base. Aperti: carica ferma a 16,3 V (batteria degradata?), curva di scarica, scarto di ~8° del lidar (risolto il 5/10: 14,5°, angoli orari, vedi fase3.md).
    `docs/fase2.md`, `docs/RIEPILOGO.md`.
 3. **Driver, framework RT e simulatore** — QUASI FATTA (notte del 4-5/10, `docs/fase3.md`). Driver (`driver/`: avvio,
    keepalive, heartbeat, sensori, lidar regolato, batteria, limiti di sicurezza "a terra", watchdog dei task, stato di

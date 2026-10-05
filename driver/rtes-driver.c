@@ -25,11 +25,13 @@
  *   --aspirazione            permette l'aspirazione (di default è vietata)
  *   --banco [--cliff-atteso X]   banco di prova: motori solo con il robot sollevato (gd32/sicurezza.h)
  *   --lidar-giri G           velocità del lidar (default 6)
- *   --scarto-lidar CDEG      scarto dello 0 del lidar in centesimi di grado (default 800)
+ *   --scarto-lidar CDEG      scarto dello 0 del lidar in centesimi di grado (default 1450, driver/lidar_giro.h)
  *   --task-prova             avvia un task sporadico (svegliato dai sensori, CPU 1, priorità 90) e uno periodico
  *                            da 200 ms (CPU 2) che leggono i dati del driver; entrambi sorvegliati, critici
  *   --durata S               esce dopo S secondi
  *   --csv FILE               una riga al secondo con lo stato (per le prove lunghe)
+ *   --registra FILE          registra i byte grezzi di GD32 e lidar nel formato della spia (per tools/taratura e
+ *                            tools/valida-sim.py; si legge con tools/estrai-frame.py)
  *   --silenzioso             niente riga di stato al secondo
  *   --ogni MS                una riga di stato ogni MS millisecondi (default 1000)
  *   --senza-rt               se mancano i permessi per SCHED_FIFO parte lo stesso (PC)
@@ -172,7 +174,8 @@ static void limiti_testo(int l, char *out, size_t dim)
 		{ SIC_LIM_SOLLEVATO, "sollevato" }, { SIC_LIM_BASE, "base" }, { SIC_LIM_SENSORI, "sensori-spenti" },
 		{ SIC_LIM_BUMPER, "bumper" }, { SIC_LIM_CLIFF, "vuoto" }, { DRV_LIM_DISABILITATI, "motori-vietati" },
 		{ DRV_LIM_NON_PRONTO, "avvio" }, { DRV_LIM_GUASTO, "guasto" }, { DRV_LIM_SENSORI_VECCHI, "sensori-vecchi" },
-		{ DRV_LIM_BATTERIA, "batteria" }, { DRV_LIM_BANCO, "banco" },
+		{ DRV_LIM_BATTERIA, "batteria" }, { DRV_LIM_BANCO, "banco" }, { DRV_LIM_CASSETTO, "senza-cassetto" },
+		{ DRV_LIM_VIETATA, "vietata" },
 	};
 	out[0] = 0;
 	for (size_t i = 0; i < sizeof nomi / sizeof nomi[0]; i++)
@@ -186,14 +189,21 @@ static void limiti_testo(int l, char *out, size_t dim)
 
 static void riga_stato(double t, const drv_stato_t *st, const drv_sensori_t *s, int task)
 {
-	char lim[160];
+	char lim[160], asp[180] = "";
 	limiti_testo(st->limiti, lim, sizeof lim);
-	printf("%7.1f %-6s %5.2f V %3d%%%s%s | bump %d%d vuoto %x | sens %2.0f Hz | v %+.2f w %+.2f lim %s | spazz %d/%d led %d |"
+	if (st->aspirazione_limiti) {
+		snprintf(asp, sizeof asp, " (ferma: ");
+		limiti_testo(st->aspirazione_limiti, asp + strlen(asp), sizeof asp - strlen(asp) - 1);
+		strcat(asp, ")");
+	}
+	printf("%7.1f %-6s %5.2f V %3d%%%s%s | bump %d%d vuoto %x | sens %2.0f Hz | v %+.2f w %+.2f lim %s"
+	       " (misurate v %+.3f w %+.3f, imbardata %+.1f°) | cassetto %d ir %x/%x ventola %d%s | spazz %d/%d led %d |"
 	       " lidar %s %.2f g/s p%d giri %u | tick+%.0f lav %.0f us",
 	       t, nome_fase(st->fase), st->volt, st->percentuale, st->in_carica ? " carica" : "",
 	       st->sulla_base ? " BASE" : "", s->s.bumper_sx, s->s.bumper_dx,
 	       s->s.cliff[0] | s->s.cliff[1] << 1 | s->s.cliff[2] << 2 | s->s.cliff[3] << 3, st->sensori_hz, st->v, st->w,
-	       lim, st->spazzola_laterale, st->spazzola_centrale, st->led, st->lidar_acceso ? (st->lidar_ok ? "ok" : "MUTO") : "off",
+	       lim, s->s.vel_sx / GD32_SCALA_V, s->s.vel_dx / GD32_SCALA_W, s->s.angolo[0] / 100.0,
+	       s->s.cassetto, s->s.ir_base_a, s->s.ir_base_b, s->s.byte69_x100, asp, st->spazzola_laterale, st->spazzola_centrale, st->led, st->lidar_acceso ? (st->lidar_ok ? "ok" : "MUTO") : "off",
 	       st->lidar_giri_s, st->lidar_potenza, st->lidar_giri, st->tick_ritardo_max_ns / 1e3, st->lavoro_max_ns / 1e3);
 	if (task)
 		printf(" | task: sens %llu job lat %.0f esec %.0f us, persi %llu; lidar %llu job, giro %u da %u punti",
@@ -221,7 +231,8 @@ int main(int argc, char **argv)
 		{ "task-prova", no_argument, 0, 'T' }, { "durata", required_argument, 0, 't' },
 		{ "comandi", required_argument, 0, 'C' }, { "csv", required_argument, 0, 'v' },
 		{ "silenzioso", no_argument, 0, 'q' }, { "senza-rt", no_argument, 0, 'R' },
-		{ "forza", no_argument, 0, 'F' }, { "ogni", required_argument, 0, 'o' }, { 0, 0, 0, 0 },
+		{ "forza", no_argument, 0, 'F' }, { "ogni", required_argument, 0, 'o' },
+		{ "registra", required_argument, 0, 'r' }, { 0, 0, 0, 0 },
 	};
 	int o;
 	while ((o = getopt_long(argc, argv, "", opz, NULL)) != -1) {
@@ -243,6 +254,7 @@ int main(int argc, char **argv)
 		case 'q': silenzioso = 1; break;
 		case 'R': c.senza_rt = 1; break;
 		case 'F': c.forza = 1; break;
+		case 'r': c.registra = optarg; break;
 		case 'o': ogni_ms = atoi(optarg) > 0 ? atoi(optarg) : 1000; break;
 		default:
 			fprintf(stderr, "opzioni: vedi l'inizio di driver/rtes-driver.c\n");

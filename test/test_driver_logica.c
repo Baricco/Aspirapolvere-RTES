@@ -360,7 +360,8 @@ static void a_terra(void)
 	v = -800, w = 0;
 	CONTROLLA(sic_terra_limita(&s, 0, &v, &w) == SIC_LIM_BASE && v == 0 && w == 0);
 	v = -5000, w = 3000;
-	CONTROLLA(sic_terra_limita(&s, 1, &v, &w) == SIC_LIM_BASE && v == -1656 && w == 1000); /* uscita piano */
+	CONTROLLA(sic_terra_limita(&s, 1, &v, &w) == SIC_LIM_BASE && v == (int32_t)(-0.1 * GD32_SCALA_V) &&
+	          w == (int32_t)(0.5 * GD32_SCALA_W));                                    /* uscita piano: 0,1 m/s, 0,5 rad/s */
 
 	s = sensori();
 	s.controllo = 0x42;                                                                  /* spenti fuori dalla base */

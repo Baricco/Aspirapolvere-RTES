@@ -23,7 +23,7 @@
  *   --web DIR            cartella della pagina (default sim/web)
  *   --parametri FILE     parametri tarati (default sim/parametri.txt; senza file valgono i default)
  *   --batteria-veloce K  la batteria si scarica e si carica K volte più in fretta (default 1)
- *   --scarto-lidar G     scarto in gradi fra lo 0 del lidar e il robot (default 8, come il robot vero) [?]
+ *   --scarto-lidar G     scarto in gradi fra lo 0 del lidar e il robot (default 14,5, come il robot vero)
  *   --timeout-keepalive S  secondi senza keepalive 0x0d prima del reset del GD32 (default 190)
  *   --senza-ritardi      consegna i frame senza il ritardo misurato
  *   --durata S           esce dopo S secondi (per i test)
@@ -594,7 +594,7 @@ int main(int argc, char **argv)
 {
 	int porta = 8080, durata = 0, stampa = 0, senza_ritardi = 0;
 	const char *ascolta = "127.0.0.1", *dir = "build/sim", *file_par = "sim/parametri.txt";
-	double batteria = 1, scarto = 8, timeout_ka = 190;
+	double batteria = 1, scarto = LIDAR_SCARTO_CDEG / 100.0, timeout_ka = 190;
 	uint32_t seme = 12345;
 	static const struct option opz[] = {
 		{ "porta", required_argument, 0, 'p' }, { "ascolta", required_argument, 0, 'a' },

@@ -144,16 +144,18 @@ static void gd32_dinamica(void)
 	double t = 0;
 	velocita(&g, 0.1, 0, t);
 	avanza(&g, &m, &t, 2.0, 1);
-	/* 2 s a 0,1 m/s meno il ritardo (29 ms) e mezza rampa (1656 tick/s a ~16600 tick/s²: 0,05 s) */
-	double atteso = 1.0 + 0.1 * (2.0 - par.ruote_ritardo_ms / 1000 - 0.5 * 1656 / par.rampa_v_su);
+	/* 2 s a 0,1 m/s: a terra la risposta è del primo ordine (costante di tempo tau) dopo il ritardo (29 ms), quindi
+	   si perdono ritardo + tau x (1 - e^(-T/tau)) secondi di strada */
+	double tr = 2.0 - par.ruote_ritardo_ms / 1000, tau = par.tau_v_terra;
+	double atteso = 1.0 + 0.1 * (tr - tau * (1 - exp(-tr / tau)));
 	printf("  dopo 2 s: x = %.4f (atteso %.4f)\n", g.x, atteso);
 	CONTROLLA(fabs(g.x - atteso) < 0.004 && fabs(g.y - 1.5) < 1e-6);
 	uint8_t d[96];
 	gd32sim_dati_sensori(&g, t, d);
 	int32_t enc = (int32_t)(d[16] | d[17] << 8 | d[18] << 16 | (uint32_t)d[19] << 24);
-	CONTROLLA(abs(enc - 27000 - (int)lround((g.x - 1.0) * SCALA_V)) < 3);       /* 1 tick = 1/16561 m */
+	CONTROLLA(abs(enc - 27000 - (int)lround((g.x - 1.0) * SCALA_V)) < 3);       /* 1 tick = 1/4580 m */
 	int32_t vm = (int32_t)(d[32] | d[33] << 8 | d[34] << 16 | (uint32_t)d[35] << 24);
-	CONTROLLA(abs(vm - 1656) <= 8);                                                /* velocità misurata in 70 ms */
+	CONTROLLA(abs(vm - (int)lround(0.1 * SCALA_V)) <= 8);                          /* velocità misurata in 70 ms */
 	CONTROLLA(d[0] == 1 && d[64] == 0x62 && (d[4] & 4) && d[88] == 0x03 && d[89] == 0x19);  /* valori veri a riposo */
 
 	/* rotazione di 90°: omega ha la rampa lenta, ma salita e discesa si compensano */
@@ -170,7 +172,7 @@ static void gd32_dinamica(void)
 	CONTROLLA(fabs((int16_t)(d[42] | d[43] << 8) / 100.0 - 90) < 2.5);          /* imbardata dell'IMU */
 
 	/* senza heartbeat: dopo ~2 s motori senza potenza, le ruote si fermano per inerzia in ~0,5 s */
-	velocita(&g, 0.1, 0, t);
+	velocita(&g, 1656 / SCALA_V, 0, t);                         /* 1656 tick/s (~0,36 m/s) */
 	avanza(&g, &m, &t, t + 1.0, 1);
 	CONTROLLA(g.motori_alimentati && g.vel_sx > 1000);
 	double t_hb = t;
@@ -207,7 +209,8 @@ static void gd32_urti_e_base(void)
 		incastrato |= g.incastrato;
 	}
 	printf("  sotto la credenza: y = %.3f, incastrato %d, bumper %d\n", g.y, incastrato, bumper);
-	CONTROLLA(incastrato && !bumper && g.y > 0.7 && g.y < 1.0);
+	/* la torretta è DIETRO il centro (LIDAR_X < 0): il corpo entra sotto la credenza finché la torretta tocca il bordo */
+	CONTROLLA(incastrato && !bumper && fabs(g.y - (0.7 + TORRETTA_RAGGIO + LIDAR_X)) < 0.02);
 	/* vuoto: anti-caduta, il GD32 non va avanti */
 	nuovo_robot(1.8, 0.85, 0, 0);
 	uint8_t zero = 0;
@@ -300,7 +303,7 @@ static void cb_lidar(const lidar_pacchetto_t *p, void *ctx)
 	int n = (p->n_param - 5) / 3;
 	for (int i = 0; i < n; i++) {
 		int q = p->param[6 + 3 * i] << 8 | p->param[7 + 3 * i];
-		double ang = (inizio + i * 2250.0 / n) / 100.0 - 8.0;
+		double ang = (inizio + i * 2250.0 / n) / 100.0 - 14.5;
 		punti++;
 		if (q && fabs(ang - 180.0) < 0.6) {
 			double dd = q / 4000.0;
@@ -316,7 +319,7 @@ static void lidar_simulato(void)
 	mondo_nuovo(&m, 3, 3);
 	static lidarsim_t l;
 	memset(&l, 0, sizeof l);
-	l.scarto_gradi = 8;
+	l.scarto_gradi = 14.5;
 	lidarsim_init(&l, 0);
 	lidar_deframer_t d;
 	lidar_deframer_init(&d);

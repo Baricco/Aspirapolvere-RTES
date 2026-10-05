@@ -21,10 +21,11 @@
 #include <unistd.h>
 
 #include "../gd32/sicurezza.h"
+#include "../spia/registro.h"
 #include "scambio.h"
 
-#define SCALA_V 16561.27              /* 0x66: tick/s per m/s */
-#define SCALA_W 1999.77               /* 0x66: tick/s per rad/s */
+#define SCALA_V GD32_SCALA_V          /* 0x66: unità di v per m/s (gd32/gd32.h, misura del 5/10) */
+#define SCALA_W GD32_SCALA_W          /* 0x66: unità di ω per rad/s */
 #define TICK_NS           RT_MS(20)
 #define HEARTBEAT_NS      RT_MS(200)
 #define KEEPALIVE_NS      RT_S(3)
@@ -109,6 +110,7 @@ static struct {
 	int32_t v_inv, w_inv;
 	int limiti;
 	int lat_inv, cen_inv, asp_inv, led_inv, lidar_inv, pot_inv, sensori_inv;
+	int asp_limiti;              /* perché l'aspirazione chiesta non va (drv_stato_t.aspirazione_limiti) */
 	int64_t t_rinfresca, t_potenza;
 	int sulla_base_prec;
 	int64_t t_cambio_base;
@@ -138,6 +140,116 @@ static void evento(const char *fmt, ...)
 	atomic_store(&ev_testa, t + 1);
 }
 
+/* ------------------------------------------------------------------------------------------ registrazione --- */
+
+/* Registrazione dei byte grezzi (drv_config_t.registra), nel formato della spia, così le prove fatte con il driver
+ * servono anche a tools/taratura e a tools/valida-sim.py. I thread del driver non scrivono MAI sul file: mettono i
+ * record in un anello in RAM (sempre con d.mx preso, oppure dopo che i due thread sono finiti: un solo produttore
+ * alla volta) e il thread di servizio, non real-time, li scrive. Se l'anello è pieno il record si perde e si conta. */
+#define ANELLO (1u << 20)                /* 1 MB: ~75 s di traffico (GD32 + lidar ~14 KB/s) */
+#define CANALE_GD32 0
+#define CANALE_LIDAR 1
+static struct {
+	FILE *f;
+	uint8_t *buf;
+	_Atomic uint32_t testa, coda;        /* byte messi / tolti, modulo 2^32 */
+	_Atomic uint64_t persi;
+} rg;
+
+static void anello_copia_in(uint32_t pos, const void *src, size_t n)
+{
+	const uint8_t *s = src;
+	for (size_t i = 0; i < n; i++)
+		rg.buf[(pos + i) & (ANELLO - 1)] = s[i];
+}
+
+static void anello_copia_da(uint32_t pos, void *dst, size_t n)
+{
+	uint8_t *o = dst;
+	for (size_t i = 0; i < n; i++)
+		o[i] = rg.buf[(pos + i) & (ANELLO - 1)];
+}
+
+static void registra(uint8_t canale, uint8_t direzione, const void *dati, size_t n, int64_t t)
+{
+	if (!rg.f || n == 0 || n > 4096)
+		return;
+	uint32_t testa = atomic_load_explicit(&rg.testa, memory_order_relaxed);
+	uint32_t usato = testa - atomic_load_explicit(&rg.coda, memory_order_acquire);
+	if (12 + n > ANELLO - usato) {
+		atomic_fetch_add(&rg.persi, 1);
+		return;
+	}
+	uint8_t h[12];
+	uint16_t nn = (uint16_t)n;
+	memcpy(h, &t, 8);
+	h[8] = canale;
+	h[9] = direzione;
+	memcpy(h + 10, &nn, 2);
+	anello_copia_in(testa, h, 12);
+	anello_copia_in(testa + 12, dati, n);
+	atomic_store_explicit(&rg.testa, testa + 12 + (uint32_t)n, memory_order_release);
+}
+
+/* Dal thread di servizio: scrive sul file tutti i record nell'anello. */
+static void registra_svuota(void)
+{
+	static uint8_t dati[4096];
+	if (!rg.f)
+		return;
+	uint32_t coda = atomic_load_explicit(&rg.coda, memory_order_relaxed);
+	uint32_t testa = atomic_load_explicit(&rg.testa, memory_order_acquire);
+	while (coda != testa) {
+		uint8_t h[12];
+		int64_t t;
+		uint16_t n;
+		anello_copia_da(coda, h, 12);
+		memcpy(&t, h, 8);
+		memcpy(&n, h + 10, 2);
+		anello_copia_da(coda + 12, dati, n);
+		reg_scrivi_record(rg.f, t, h[8], h[9], dati, n);
+		coda += 12 + n;
+		atomic_store_explicit(&rg.coda, coda, memory_order_release);
+	}
+}
+
+static int registra_apri(const drv_config_t *c)
+{
+	memset(&rg, 0, sizeof rg);
+	if (!c->registra)
+		return 0;
+	if (!(rg.buf = calloc(1, ANELLO)) || !(rg.f = fopen(c->registra, "wb"))) {
+		free(rg.buf);
+		rg.buf = NULL;
+		return -1;
+	}
+	reg_intestazione_t h;
+	memset(&h, 0, sizeof h);
+	h.n_canali = c->dev_lidar ? 2 : 1;
+	h.canali[0].id = CANALE_GD32;
+	h.canali[0].protocollo = REG_PROTO_GD32;
+	snprintf(h.canali[0].nome, sizeof h.canali[0].nome, "gd32");
+	snprintf(h.canali[0].dispositivo, sizeof h.canali[0].dispositivo, "%s", c->dev_gd32);
+	if (c->dev_lidar) {
+		h.canali[1].id = CANALE_LIDAR;
+		h.canali[1].protocollo = REG_PROTO_LIDAR;
+		snprintf(h.canali[1].nome, sizeof h.canali[1].nome, "lidar");
+		snprintf(h.canali[1].dispositivo, sizeof h.canali[1].dispositivo, "%s", c->dev_lidar);
+	}
+	return reg_scrivi_intestazione(rg.f, &h);
+}
+
+static void registra_chiudi(void)
+{
+	if (!rg.f)
+		return;
+	registra_svuota();
+	fclose(rg.f);
+	rg.f = NULL;
+	free(rg.buf);
+	rg.buf = NULL;
+}
+
 /* -------------------------------------------------------------------------------------------- seriale --- */
 
 static void invia(uint8_t cmd_gd32, const void *dati, size_t n)
@@ -146,6 +258,7 @@ static void invia(uint8_t cmd_gd32, const void *dati, size_t n)
 	size_t k = gd32_componi(cmd_gd32, dati, n, fr, sizeof fr);
 	if (k && write(d.fd_gd32, fr, k) != (ssize_t)k)
 		d.errori_scrittura++;
+	registra(CANALE_GD32, REG_DAL_SOC, fr, k, adesso());
 }
 
 static void invia1(uint8_t c, uint8_t v) { invia(c, &v, 1); }
@@ -174,6 +287,7 @@ static void arresto(void)
 	size_t k = sic_frame_arresto(buf, sizeof buf);
 	if (k && write(d.fd_gd32, buf, k) != (ssize_t)k)
 		d.errori_scrittura++;
+	registra(CANALE_GD32, REG_DAL_SOC, buf, k, adesso());
 	d.v_inv = d.w_inv = 0;
 	d.lat_inv = d.cen_inv = d.asp_inv = 0;
 }
@@ -295,6 +409,7 @@ static void pubblica_stato(int64_t t)
 	s.spazzola_laterale = d.lat_inv;
 	s.spazzola_centrale = d.cen_inv;
 	s.aspirazione_giri = d.asp_inv;
+	s.aspirazione_limiti = d.asp_limiti;
 	s.led = d.led_inv;
 	s.lidar_acceso = d.lidar_inv > 0;
 	s.lidar_potenza = d.lidar_inv > 0 ? d.pot_inv : 0;
@@ -364,20 +479,21 @@ static int limita_velocita(int64_t t, int32_t *v, int32_t *w)
 	return sic_terra_limita(&d.s, atomic_load(&cmd.uscita_base), v, w);
 }
 
-/* Spazzole e aspirazione: niente se il robot è sollevato o sulla base (a terra), o se il banco non lo permette. */
-static int attuatori_permessi(int64_t t, uint8_t cmd_gd32, int valore)
+/* Spazzole e aspirazione: niente se il robot è sollevato o sulla base (a terra), o se il banco non lo permette.
+ * Ritorna 0 se il comando si può mandare, altrimenti il motivo (SIC_LIM_* | DRV_LIM_*). */
+static int attuatori_limiti(int64_t t, uint8_t cmd_gd32, int valore)
 {
 	if (valore == 0)
-		return 1;
-	if (limiti_generali(t))
 		return 0;
+	int lim = limiti_generali(t);
+	if (lim)
+		return lim;
 	if (d.cfg.banco) {
 		uint8_t b = (uint8_t)valore;
-		return sic_permesso(&d.sic, cmd_gd32, &b, 1, t) == SIC_PERMESSO;
+		return sic_permesso(&d.sic, cmd_gd32, &b, 1, t) == SIC_PERMESSO ? 0 : DRV_LIM_BANCO;
 	}
 	int32_t v = 1, w = 0;
-	int lim = sic_terra_limita(&d.s, 0, &v, &w);
-	return !(lim & (SIC_LIM_SOLLEVATO | SIC_LIM_BASE | SIC_LIM_SENSORI));
+	return sic_terra_limita(&d.s, 0, &v, &w) & (SIC_LIM_SOLLEVATO | SIC_LIM_BASE | SIC_LIM_SENSORI);
 }
 
 static int clamp(int v, int lo, int hi) { return v < lo ? lo : v > hi ? hi : v; }
@@ -401,10 +517,17 @@ static void aggiorna_attuatori(int64_t t)
 
 	int lat = clamp(atomic_load(&cmd.spazzola_lat), -100, 100);
 	int cen = clamp(atomic_load(&cmd.spazzola_cen), -100, 100);
-	int asp = d.cfg.aspirazione ? clamp(atomic_load(&cmd.aspirazione), 0, 30000) : 0;
-	if (!attuatori_permessi(t, GD32_SPAZZOLA_LATERALE, lat)) lat = 0;
-	if (!attuatori_permessi(t, GD32_SPAZZOLA_CENTRALE, cen)) cen = 0;
-	if (!attuatori_permessi(t, GD32_ASPIRAZIONE, asp ? 1 : 0)) asp = 0;
+	int asp = clamp(atomic_load(&cmd.aspirazione), 0, 30000);
+	if (attuatori_limiti(t, GD32_SPAZZOLA_LATERALE, lat)) lat = 0;
+	if (attuatori_limiti(t, GD32_SPAZZOLA_CENTRALE, cen)) cen = 0;
+	/* Aspirazione: anche niente cassetto della polvere (byte 4 bit 2). Il GD32 non la ferma da solo (provato il 5/10:
+	   cassetto sfilato per 10 s con la ventola a 8000 giri/min, la ventola ha continuato); l'originale non la accende
+	   (eccezione 6, EXCEPTION_DUSTBOX_INEXISTENCE). */
+	int asp_lim = !asp ? 0 : !d.cfg.aspirazione ? DRV_LIM_VIETATA : attuatori_limiti(t, GD32_ASPIRAZIONE, 1);
+	if (asp && !asp_lim && !d.s.cassetto)
+		asp_lim = DRV_LIM_CASSETTO;
+	d.asp_limiti = asp_lim;
+	if (asp_lim) asp = 0;
 	if (lat != d.lat_inv || rinfresca) {
 		invia1(GD32_SPAZZOLA_LATERALE, (uint8_t)(int8_t)lat);
 		d.lat_inv = lat;
@@ -648,6 +771,7 @@ static int leggi(int fd, int gd32, int64_t t)
 	uint8_t buf[1024];
 	ssize_t k;
 	while ((k = read(fd, buf, sizeof buf)) > 0) {
+		registra(gd32 ? CANALE_GD32 : CANALE_LIDAR, REG_VERSO_SOC, buf, (size_t)k, t);
 		if (gd32)
 			gd32_deframer_scrivi(&d.dg, buf, (size_t)k, frame_gd32, &t);
 		else
@@ -812,6 +936,7 @@ static void *ciclo_servizio(void *arg)
 			if (posix_spawn(&pid, "/bin/sh", NULL, NULL, argv, environ) == 0)
 				waitpid(pid, NULL, 0);
 		}
+		registra_svuota();
 		if (fine)
 			break;
 		usleep(20000);
@@ -859,7 +984,7 @@ void drv_config_default(drv_config_t *c)
 	c->aspirazione = 0;
 	c->cliff_atteso = -1;
 	c->lidar_giri_s = 6.0;
-	c->scarto_lidar_cdeg = 800;
+	c->scarto_lidar_cdeg = LIDAR_SCARTO_CDEG;
 	c->cmd_suono = access("/bin/tinyplayer", X_OK) == 0 ? "tinyplayer /usr/share/audio/english/%s.mp3 >/dev/null 2>&1"
 	                                                     : NULL;
 }
@@ -901,15 +1026,22 @@ int drv_avvia(const drv_config_t *c)
 
 	if (!c->forza && (occupato(c->dev_gd32) || (c->dev_lidar && occupato(c->dev_lidar))))
 		return EBUSY;
+	if (registra_apri(c) != 0) {
+		int e = errno;
+		fprintf(stderr, "driver: registrazione in %s: %s\n", c->registra, strerror(e));
+		return e ? e : EIO;
+	}
 	if ((d.fd_gd32 = apri_seriale(c->dev_gd32)) < 0) {
 		int e = errno;
 		fprintf(stderr, "driver: apro %s: %s\n", c->dev_gd32, strerror(e));
+		registra_chiudi();
 		return e;
 	}
 	if (c->dev_lidar && *c->dev_lidar && (d.fd_lidar = apri_seriale(c->dev_lidar)) < 0) {
 		int e = errno;
 		fprintf(stderr, "driver: apro %s: %s\n", c->dev_lidar, strerror(e));
 		close(d.fd_gd32);
+		registra_chiudi();
 		return e;
 	}
 	d.fd_sveglia = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
@@ -930,6 +1062,7 @@ int drv_avvia(const drv_config_t *c)
 		close(d.fd_gd32);
 		if (d.fd_lidar >= 0)
 			close(d.fd_lidar);
+		registra_chiudi();
 		return r;
 	}
 	pthread_attr_t a;
@@ -948,6 +1081,7 @@ int drv_avvia(const drv_config_t *c)
 		close(d.fd_gd32);
 		if (d.fd_lidar >= 0)
 			close(d.fd_lidar);
+		registra_chiudi();
 		return r;
 	}
 	d.avviato = 1;
@@ -972,6 +1106,7 @@ void drv_ferma(void)
 	pthread_join(d.thread, NULL);        /* si sveglia al prossimo evento a tempo: al massimo 20 ms */
 	spegni();
 	pthread_join(d.servizio, NULL);
+	registra_chiudi();
 	close(d.fd_gd32);
 	if (d.fd_lidar >= 0)
 		close(d.fd_lidar);
@@ -984,11 +1119,12 @@ uint32_t drv_stato(drv_stato_t *out) { return scambio_leggi(&sc_stato, out); }
 
 void drv_punto_xy(const lidar_punto_t *p, double *x, double *y)
 {
-	/* angolo del lidar: 0 = dietro, antiorario; nel sistema del robot 0 = davanti */
-	double a = (p->angolo_cdeg / 100.0 - 180.0) * M_PI / 180.0;
+	/* angolo del lidar: 0 = dietro, ORARIO; nel sistema del robot b = 180° - angolo (0 = davanti, antiorario) */
+	double b = (180.0 - p->angolo_cdeg / 100.0) * M_PI / 180.0;
 	double r = p->distanza_mm / 1000.0;
-	*x = r * cos(a);
-	*y = r * sin(a);
+	/* il punto è a distanza r lungo b, spostato di LIDAR_OTTICO_M a destra del raggio (triangolatore) */
+	*x = LIDAR_X_M + r * cos(b) + LIDAR_OTTICO_M * sin(b);
+	*y = LIDAR_Y_M + r * sin(b) - LIDAR_OTTICO_M * cos(b);
 }
 
 void drv_velocita(double v, double w)

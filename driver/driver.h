@@ -58,8 +58,10 @@ typedef struct {
 	int banco;                   /* 1 = banco di prova: motori solo se il robot è SOLLEVATO (gd32/sicurezza.h) */
 	int cliff_atteso;            /* solo banco: anti-caduta che valgono "sollevato" (-1 = 0x0f, la regola normale) */
 	double lidar_giri_s;         /* velocità del lidar quando è acceso (default 6, come AuxCtrl) */
-	int scarto_lidar_cdeg;       /* scarto fra lo 0 del lidar e il robot da togliere (default 800 = 8°) [?] */
+	int scarto_lidar_cdeg;       /* scarto fra lo 0 del lidar e il robot da togliere (default LIDAR_SCARTO_CDEG) */
 	const char *cmd_suono;       /* comando per i suoni, %s = nome (es. "sound_beep_beep"); NULL = nessun suono */
+	const char *registra;        /* file dove registrare i byte grezzi delle seriali, nel formato della spia
+	                                (spia/registro.h: canali "gd32" e "lidar"); NULL = niente (default) */
 	int senza_rt;                /* 1 = se mancano i permessi per SCHED_FIFO parte lo stesso (solo per il PC) */
 	int forza;                   /* 1 = non controlla se un altro programma usa già le seriali */
 } drv_config_t;
@@ -95,6 +97,8 @@ enum {
 	DRV_LIM_SENSORI_VECCHI = 1 << 11,/* nessun frame dei sensori da più di 100 ms */
 	DRV_LIM_BATTERIA     = 1 << 12,  /* batteria critica */
 	DRV_LIM_BANCO        = 1 << 13,  /* banco di prova: il robot non risulta sollevato, o il blocco è scattato */
+	DRV_LIM_CASSETTO     = 1 << 14,  /* solo aspirazione: manca il cassetto della polvere (il GD32 non la ferma) */
+	DRV_LIM_VIETATA      = 1 << 15,  /* solo aspirazione: drv_config_t.aspirazione = 0 */
 };
 
 typedef struct {
@@ -113,6 +117,7 @@ typedef struct {
 	double v, w;                 /* m/s, rad/s */
 	int limiti;                  /* SIC_LIM_* | DRV_LIM_*: perché v, w sono diversi dal comando (0 = nessun limite) */
 	int spazzola_laterale, spazzola_centrale, aspirazione_giri, led;
+	int aspirazione_limiti;      /* perché l'aspirazione chiesta non va (SIC_LIM_* | DRV_LIM_*; 0 = va, o non chiesta) */
 
 	/* lidar */
 	int lidar_acceso, lidar_potenza, lidar_ok;
@@ -140,7 +145,9 @@ uint32_t drv_sensori(drv_sensori_t *out);
 uint32_t drv_giro(lidar_giro_t *out);       /* ultimo giro completo del lidar (struttura grande: ~4 KB) */
 uint32_t drv_stato(drv_stato_t *out);
 
-/* Punto del lidar nel sistema del robot: x in avanti, y a sinistra, in metri (angoli già corretti dello scarto). */
+/* Punto del lidar nel sistema del robot: origine al CENTRO del robot, x in avanti, y a sinistra, in metri. Tiene conto
+ * di verso degli angoli, scarto (già tolto in p->angolo_cdeg), posizione del lidar e scostamento ottico
+ * (driver/lidar_giro.h). */
 void drv_punto_xy(const lidar_punto_t *p, double *x, double *y);
 
 /* --------------------------------------------------------------------------------------------- comandi --- */

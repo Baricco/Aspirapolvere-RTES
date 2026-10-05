@@ -1,6 +1,7 @@
 /* descrizione.c - Descrizione dei messaggi SoC <-> GD32: vedi descrizione.h. Fonti: gd32.h, docs/protocollo.md,
  * docs/fase2.md, docs/fase3.md. */
 #include "descrizione.h"
+#include "gd32.h"
 
 #include <stddef.h>
 
@@ -27,8 +28,8 @@ const campo_t CAMPI_SENSORI[] = {
 	{ "temperatura", 9, 1, -1, 0, "i8", 1, "°C", 'C', CAMPO_BASE, "temperatura della batteria" },
 	{ "encoder_sx", 16, 4, -1, 0, "i32", 1, "tick", 'V', CAMPO_ODOMETRIA, "contatore della ruota sinistra: 3616 tick per giro, 60,4 µm per tick; in avanti aumenta" },
 	{ "encoder_dx", 24, 4, -1, 0, "i32", 1, "tick", 'V', CAMPO_ODOMETRIA, "contatore della ruota destra" },
-	{ "v_misurata", 32, 4, -1, 0, "i32", 1.0 / 16561.27, "m/s", 'V', CAMPO_ODOMETRIA, "velocità lineare misurata dal GD32 sugli encoder in ~70 ms (solo in modalità 02)" },
-	{ "w_misurata", 36, 4, -1, 0, "i32", 1.0 / 1999.77, "rad/s", 'V', CAMPO_ODOMETRIA, "velocità angolare misurata (solo in modalità 02)" },
+	{ "v_misurata", 32, 4, -1, 0, "i32", 1.0 / GD32_SCALA_V, "m/s", 'V', CAMPO_ODOMETRIA, "velocità lineare misurata dal GD32 sugli encoder in ~70 ms (solo in modalità 02)" },
+	{ "w_misurata", 36, 4, -1, 0, "i32", 1.0 / GD32_SCALA_W, "rad/s", 'V', CAMPO_ODOMETRIA, "velocità angolare misurata (solo in modalità 02)" },
 	{ "vel_imbardata", 40, 2, -1, 0, "i16", 0.01, "°/s", 'V', CAMPO_IMU, "IMU: velocità angolare intorno all'asse verticale (+ = antiorario)" },
 	{ "angolo_imbardata", 42, 2, -1, 0, "i16", 0.01, "°", 'V', CAMPO_IMU, "IMU: angolo integrato dal GD32 (deriva ~0,3°/h); 0x08 lo azzera" },
 	{ "vel_beccheggio", 44, 2, -1, 0, "i16", 0.01, "°/s", 'V', CAMPO_IMU, "IMU: velocità angolare di beccheggio" },
@@ -68,12 +69,12 @@ const int N_CAMPI_SENSORI = N(CAMPI_SENSORI);
 static const campo_t C_UNO[] = { { "valore", 0, 1, -1, 0, "u8", 1, "", 'V', CAMPO_STATO, "" } };
 static const campo_t C_BOOL[] = { { "acceso", 0, 1, -1, 0, "u8", 1, "", 'V', CAMPO_STATO, "1 = acceso, 0 = spento" } };
 static const campo_t C_VEL[] = {
-	{ "v", 0, 4, -1, 0, "i32", 1.0 / 16561.27, "m/s", 'V', CAMPO_ODOMETRIA, "velocità lineare: tick/s di ogni ruota" },
-	{ "w", 4, 4, -1, 0, "i32", 1.0 / 1999.77, "rad/s", 'V', CAMPO_ODOMETRIA, "velocità angolare (+ = antiorario)" },
+	{ "v", 0, 4, -1, 0, "i32", 1.0 / GD32_SCALA_V, "m/s", 'V', CAMPO_ODOMETRIA, "velocità lineare: tick/s di ogni ruota (~4580 tick al metro)" },
+	{ "w", 4, 4, -1, 0, "i32", 1.0 / GD32_SCALA_W, "rad/s", 'V', CAMPO_ODOMETRIA, "velocità angolare (+ = antiorario)" },
 };
 static const campo_t C_RUOTE[] = {
-	{ "sinistra", 0, 4, -1, 0, "i32", 1.0 / 16561.27, "m/s", 'V', CAMPO_ODOMETRIA, "ruota sinistra" },
-	{ "destra", 4, 4, -1, 0, "i32", 1.0 / 16561.27, "m/s", 'V', CAMPO_ODOMETRIA, "ruota destra" },
+	{ "sinistra", 0, 4, -1, 0, "i32", 1.0 / GD32_SCALA_V, "m/s", 'V', CAMPO_ODOMETRIA, "ruota sinistra" },
+	{ "destra", 4, 4, -1, 0, "i32", 1.0 / GD32_SCALA_V, "m/s", 'V', CAMPO_ODOMETRIA, "ruota destra" },
 };
 static const campo_t C_MODO[] = { { "modo", 0, 1, -1, 0, "u8", 1, "", 'V', CAMPO_MOTORI, "00 motori spenti, 01 per ruota (0x67), 02 v/omega (0x66)" } };
 static const campo_t C_SPAZZOLA[] = { { "velocita", 0, 1, -1, 0, "i8", 1, "", 'V', CAMPO_MOTORI, "positivo = pulizia; negativo = sblocco per ~4 s" } };

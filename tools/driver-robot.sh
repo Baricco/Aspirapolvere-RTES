@@ -16,12 +16,15 @@
 #   tools/driver-robot.sh stato           ultime righe dell'uscita, processi attivi, tensione
 #   tools/driver-robot.sh segui           segue l'uscita in diretta (Ctrl-C smette di seguire, la prova continua)
 #   tools/driver-robot.sh ferma           ferma il driver ("fine") e aspetta che riparta il custode
+#   tools/driver-robot.sh prepara         all'inizio di una sessione (dopo un'accensione): ferma lo stack originale e avvia
+#        il custode, in un solo comando
 #   tools/driver-robot.sh custode         avvia il custode se non gira niente che tenga vivo il GD32
 #   tools/driver-robot.sh scarica NOME    copia NOME.out e NOME.csv in build/robot/fase3/NOME/
 set -eu
 DIR="$(cd "$(dirname "$0")/.." && pwd)"
 robot() { "$DIR/../ssh-robot.sh" "$@"; }
 D=/tmp/rtes
+FERMA_STACK='/etc/init.d/robotManager stop; kill $(pidof Monitor RobotApp AuxCtrl log-server everest-server) 2>/dev/null; sleep 2; kill -9 $(pidof Monitor RobotApp AuxCtrl log-server everest-server) 2>/dev/null; true'
 CUSTODE="start-stop-daemon -S -b -m -p $D/custode.pid -x $D/spia -- guida --comandi $D/comandi"
 
 copia() {   # copia NOME: build/arm/NOME -> /tmp/rtes/NOME (rinomina alla fine: un programma in esecuzione non si rovina)
@@ -72,13 +75,20 @@ case "${1:-}" in
         for p in \$(pgrep -P \$(cat $D/driver.pid 2>/dev/null) 2>/dev/null); do kill \$p; done; fi; i=0
       while ! pidof spia >/dev/null && [ \$i -lt 10 ]; do sleep 1; i=\$((i+1)); done
       tail -n 4 \$(ls -t $D/*.out | head -1); echo \"custode: \$(pidof spia)\"" ;;
+  prepara)
+    copia spia
+    robot "pidof rtes-driver spia >/dev/null && { echo 'gira già il driver o il custode'; exit 0; }
+      $FERMA_STACK
+      pidof AuxCtrl everest-server >/dev/null && { echo 'lo stack originale non si ferma'; exit 1; }
+      $CUSTODE; sleep 1; echo \"stack fermo, custode: \$(pidof spia)\"" ;;
   custode)
     robot "if pidof rtes-driver spia AuxCtrl >/dev/null; then echo 'il GD32 è già sorvegliato'; else $CUSTODE; sleep 1; echo \"custode: \$(pidof spia)\"; fi" ;;
   scarica)
     nome=${2:?"serve il nome della prova"}
     dest="$DIR/build/robot/fase3/$nome"
     mkdir -p "$dest"
-    for f in out csv; do robot "cat $D/$nome.$f 2>/dev/null" > "$dest/$nome.$f" || true; done
+    for f in out csv reg; do robot "cat $D/$nome.$f 2>/dev/null" > "$dest/$nome.$f" || true; done
+    [ -s "$dest/$nome.reg" ] || rm -f "$dest/$nome.reg"
     ls -la "$dest" ;;
   *) sed -n '2,20p' "$0"; exit 2 ;;
 esac

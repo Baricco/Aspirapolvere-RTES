@@ -7,8 +7,9 @@
  *     rallenta in ~0,5 s);
  *   - sotto ~4 giri/s manda solo pacchetti di velocità 0xAE (ogni 100 ms), sopra solo scansioni 0xAD;
  *   - ogni 0xAD è un settore di 22,5° (16 per giro) con n punti, n = ~2040 misure/s / (16 x giri/s), al massimo 29;
- *   - angoli del lidar: 0° = dietro, 90° = destra, 180° = davanti, 270° = sinistra (antiorario visto dall'alto); scarto
- *     di circa +8° fra lo 0 del lidar e il robot come sul robot vero [?] (`scarto_gradi`);
+ *   - angoli del lidar: 0° = dietro, 90° = sinistra, 180° = davanti, 270° = destra (ORARIO visto dall'alto); scarto
+ *     di 14,5° fra lo 0 del lidar e il robot e scostamento ottico di 2,5 cm come sul robot vero (`scarto_gradi`,
+ *     driver/lidar_giro.h);
  *   - misura sul suo piano (LIDAR_ALTEZZA in sim/robot.h): vede solo gli oggetti che lo tagliano;
  *   - rumore sulla distanza dalla deviazione standard misurata (7 mm fino a 3 m, 37 mm oltre 6 m), qualche punto
  *     isolato senza eco, niente eco oltre la portata; intensità come quelle misurate.

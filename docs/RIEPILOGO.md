@@ -25,7 +25,7 @@ confermare.
                                                         │                          │
          ┌──────────── MCU GD32F103VCT6 ────────────────┴───┐            Lidar 3irobotix LDS3
          │ firmware 2.0.1_19082727                          │            (solo dati: misure,
-         │ ├─ 2 motori ruote + encoder (3616 tick/giro)      │             velocità, versione)
+         │ ├─ 2 motori ruote + encoder (~4580 tick/m)        │             velocità, versione)
          │ ├─ spazzola laterale, spazzola centrale           │                     ▲
          │ ├─ aspirazione (blower)                           │   alimentazione e   │
          │ ├─ motore del lidar ──────────────────────────────┼── potenza motore ───┘
@@ -68,7 +68,7 @@ direttamente al SoC su `/dev/ttyS1`, ma il suo motore lo comanda il GD32.
 | IR della base | GD32 | byte 6: due ricevitori (nibble), bit 1/2/4/8 = fasci della base; solo rivolto verso la base | [verificato] |
 | (byte 90–95) | GD32 | copia delle velocità angolari | [verificato] |
 | IR di ostacolo / seguimuro | – | **non presenti** (everest usa il lidar) | [verificato] |
-| Lidar a 360° | SoC, `/dev/ttyS1` | scansioni `0xAD`: 16 settori × ~21 punti, ~360 punti/giro; 0° = dietro, angoli antiorari, distanze esatte al cm | [verificato] |
+| Lidar a 360° | SoC, `/dev/ttyS1` | scansioni `0xAD`: 16 settori × ~21 punti, ~360 punti/giro; 0° = dietro, angoli **orari** (corretto il 5/10), scarto 14,5°, 11,2 cm dietro il centro, distanze esatte al cm | [verificato] |
 | Temperatura del SoC | SoC | `thermal_zone0` | [verificato] |
 
 **Non ci sono** interruttori sulle ruote né sulla torretta del lidar [verificato]. everest segnala comunque
@@ -93,7 +93,8 @@ direttamente al SoC su `/dev/ttyS1`, ma il suo motore lo comanda il GD32.
 | Altoparlante | `tinyplayer file.mp3`; volume `amixer cset iface=MIXER,name='speaker volume control' 0..63` | il GPIO 233 a 0 **non** lo spegne |
 
 ### Parametri meccanici [codice]
-Ruote: raggio 34,75 mm, carreggiata 241,5 mm, 3616 tick per giro (60,4 µm per tick). Batteria Li-ion 4S
+Ruote: carreggiata 241,5 mm, ~4580 tick per metro (misura del 5/10; i 3616 tick per giro e 34,75 mm di everest danno
+16 561 tick/m, 3,6 volte troppi). Batteria Li-ion 4S
 (16,8 V piena, protezione intorno a 12 V).
 
 ---
@@ -169,7 +170,7 @@ RobotApp (cloud, app, mappe, programmazioni) non serve.
 | `0x7a` / `0x7c` / `0x80` | parametri autonomi (24 byte) / maschera sensori (`00 ff ff`) / bumper morbido | | `0x7c` all'avvio |
 | `0x84` / `0x85` / `0x86` | aspirazione: modo / PWM / PWM compensato | int32 / u8 / u8 | durante la pulizia |
 | `0x65` | modalità dei motori: 00 spenti, 01 per ruota, 02 v/ω | 1 byte | all'avvio e ai cambi di modalità |
-| `0x66` | velocità: v e ω | int32 v·16561,27 (tick/s), int32 ω·1999,77 | **ogni 20 ms** (quasi sempre zero) |
+| `0x66` | velocità: v e ω | int32 v·~4580 (tick/s), int32 ω·553 (scale misurate il 5/10; everest usa 16561,27 e 1999,77) | **ogni 20 ms** (quasi sempre zero) |
 | `0x67` | velocità delle due ruote (solo in modalità 01) | 2 × int32 | mai visto |
 | `0x68` | aspirazione: giri/min ÷ 10 | int16 | ai cambi di stato |
 | `0x69` / `0x6a` | spazzola laterale / centrale | int8 | ai cambi di stato |

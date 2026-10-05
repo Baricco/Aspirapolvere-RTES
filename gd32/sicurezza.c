@@ -124,7 +124,7 @@ size_t sic_frame_arresto(uint8_t *out, size_t dim)
 int sic_terra_limita(const gd32_sensori_t *s, int uscita_base, int32_t *v_tick, int32_t *w_tick)
 {
 	/* limiti per uscire dalla base: 0,1 m/s e 0,5 rad/s nelle unità di 0x66 */
-	const int32_t V_BASE = 1656, W_BASE = 1000;
+	const int32_t V_BASE = (int32_t)(0.1 * GD32_SCALA_V), W_BASE = (int32_t)(0.5 * GD32_SCALA_W);
 	int sensori = (s->controllo & GD32_CONTROLLO_SENSORI_ACCESI) != 0;
 	int cliff = s->cliff[0] | s->cliff[1] | s->cliff[2] | s->cliff[3];
 	int tutti_vuoto = s->cliff[0] & s->cliff[1] & s->cliff[2] & s->cliff[3];

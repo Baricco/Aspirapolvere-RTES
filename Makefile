@@ -36,8 +36,8 @@ SPIA_SRC = spia/spia.c spia/registro.c spia/everest.c
 SPIA_HDR = spia/registro.h spia/everest.h
 
 # Driver (driver/): il nostro sostituto di AuxCtrl. rtes-driver è il programma per provarlo da solo.
-DRIVER_SRC = driver/driver.c driver/scambio.c driver/batteria.c driver/lidar_giro.c
-DRIVER_HDR = driver/driver.h driver/scambio.h driver/batteria.h driver/lidar_giro.h
+DRIVER_SRC = driver/driver.c driver/scambio.c driver/batteria.c driver/lidar_giro.c spia/registro.c
+DRIVER_HDR = driver/driver.h driver/scambio.h driver/batteria.h driver/lidar_giro.h spia/registro.h
 
 # Simulatore (sim/): GD32 e lidar finti su pseudo-seriali, pagina web con la stanza. Solo per il PC.
 SIM_LIB = sim/mondo.c sim/gd32sim.c sim/lidarsim.c sim/parametri.c

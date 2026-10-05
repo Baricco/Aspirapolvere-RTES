@@ -6,9 +6,14 @@
  *     param[1..2]   i16  BE, sempre 82 (0,82) [?]
  *     param[3..4]   u16  BE, angolo di inizio del settore in centesimi di grado
  *     poi n punti da 3 byte: u8 intensità, u16 BE distanza in quarti di mm (0 = nessuna eco)
- * Il punto i del settore è all'angolo inizio + i x 22,5° / n. Angoli del LIDAR: 0° = dietro il robot, 90° = destra,
- * 180° = davanti, 270° = sinistra, crescenti in senso antiorario visto dall'alto. Sul robot vero c'è uno scarto di
- * circa +8° (letto = vero + 8°) [?]: il driver lo corregge con drv_config_t.scarto_lidar_cdeg.
+ * Il punto i del settore è all'angolo inizio + i x 22,5° / n. Angoli del LIDAR: 0° = dietro il robot, 90° = SINISTRA,
+ * 180° = davanti, 270° = DESTRA, crescenti in senso ORARIO visto dall'alto (il lidar è montato capovolto rispetto al
+ * robot). Corretto il 5/10: fino ad allora si pensava antiorario, e il driver scambiava destra e sinistra (prova con
+ * la rotazione: l'IMU segna +40,7°, la stanza vista dal lidar ruota di +42° invece che di -42°; conferma da
+ * kaiaai/VacuumTiger, proscenic-m6pro.toml: scale = -1, offset = pi).
+ * Lo 0 del lidar è spostato di LIDAR_SCARTO_CDEG (letto = vero + scarto): il driver lo toglie con
+ * drv_config_t.scarto_lidar_cdeg. Il lidar è un triangolatore: il punto misurato non sta sul raggio dal centro di
+ * rotazione ma LIDAR_OTTICO più in là, a destra del raggio (drv_punto_xy).
  * Sotto ~4 giri/s il lidar manda solo pacchetti di velocità 0xAE (param[0] u8 x 0,05 giri/s).
  *
  * L'assemblatore raccoglie i settori; quando l'angolo di inizio torna indietro (nuovo giro) consegna il giro appena
@@ -26,6 +31,17 @@
 #include "../lidar/lidar.h"
 
 #define LIDAR_GIRO_MAX_PUNTI 800       /* 2050 misure/s a 4 giri/s = 513; abbondante */
+
+/* Montaggio del lidar sul robot [misura del 5/10, docs/fase3.md; seconda fonte: kaiaai/VacuumTiger]:
+ *   centro di rotazione 11,2 cm DIETRO il centro del robot (bumper contro un muro piatto: muro a 289 mm dal lidar e a
+ *   174,5 mm dal centro; kaiaai: 110 mm), sull'asse;
+ *   scarto dello 0: 14,5° (direzione della traslazione in avanti vista dal lidar, due prove: 180° +- 1,5°; kaiaai
+ *   12,5°); con lo scostamento ottico spiega anche gli 8° visti in fase 2 con una scatola a 16 cm;
+ *   scostamento ottico 2,5 cm (kaiaai: optical_offset; il segno dalle tre misure). */
+#define LIDAR_X_M          (-0.112)
+#define LIDAR_Y_M          0.0
+#define LIDAR_SCARTO_CDEG  1450
+#define LIDAR_OTTICO_M     0.025
 
 typedef struct {
 	uint16_t angolo_cdeg;    /* angolo del lidar corretto dello scarto, in centesimi di grado (0..35999) */

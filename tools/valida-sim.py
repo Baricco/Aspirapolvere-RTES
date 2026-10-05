@@ -7,7 +7,9 @@ Prove disponibili (registrazioni della fase 2, in build/robot/fase2/, fuori da g
   c2b  ruote: retromarcia sugli anti-caduta, heartbeat   -> encoder
   c3   spazzole e aspirazione                             -> eco, giri della ventola, correnti
   c1   lidar a potenze 40..80                             -> velocità del lidar
-In tutte il robot era sollevato e il GD32 aveva già ricevuto 0x19 01 da everest: il simulatore parte nello stesso stato.
+  val1 ruote A TERRA: gradini di v e omega con il driver    -> encoder, velocità misurata (fase 3, build/robot/fase3/)
+In quelle della fase 2 il robot era sollevato e il GD32 aveva già ricevuto 0x19 01 da everest: il simulatore parte nello
+stesso stato. val1 l'ha registrata il driver (--registra) con il robot a terra, dall'avvio.
 
 Stampa l'errore di ogni grandezza e lo confronta con una soglia. Se la registrazione non c'è (per esempio su un altro
 PC) la prova si salta. Uso: tools/valida-sim.py [c2 c1 ...]  (default: c2)
@@ -53,9 +55,16 @@ def deframe(buf):
     return out, buf[i:]
 
 
+A_TERRA = {"val1"}
+
+
+def cartella(nome):
+    return "build/robot/fase3" if nome in A_TERRA else DIR_REG
+
+
 def rigioca(nome, con_lidar=False):
     """Rimanda i comandi registrati al simulatore; ritorna (registrati, simulati, pacchetti del lidar veri e simulati)."""
-    rec = leggi_registro(f"{DIR_REG}/{nome}/{nome}.reg")["gd32"]
+    rec = leggi_registro(f"{cartella(nome)}/{nome}/{nome}.reg")["gd32"]
     tx = frame_gd32(rec, DAL_SOC)
     rx = [(t, d) for t, c, d in frame_gd32(rec, VERSO_SOC) if c == 0x15]
     t0 = tx[0][0]
@@ -68,7 +77,8 @@ def rigioca(nome, con_lidar=False):
             break
         time.sleep(0.02)
     time.sleep(0.1)
-    urllib.request.urlopen(urllib.request.Request(f"http://127.0.0.1:{PORTA}/comando", data=b"solleva"), timeout=2).read()
+    if nome not in A_TERRA:
+        urllib.request.urlopen(urllib.request.Request(f"http://127.0.0.1:{PORTA}/comando", data=b"solleva"), timeout=2).read()
     g = os.open(f"{d_sim}/gd32", os.O_RDWR | os.O_NOCTTY | os.O_NONBLOCK)
     l = os.open(f"{d_sim}/lidar", os.O_RDWR | os.O_NOCTTY | os.O_NONBLOCK)
     # stato lasciato da everest prima della prova: retromarcia sugli anti-caduta e modalità dei motori
@@ -187,11 +197,11 @@ def valida_lidar(nome):
 def main():
     prove = sys.argv[1:] or ["c2"]
     for p in prove:
-        if not os.path.exists(f"{DIR_REG}/{p}/{p}.reg"):
-            print(f"{p}: registrazione non trovata in {DIR_REG}: SALTATA")
+        if not os.path.exists(f"{cartella(p)}/{p}/{p}.reg"):
+            print(f"{p}: registrazione non trovata in {cartella(p)}: SALTATA")
             continue
         print(f"{p}:")
-        {"c2": valida_ruote, "c2b": valida_ruote, "c3": valida_attuatori, "c3b": valida_attuatori, "c1": valida_lidar}[p](p)
+        {"c2": valida_ruote, "c2b": valida_ruote, "val1": valida_ruote, "c3": valida_attuatori, "c3b": valida_attuatori, "c1": valida_lidar}[p](p)
     print("VALIDA SIM: " + ("OK" if not falliti else f"{falliti} CONTROLLI FALLITI"))
     sys.exit(1 if falliti else 0)
 

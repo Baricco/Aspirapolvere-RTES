@@ -13,6 +13,7 @@ sim_parametri_t par = {
 	.arrivo_ms = { 0, .293, .324, .329, .334, .342, .352, .361, .365, .375, .407, .8, 5.0 },
 	.ruote_ritardo_ms = 29,
 	.rampa_v_su = 16584, .rampa_v_giu = 16761, .rampa_w_su = 2214, .rampa_w_giu = 2223,
+	.tau_v_terra = 0.10, .tau_w_terra = 0.073,
 	.ruote_finestra_ms = 70,
 	.ruote_timeout_hb = 2.04, .ruote_inerzia = 1879,
 	.corrente_ruota_base = 64, .corrente_ruota_picchi = 290, .corrente_ruota_avvio = 772,
@@ -99,6 +100,7 @@ int parametri_leggi(const char *percorso)
 		UNO("ruote_ritardo_ms", ruote_ritardo_ms);
 		DUE("ruote_rampa_v", rampa_v_su, rampa_v_giu)
 		DUE("ruote_rampa_w", rampa_w_su, rampa_w_giu)
+		DUE("ruote_tau_terra_s", tau_v_terra, tau_w_terra)
 		UNO("ruote_finestra_misura_ms", ruote_finestra_ms);
 		UNO("ruote_timeout_heartbeat_s", ruote_timeout_hb);
 		UNO("ruote_inerzia", ruote_inerzia);

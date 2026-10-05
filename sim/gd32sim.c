@@ -8,7 +8,7 @@
 
 #include "parametri.h"
 
-#define TICK_M (2 * M_PI * RUOTA_RAGGIO / TICK_GIRO)       /* metri per tick (~60 µm): 0x66 conta tick/s */
+#define TICK_M (1.0 / SCALA_V)                            /* metri per tick (~218 µm): 0x66 conta tick/s */
 #define V_MAX_TICK (V_MAX * SCALA_V)
 #define W_MAX_TICK (W_MAX * SCALA_W)
 
@@ -537,7 +537,15 @@ static void passo(gd32sim_t *g, const mondo_t *m, double t, double dt)
 		g->vel_dx = rampa(g->vel_dx, tdx, par.rampa_v_su, par.rampa_v_giu, dt);
 		g->v_cmd = (g->vel_sx + g->vel_dx) / 2;
 		g->w_cmd = (g->vel_dx - g->vel_sx) / 2;
+	} else if (g->motori_alimentati && g->modo == 2 && !g->sollevato && !g->caduto) {
+		/* a terra il GD32 regola v e omega con una risposta del primo ordine (val1, fase 3: dal 10 al 90% in
+		 * ~220 ms per v e ~160 ms per omega, qualunque sia il gradino) */
+		g->v_cmd += (tv - g->v_cmd) * (1 - exp(-dt / par.tau_v_terra));
+		g->w_cmd += (tw - g->w_cmd) * (1 - exp(-dt / par.tau_w_terra));
+		g->vel_sx = g->v_cmd - g->w_cmd;
+		g->vel_dx = g->v_cmd + g->w_cmd;
 	} else if (g->motori_alimentati && g->modo == 2) {
+		/* sollevato: rampe ad accelerazione costante (c2, c2b) */
 		g->v_cmd = rampa(g->v_cmd, tv, par.rampa_v_su, par.rampa_v_giu, dt);
 		g->w_cmd = rampa(g->w_cmd, tw, par.rampa_w_su, par.rampa_w_giu, dt);
 		g->vel_sx = g->v_cmd - g->w_cmd;

@@ -7,18 +7,21 @@ simulatore (GET /stato) e le righe di stato del driver.
 
   1. avvio e keepalive: il driver è pronto, sensori a 50 Hz; con il reset del GD32 accorciato a 4 s non c'è reset,
      mentre senza driver il GD32 si resetta (controllo della prova stessa);
-  2. lidar: acceso, regolato a 6 giri/s, giri completi pubblicati;
+  2. lidar: acceso, regolato a 6 giri/s, giri completi pubblicati, punti nel sistema del robot che cadono sui muri;
+     intanto la registrazione dei byte grezzi (--registra) si rilegge con tools/taratura/registri.py;
   3. bumper: il robot va contro il muro, si ferma (bumper), poi torna indietro;
   4. vuoto: il robot va verso una scala, si ferma prima del bordo e non cade;
   5. sollevato: nessun movimento;
   6. base: sulla base niente ruote e sensori spenti; con esci_base 1 si allontana e i sensori si riaccendono;
   7. batteria critica: motori fermi e LED 6;
   8. watchdog: un task critico si blocca -> guasto, LED 8, motori fermi, codice d'uscita 4;
-  9. il simulatore si chiude: il driver va in guasto senza girare a vuoto.
+  9. aspirazione: la ventola gira solo se permessa (--aspirazione) e si ferma senza il cassetto della polvere o con il
+     robot sollevato; riparte quando la causa sparisce;
+ 10. il simulatore si chiude: il driver va in guasto senza girare a vuoto.
 
 Uso: tools/prova-driver.py [cartella dei programmi, default build/host]
 """
-import json, os, re, subprocess, sys, threading, time, urllib.request
+import csv, json, math, os, re, subprocess, sys, threading, time, urllib.request
 
 BIN = sys.argv[1] if len(sys.argv) > 1 else "build/host"
 falliti = 0
@@ -149,6 +152,24 @@ def s_lidar(sim, drv):
     m = re.search(r"lidar ok ([\d.]+) g/s p(\d+) giri (\d+)", drv.ultima())
     controlla(m and int(m.group(3)) >= 15, f"giri completi ricevuti dal driver ({m.group(3) if m else '?'})")
     controlla(m and 60 <= int(m.group(2)) <= 76, f"potenza a regime ~68 ({m.group(2) if m else '?'})")
+    # geometria: con il robot in una posizione NON simmetrica, i punti del driver (drv_punto_xy: verso degli angoli,
+    # scarto, posizione del lidar, scostamento ottico) riportati nella stanza devono cadere sui muri
+    sim.comando("sposta 1.0 2.1 30")
+    time.sleep(0.8)
+    f = os.path.abspath(f"{sim.dir}/giro.csv")
+    drv.manda(f"salva_giro {f}")
+    time.sleep(0.3)
+    r = sim.stato()["robot"]
+    a = math.radians(r["dir"])
+    vicini = tot = 0
+    for riga in csv.DictReader(open(f)):
+        if int(riga["distanza_mm"]) == 0:
+            continue
+        x, y = float(riga["x_m"]), float(riga["y_m"])
+        wx, wy = r["x"] + x * math.cos(a) - y * math.sin(a), r["y"] + x * math.sin(a) + y * math.cos(a)
+        tot += 1
+        vicini += min(abs(wx - 0.1), abs(wx - 2.9), abs(wy - 0.1), abs(wy - 2.9)) < 0.04
+    controlla(tot > 200 and vicini > 0.95 * tot, f"punti del driver sui muri della stanza: {vicini} su {tot}")
     drv.manda("lidar 0")
     time.sleep(1.5)
     st = sim.stato()
@@ -247,6 +268,27 @@ def s_watchdog(sim, drv):
     controlla(any("NO, la causa" in r for r in drv.righe), "con il task ancora bloccato il guasto non si azzera")
 
 
+def s_aspirazione(sim, drv, permessa):
+    drv.manda("aspirazione 8000")
+    time.sleep(2)
+    if not permessa:
+        controlla(sim.stato()["ventola"] == 0, "senza --aspirazione la ventola resta ferma")
+        controlla("vietata" in drv.ultima(), "lo stato dice perché: vietata")
+        return
+    controlla(sim.stato()["ventola"] > 6000, f"la ventola gira ({sim.stato()['ventola']:.0f} giri/min)")
+    sim.comando("cassetto 0")
+    ok = drv.aspetta(lambda: "senza-cassetto" in drv.ultima(), 1)
+    time.sleep(1.5)
+    controlla(ok, "il driver vede che manca il cassetto")
+    controlla(sim.stato()["ventola"] < 1000, f"senza cassetto la ventola si ferma ({sim.stato()['ventola']:.0f})")
+    sim.comando("cassetto 1")
+    time.sleep(2)
+    controlla(sim.stato()["ventola"] > 6000, "con il cassetto rimesso riparte")
+    sim.comando("solleva")
+    time.sleep(2)
+    controlla(sim.stato()["ventola"] < 1000 and "sollevato" in drv.ultima(), "sollevato: ferma")
+
+
 def main():
     vuota, soggiorno = "sim/stanze/vuota.txt", "sim/stanze/soggiorno.txt"
 
@@ -258,7 +300,17 @@ def main():
     controlla(sim.stato()["gd32"]["reset"] >= 1, "reset senza keepalive")
     sim.ferma()
 
-    scenario("2. lidar", vuota, s_lidar)
+    reg = os.path.abspath(f"build/prova-driver-{os.getpid()}.reg")
+    scenario("2. lidar (e registrazione dei byte grezzi)", vuota, s_lidar, (), ("--registra", reg))
+    sys.path.insert(0, "tools/taratura")
+    from registri import DAL_SOC, VERSO_SOC, frame_gd32, leggi_registro, pacchetti_lidar
+    rec = leggi_registro(reg)
+    sensori = [f for f in frame_gd32(rec.get("gd32", []), VERSO_SOC) if f[1] == 0x15]
+    comandi = {f[1] for f in frame_gd32(rec.get("gd32", []), DAL_SOC)}
+    controlla(len(sensori) > 300, f"registrati i frame dei sensori ({len(sensori)})")
+    controlla({0x06, 0x0d, 0x66, 0x97, 0x71} <= comandi, "registrati i comandi del driver (heartbeat, keepalive, velocità, lidar)")
+    controlla(len(pacchetti_lidar(rec.get("lidar", []))) > 500, "registrati i pacchetti del lidar")
+    os.remove(reg)
     scenario("3. bumper", vuota, s_bumper)
     scenario("4. vuoto", vuota, s_vuoto)
     scenario("5. sollevato", vuota, s_sollevato)
@@ -267,7 +319,10 @@ def main():
     cod, _ = scenario("8. watchdog dei task", vuota, s_watchdog, (), ("--task-prova",))
     controlla(cod == 4, f"codice d'uscita 4 (guasto durante la prova): {cod}")
 
-    print("9. il simulatore si chiude")
+    scenario("9. aspirazione permessa", vuota, lambda sim, drv: s_aspirazione(sim, drv, True), (), ("--aspirazione",))
+    scenario("9b. aspirazione vietata", vuota, lambda sim, drv: s_aspirazione(sim, drv, False))
+
+    print("10. il simulatore si chiude")
     sim = Sim(vuota, "--durata", "2")
     drv = Driver(sim)
     ok = drv.aspetta(lambda: "GUASTO" in drv.ultima(), 5)

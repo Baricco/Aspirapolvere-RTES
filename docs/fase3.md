@@ -281,71 +281,108 @@ Test nuovi in `test_driver_logica` (curve, discesa senza salti, niente risalite,
 - Contatti di carica **dietro** (detto dall'utente): si esce dalla base in avanti.
 - Fatto il commit della fase 3 (non pushato). La fase 4 (task) può partire nel simulatore.
 
+## 2026-10-05 sera: prove con il robot (l'utente presente)
+
+Piano in `~/.claude/plans/riprendi-il-piano-di-logical-puddle.md`: prima le prove che richiedono l'utente, poi il lavoro
+da soli. Scelte dell'utente: si prova l'aspirazione (cassetto rimesso), la seriale a "bassa latenza" **non si fa**,
+il commit lo fa Claude senza push. Il volume dell'altoparlante torna **quello di fabbrica** (`volume=10` in
+`device_config.ini`, mixer a 52): va abbassato solo durante le notti di lavoro autonomo.
+
+### Prove
+| Prova | Risultato |
+|---|---|
+| `tools/driver-robot.sh prepara` (nuovo) | ferma lo stack originale e avvia il custode in un comando |
+| Carica con il driver (carica1, carica2) | sulla base: LED 4 (giallo che respira), sensori spenti, percentuale che sale (88 → 92 %) |
+| Suono di guasto (`blocca`) | si sente (`sound_erro_harefault`), LED 8. Con il task ancora bloccato `azzera` rifiuta: giusto |
+| Ruote e spazzole da sollevato (m1–m3) | rotazione nei due versi, spazzola centrale e laterale (l'utente la vede girare). Il banco scatta appena un anti-caduta vede qualcosa (anche per un frame) |
+| A terra (t1): bumper | si ferma all'urto, rifiuta "avanti" con il bumper premuto, lascia "indietro" |
+| A terra: sollevato mentre va | sollevato del tutto (4 anti-caduta nel vuoto): fermo entro 0,6 s. Sollevato da un lato: la **rotazione continua** (`sic_terra_limita` permette di ruotare con bumper o vuoto, per staccarsi da un bordo): da decidere se va bene |
+| Aspirazione a terra (a1) | 8000 / 12 000 / 18 000 giri/min comandati → la ventola li segue (±5 %), tensione 16,0 → 15,8 → 15,5 V |
+| Cassetto tolto con la ventola accesa | per 10 s **la ventola ha continuato**: il GD32 non la ferma. Ora la ferma il driver (sotto) |
+| Gradino per gli anti-caduta | non fatto (niente gradino a disposizione); provati in fase 2 |
+
+### Tre errori trovati nel driver
+1. **Il lidar scambiava destra e sinistra.** Gli angoli del lidar crescono in senso **orario** visto dall'alto (0° =
+   dietro, 90° = sinistra, 180° = davanti, 270° = destra). Prove: due scatole messe a destra apparivano a sinistra;
+   ruotando il robot a sinistra di 40,7° (IMU) la stanza vista dal lidar ruotava di +42° invece di −42°. La prova con una
+   scatola sola della fase 2 era stata letta al contrario. Conferma da una seconda fonte: il fork
+   [kaiaai/VacuumTiger](https://github.com/kaiaai/VacuumTiger), adattato al Proscenic M6 Pro
+   (`sangamio/config/proscenic-m6pro.toml`: `scale = -1`, `offset = pi`).
+2. **Le scale di `0x66` erano sbagliate di ~3,6 volte.** Everest usa 16561,27 tick/s per m/s e 1999,77 per rad/s,
+   ricavati da CRobotParams (raggio 34,75 mm, 3616 tick per giro). Sul nostro robot, misurando con il lidar e l'IMU,
+   sono **~4580** e **553**: con "0,1 m/s" il robot andava a ~0,35 m/s, con "0,5 rad/s" girava a ~1,75. Il GD32
+   conta davvero in tick/s per ruota (lo dicono gli encoder, fase 2 c2); sbagliati sono i tick per metro. Ora le scale
+   sono in un posto solo, `gd32/gd32.h` (`GD32_SCALA_V`, `GD32_SCALA_W`); kaiaai usa 4400–4460 e 523, il 4–5 % in meno.
+3. **Il lidar non è al centro**: il centro di rotazione è **11,2 cm dietro** il centro del robot (bumper contro un
+   muro piatto: muro a 289 mm dal lidar e a 174,5 mm dal centro; kaiaai 110 mm). Lo scarto dello 0 è **14,5°** e il
+   triangolatore ha uno **scostamento ottico di 2,5 cm** (kaiaai): con questo modello la direzione della traslazione in
+   avanti vista dal lidar torna a 180° ± 1,5° in due prove, e si spiegano anche gli 8° della fase 2 (scatola a 16 cm).
+   Tutto in `driver/lidar_giro.h`, usato da `drv_punto_xy` (ora con origine al centro del robot) e dal simulatore.
+
+Verifica finale con il driver corretto (val1 / val2, distanze e angoli misurati dal lidar):
+
+| Comando | Atteso | Misurato |
+|---|---|---|
+| indietro a 0,2 m/s per 2 s | 0,40 m | 0,400 m |
+| +1,5708 rad/s per 1 s | +90° | +90,0° (IMU +87,9°) |
+| −1,5708 rad/s per 1 s | −90° | −88° (IMU −85,8°) |
+| avanti a 0,2 m/s per 2 s | 0,40 m | 0,400 m |
+
+Altre misure a terra:
+- **velocità massima** del GD32: 1772 tick/s (~0,39 m/s); comandi più alti vengono tagliati;
+- **risposta del primo ordine**, non a rampa: dal 10 al 90 % in ~220 ms per v e ~160 ms per ω, per gradini piccoli e
+  grandi (costanti di tempo 109 e 73 ms, `ruote_tau_terra_s`), dopo ~30 ms di ritardo. Da sollevato restano le rampe
+  della fase 2;
+- l'**IMU** segna il ~3 % in meno della rotazione vera (lidar: 40,7° / 42°, 201,6° / 208°, 87,9° / 90°).
+
+### Aspirazione dell'originale (dal firmware)
+- Comando: **`0x68`** (velocità regolata dal GD32, giri/min ÷ 10). `CEntityHwdriver::setBlowerSpeed` chiama
+  `packetBlowerSpeed`, e `hwdrivers.ini` ha `enable_blower_speed=1`.
+- Livelli (`controller.ini`, profilo `proscenic_*`): eco **12 800**, normale **15 500**, massimo **19 500** giri/min;
+  `max_clean_blower_speed` 28 000.
+- Curve della batteria con la ventola accesa (`CBatteryCapacity3200::calculate…PaStateCapacity`, costanti estratte
+  dal disassemblato; i tratti si raccordano a 13,3 e 14,3 V): tabella in `docs/hardware.md`. **Non ancora nel driver.**
+
+### Codice
+- `driver/`: blocco dell'aspirazione senza cassetto (`DRV_LIM_CASSETTO`; anche `DRV_LIM_VIETATA`;
+  `drv_stato_t.aspirazione_limiti` dice perché è ferma); `--registra FILE` (anello in RAM da 1 MB scritto dai thread
+  del driver con `d.mx` preso, svuotato dal thread di servizio); riga di stato con v e ω misurati, imbardata, cassetto,
+  IR della base, giri della ventola; scale e montaggio del lidar corretti.
+- `sim/`: lidar orario con scarto 14,5°, torretta 11,2 cm dietro il centro, scostamento ottico; a terra risposta del
+  primo ordine; velocità massima 1772 tick/s; scale misurate.
+- `tools/`: `driver-robot.sh prepara` e `scarica` anche del `.reg`; `taratura/tara.py` ricava `ruote_tau_terra_s` da
+  val1; `valida-sim.py val1` (robot a terra); `prova-driver.py`: nello scenario 2 i punti del lidar visti dal driver
+  devono cadere sui muri della stanza (robot in posizione non simmetrica) e la registrazione si rilegge, nuovo
+  scenario 9 per l'aspirazione (permessa, vietata, senza cassetto, sollevato).
+- `tasks/primo.c`: anticipo della rotazione 6° (era 18°, calcolato con la rampa sbagliata); nel simulatore gira di 90,7°.
+
+### Tempi: PC contro robot
+- `primo` (job di pochi µs): robot 4,5 µs di media, 20 µs al massimo; PC nel simulatore 7,9 µs di media, 31–43 µs al
+  massimo. Con job così brevi conta il risveglio, non il calcolo: sul PC il task non è SCHED_FIFO.
+- Calcolo pesante (20 giri da 360 raggi su una griglia, trigonometria in double): **robot 47 ms, PC 3,3 ms: 14 volte**.
+  Per l'analisi di schedulabilità valgono i tempi misurati sul robot.
+
+### Errori di Claude durante la sessione
+- Scaricando i gradini nella cartella `build/robot/fase3/r1/` è stato sovrascritto `r1.out` della notte (resta
+  `r1.csv`; le conclusioni di r1 sono scritte sopra).
+- Dopo aver detto all'utente di rimettere il robot sulla base, `primo` è partito senza controllare: il robot era a terra
+  ed è andato avanti ~70 cm senza nessuno a guardarlo (nessun danno). Fermato subito.
+
 ## Cosa resta della fase 3
 
-### Da preparare prima, senza il robot
+Fatto il 5/10 sera (sopra): accensione, carica con il driver, suono di guasto, ruote e spazzole, prove di sicurezza a
+terra (salvo il gradino), aspirazione e blocco senza cassetto, scarto e posizione del lidar, registrazioni a terra e
+taratura, fattore fra PC e robot, registrazione grezza nel driver, `prepara`. La seriale a "bassa latenza" non si fa
+(scelta dell'utente). Restano, nessuno indispensabile per la fase 4:
 
-1. **Aspirazione nel driver**:
-   - curve della batteria per gli 8 livelli della ventola, ricavate dal firmware come le altre
-     (`calculate600PaStateCapacity` … `calculate2600PaStateCapacity`, scelte con i giri della ventola fra 1000 e oltre
-     20 000 giri/min);
-   - niente aspirazione senza il cassetto della polvere (byte 4 bit 2), come l'originale (eccezione 6);
-   - quale comando usa l'originale durante la pulizia (`0x86`, PWM compensato con la tensione, oppure `0x68` in
-     giri/min) e con quali livelli: offrire ai task gli stessi livelli;
-   - test e simulatore (la ventola è già simulata, tarata su c3 e c3b).
-2. **Registrazione dei frame grezzi nel driver** (`rtes-driver --registra NOME.reg`, stesso formato della spia), così le
-   prove della sessione servono anche a `./rtes.sh taratura` e `./rtes.sh valida-sim` (per esempio la dinamica delle
-   ruote a terra). Oggi si registra solo con `tools/banco-robot.sh`, che alla fine fa ripartire lo stack originale (con
-   il suono).
-3. **`tools/driver-robot.sh prepara`**: ferma lo stack originale e avvia il custode, in un solo comando (serve all'inizio
-   della sessione, perché alla riaccensione del robot riparte lo stack originale).
-
-### Con il robot: piano della sessione
-
-In quest'ordine. Prima di ogni prova: `tools/driver-robot.sh stato`; dopo: `tools/driver-robot.sh scarica NOME`
-(i dati vanno in `build/robot/fase3/NOME/`). Ogni prova con il driver si avvia con
-`tools/driver-robot.sh avvia NOME [opzioni]` e si comanda con `tools/driver-robot.sh comando "..."`.
-
-1. **Accensione** (~5 min). Il robot si sarà spento o riavviato, quindi all'accensione partirà lo stack originale:
-   - ascoltare il **suono di accensione** con `volume=1`. Se è ancora troppo forte, l'unica strada è sostituire il file
-     mp3 (decisione dell'utente);
-   - `tools/driver-robot.sh prepara` (o a mano: fermare lo stack e `tools/driver-robot.sh custode`).
-2. **Sulla base, carica con il nostro driver** (~10 min): `avvia carica1 --senza-motori --task-prova`.
-   - Atteso: LED 4 (giallo che respira), sensori spenti (byte 64 bit 5 = 0), percentuale che sale dell'1 % ogni ~100 s.
-   - Nel frattempo, **suono di guasto** a orecchio: `comando "blocca"` → guasto, LED 8 e suono; poi `comando "azzera"`.
-   - **Anti-caduta con i sensori spenti**: sollevare il robot dalla base e guardare il byte 3 (il simulatore oggi suppone
-     che il GD32 li ignori).
-3. **Ruote e spazzole, sollevato** (~10 min): `avvia m1 --banco` (con `--cliff-atteso 0x09` se le scatole coprono gli
-   anti-caduta anteriori), poi `comando "v -0.05 0"`, `"v 0 0.3"`, `"spazzole 0 30"`, `"stop"`. In avanti, da sollevato,
-   il GD32 rifiuta (fase 2).
-4. **A terra, prove di sicurezza** (~20 min): `avvia t1` (senza `--banco`), velocità basse (`v 0.1 0`):
-   - **uscita dalla base in avanti**: `comando "esci_base 1"`, poi `v 0.1 0`;
-   - **bumper**: contro un ostacolo morbido → si ferma, nello stato compare il limite del bumper;
-   - **anti-caduta**: verso il bordo di un gradino o un foglio scuro → si ferma;
-   - **sollevato mentre va** → si ferma;
-   - la **percentuale** in movimento (curva "in movimento").
-5. **Aspirazione** (~10 min; serve il **cassetto della polvere** rimesso): a terra, `avvia a1 --aspirazione`, poi
-   `comando "aspirazione 8000"`, `12000`, `18000`, `0`, circa 30 s ciascuno.
-   - Atteso: giri (byte 69 × 100) e corrente (byte 82) come in c3/c3b, calo della tensione sotto carico, percentuale con
-     le curve della ventola.
-   - Deve fermarsi sollevando il robot, sulla base e togliendo il cassetto.
-6. **Scarto di 8° del lidar** (~10 min): una scatola a distanza e angolo misurati (per esempio 1,00 m davanti e 1,00 m a
-   sinistra), `comando "salva_giro /tmp/rtes/giro1.csv"`, scaricare e confrontare l'angolo (`scarto_lidar_cdeg = 800`
-   di default).
-7. **Registrazioni per il simulatore** (~20 min, con la registrazione grezza del punto 2 della preparazione):
-   - **ruote a terra**: gradini di velocità (0,1 / 0,2 / 0,3 m/s) e di rotazione (0,5 / 1 rad/s) su pavimento libero;
-   - **IR della base**: robot fermo davanti alla base a 0,5 / 1 / 2 m e a vari angoli (byte 6);
-   - poi `./rtes.sh taratura` e `./rtes.sh valida-sim` con le registrazioni nuove.
-8. **Misure con il metro** (robot fermo; ~15 min), per togliere i [?] da `sim/robot.h`:
-   - altezze di corpo, torretta e piano del lidar (centro della finestra), bordo inferiore e superiore del bumper;
-   - posizione del centro del lidar rispetto al centro del robot;
-   - posizione degli anti-caduta (foto da sotto con un righello);
-   - base: larghezza, profondità, altezza, posizione dei contatti (foto).
-9. **Fattore fra PC e robot**: lo stesso programma (i primi task della fase 4) nel simulatore e sul robot
-   (`tools/driver-robot.sh programma ...`), confrontando i tempi di esecuzione di `rt_stats_stampa`.
-10. **Facoltativo, per ultimo: seriale a "bassa latenza"** (`ASYNC_LOW_LATENCY`). Toglierebbe fino a ~5 ms di variazione
-    nell'arrivo dei dati del GD32 (oggi fra 14,9 e 25,1 ms), ma rischia di bloccare il kernel con il driver seriale del
-    costruttore: robot sulla base, prima con un'opzione apposta di `rtes-driver`. Se il robot si blocca, al riavvio
-    riparte lo stack originale (con il suono).
-11. **Fine**: robot sulla base con il custode; dati scaricati; aggiornare `sim/robot.h`, `docs/hardware.md` e questo
-    diario; commit.
+1. **Curve della batteria con l'aspirazione** nel driver (`driver/batteria.c`): coefficienti già estratti
+   (`hardware.md`); mancano le soglie in giri/min che scelgono la curva, i filtri e i cali a tempo di ogni stato, poi
+   test e controllo con la registrazione a1.
+2. **Rotazione con il robot sollevato da un lato**: oggi `sic_terra_limita` la permette (serve per staccarsi da un
+   bordo). Decidere se fermarla quando qualcuno solleva il robot.
+3. **IR della base** (byte 6) per il simulatore: robot fermo davanti alla base a varie distanze e angoli (resta la
+   registrazione `irbase` della fase 2 da guardare).
+4. **Misure fisiche ancora stimate** in `sim/robot.h`: altezze di corpo e torretta, posizione degli anti-caduta,
+   dimensioni della base (online si trovano solo diametro 345–349 mm e altezza 94–95 mm).
+5. **Gradino** per gli anti-caduta a terra con il nostro driver.
+6. **`Script/trova-robot.sh`** non ha trovato il robot all'accensione (voce ARP "STALE" su 192.168.1.101): capire perché.

@@ -108,6 +108,10 @@ lo fa girare il GD32: dal SoC al lidar non passa nessun byte.
    - `v_tick = (int)(v [m/s] × 16561,27)`
    - `ω_tick = (int)(ω [rad/s] × 1999,77)`
 
+   **Misura del 5/10 (fase 3):** sul nostro robot questi fattori sono sbagliati di ~3,6 volte. Con il lidar e l'IMU
+   le scale vere sono ~4580 unità per m/s e 553 per rad/s (`GD32_SCALA_V`, `GD32_SCALA_W` in `gd32/gd32.h`; verifica:
+   0,2 m/s per 2 s → 0,400 m, 1,5708 rad/s per 1 s → 90,0°). La tabella qui sotto resta come lettura del firmware.
+
 I due fattori vengono dai parametri meccanici in `CRobotParams::CRobotParams()` [codice]:
 
 | Parametro | Valore | Significato |

@@ -34,6 +34,22 @@
 #define GD32_MAX_FRAME      (2 + 1 + 1 + GD32_MAX_DATI + 2)
 
 /*
+ * Unità di 0x66 / 0x67 e dei byte 32 / 36 dei sensori [misura del 5/10, robot a terra; docs/fase3.md]:
+ *   v = tick dell'encoder al secondo di ogni ruota; ω = metà della differenza fra le ruote, in tick/s (ruota
+ *   sinistra v - ω, destra v + ω). Gli encoder (byte 16 e 24) contano gli stessi tick.
+ * Il robot fa ~4580 tick per metro, NON i 16561 che everest ricava da CRobotParams (raggio 34,75 mm, 3616 tick per
+ * giro): con le scale di everest (16561,27 e 1999,77) il robot va ~3,6 volte più veloce del voluto. Misure:
+ *   - rotazione: 286 unità per 3 s -> 86,1° per l'IMU, che a sua volta segna il 3,2 % in meno del lidar (40,7° contro
+ *     42°, 201,6° contro 208°): 0,517 rad/s, cioè 553 unità per rad/s;
+ *   - traslazione con il lidar: 1656 unità per 2 s -> 0,68 e 0,81 m (4100-4900 unità per m/s);
+ *   - velocità massima del GD32: 1772 unità (~0,39 m/s).
+ * Seconda fonte: kaiaai/VacuumTiger (proscenic-m6pro.toml) usa 4400-4460 e 523, il 4-5 % in meno.
+ */
+#define GD32_SCALA_W      553.0                                /* unità di ω per rad/s [misura] */
+#define GD32_CARREGGIATA  0.2415                               /* m fra le ruote [firmware: CRobotParams] */
+#define GD32_SCALA_V      (2 * GD32_SCALA_W / GD32_CARREGGIATA) /* unità di v per m/s = tick al metro (~4580) */
+
+/*
  * Codici cmd. Lo stesso codice si usa per la richiesta (SoC -> GD32) e per la risposta (GD32 -> SoC).
  * Nomi dalle funzioni CSerialMessagePacket::packet* di everest-server e AuxCtrl (fase 2, blocco A),
  * oppure dal significato osservato. Formato dei dati e fonti in docs/protocollo.md.
@@ -53,7 +69,7 @@ enum {
 	GD32_FUNZIONI_MACCHINA   = 0x18,  /* packetGetMachineFunctionList, senza dati */
 	GD32_CLIFF_RETROMARCIA   = 0x19,  /* packetCliffBack(bool): retromarcia automatica del GD32 sugli anti-caduta */
 	GD32_TIPO_CONTROLLO      = 0x65,  /* packetMotorControlType, 1 byte */
-	GD32_VELOCITA            = 0x66,  /* packetMotorVelocity: int32 v, int32 omega (tick/s) ogni 20 ms */
+	GD32_VELOCITA            = 0x66,  /* packetMotorVelocity: int32 v, int32 omega (GD32_SCALA_V/W) ogni 20 ms */
 	GD32_VELOCITA_RUOTE      = 0x67,  /* packetMotorSpeed: int32 sinistra, int32 destra (stessa scala di v) */
 	GD32_ASPIRAZIONE         = 0x68,  /* packetBlowerSpeed: int16 = velocità / 10 (everest al massimo 30000) */
 	GD32_SPAZZOLA_LATERALE   = 0x69,  /* packetBrushSpeed, int8 */
@@ -156,7 +172,9 @@ typedef struct {
 	int tensione_dv;            /* byte 8 [V]: tensione della batteria in decimi di volt */
 	int temperatura_c;          /* byte 9 [C] int8: temperatura della batteria in °C (31 a riposo) */
 	int32_t encoder_sx, encoder_dx; /* byte 16 e 24 [V]: contatori assoluti (3616 tick per giro) */
-	int32_t vel_sx, vel_dx;     /* byte 32 e 36 [C]: velocità delle ruote (stessa unità di 0x67, da verificare) */
+	int32_t vel_sx, vel_dx;     /* byte 32 e 36 [V]: NON sono le due ruote, ma v e ω misurati dal GD32 sugli encoder in
+	                               ~70 ms (nomi storici): v = vel_sx / GD32_SCALA_V m/s, ω = vel_dx / GD32_SCALA_W rad/s;
+	                               valgono solo in modalità 02 (quella del driver) */
 	/* IMU [V] (fase 2, blocco D): indice 0 = imbardata (+ antiorario visto dall'alto), 1 = beccheggio (+ naso in giù),
 	   2 = rollio (+ fianco sinistro in giù) */
 	int16_t vel_angolare[3];    /* byte 40, 44, 48: velocità angolare in 0,01 gradi/s */
@@ -169,12 +187,13 @@ typedef struct {
 	                               bit 0, 1, 6 [?] (0x42 di base) */
 	uint8_t led;                /* byte 65 [V]: stato del LED (copia dell'ultimo 0x8d) */
 	uint8_t byte66;             /* byte 66 [C]: everest usa solo i 4 bit bassi */
-	int8_t byte67;              /* byte 67 [C] int8 */
-	uint8_t byte68;             /* byte 68 [C] */
-	int byte69_x100;            /* byte 69 [C]: everest lo moltiplica per 100 */
+	int8_t byte67;              /* byte 67 [V] int8: eco del comando della spazzola laterale */
+	uint8_t byte68;             /* byte 68 [V]: eco della spazzola centrale (100 durante lo sblocco) */
+	int byte69_x100;            /* byte 69 x 100 [V]: giri/min della ventola dell'aspirazione */
 	uint8_t acqua;              /* byte 70 [?]: livello del serbatoio dell'acqua (VacuumTiger), qui assente */
 	uint16_t grezzo72;          /* byte 72 [C] uint16 */
-	uint16_t correnti[6];       /* byte 74..84 [C] uint16 (everest divide per 1000): correnti dei motori [?] */
+	uint16_t correnti[6];       /* byte 74..84 [V] uint16, mA: 0 ruota sx, 1 ruota dx, 2 spazzola laterale, 3 spazzola
+	                               centrale (~58 a riposo), 4 aspirazione (~14 a riposo); 5 (byte 84) [?] sempre 2-3 */
 	int16_t byte88;             /* byte 88 [C]: everest guarda solo se > 0 (costante 0x1903) */
 	int16_t magnetico[3];       /* byte 90, 92, 94 [V]: copia delle velocità angolari (stessi valori), non un magnetometro */
 } gd32_sensori_t;

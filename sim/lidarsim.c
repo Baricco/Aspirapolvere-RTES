@@ -98,8 +98,10 @@ static void settore(lidarsim_t *l, const mondo_t *m, double t, int s, double x, 
 	double lx = x + LIDAR_X * cos(dir) - LIDAR_Y * sin(dir), ly = y + LIDAR_X * sin(dir) + LIDAR_Y * cos(dir);
 	for (int i = 0; i < n; i++) {
 		double a_letto = (inizio + i * 2250.0 / n) / 100.0;           /* gradi, come li riporta il lidar */
-		double ang = dir + M_PI + (a_letto - l->scarto_gradi) * M_PI / 180;   /* 0° del lidar = dietro */
-		double d = mondo_raggio(m, lx, ly, ang, LIDAR_ALTEZZA, par.lidar_portata);
+		double ang = dir + M_PI - (a_letto - l->scarto_gradi) * M_PI / 180;   /* 0° del lidar = dietro, orario */
+		/* triangolatore: il raggio misurato parte LIDAR_OTTICO a destra del centro di rotazione */
+		double ox = lx + LIDAR_OTTICO * sin(ang), oy = ly - LIDAR_OTTICO * cos(ang);
+		double d = mondo_raggio(m, ox, oy, ang, LIDAR_ALTEZZA, par.lidar_portata);
 		int intensita = 0, quarti = 0;
 		int eco = d >= DIST_MIN && d <= par.lidar_portata;
 		if (eco && d < 2.0 && sim_caso(&l->seme) < par.lidar_buchi)
@@ -111,8 +113,8 @@ static void settore(lidarsim_t *l, const mondo_t *m, double t, int s, double x, 
 			if (intensita < 10) intensita = 10;
 			if (intensita > 255) intensita = 255;
 			if (l->n_corrente < LIDARSIM_MAX_PUNTI) {
-				l->cor_x[l->n_corrente] = (float)(lx + d * cos(ang));
-				l->cor_y[l->n_corrente] = (float)(ly + d * sin(ang));
+				l->cor_x[l->n_corrente] = (float)(ox + d * cos(ang));
+				l->cor_y[l->n_corrente] = (float)(oy + d * sin(ang));
 				l->n_corrente++;
 			}
 		}
