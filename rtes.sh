@@ -18,7 +18,13 @@ Uso: ./rtes.sh <comando> [argomenti]
   build                     compila tutto per il robot (ARM, statico) in build/arm/
   deploy <prog> [arg...]    copia build/arm/<prog> in $DIR_ROBOT sul robot e lo esegue
   scarica <file> [dest]     copia un file dal robot (es. un CSV) in dest (default build/robot/)
-  sim                       esegue i task nel simulatore
+  sim [stanza] [prog arg...] simulatore + pagina (http://localhost:8080) + il driver da tastiera (rtes-driver),
+                            oppure il TUO programma: le seriali sono in RTES_GD32 e RTES_LIDAR (drv_config_default)
+                            es. ./rtes.sh sim sim/stanze/soggiorno.txt build/host/mio-programma
+  sim-solo [stanza] [opz]   solo il simulatore e la pagina (opzioni in sim/sim.c, es. --porta 8081)
+  valida-sim [c2 c2b c3 c1] confronta il simulatore con le registrazioni del robot (build/robot/fase2)
+  taratura                  ricalcola sim/parametri.txt dalle registrazioni (tools/taratura/tara.py)
+  prova-pagina              prova automatica della pagina del simulatore (serve Brave o Chromium)
   install / uninstall       installa o rimuove la versione persistente con avvio sicuro
   ssh [comando]             apre una shell sul robot (o esegue un comando)
 EOF
@@ -52,7 +58,31 @@ case "${1:-}" in
     mkdir -p "$dest"
     robot "cat '$remoto'" > "$dest/$(basename "$remoto")"
     echo "salvato $dest/$(basename "$remoto")" ;;
-  sim)       da_fare sim "simulatore" ;;
+  sim|sim-solo)
+    quale=$1; shift
+    stanza=sim/stanze/soggiorno.txt
+    if [ $# -gt 0 ] && [ -f "$1" ] && [[ $1 == *.txt ]]; then stanza=$1; shift; fi
+    make --no-print-directory build/host/sim build/host/rtes-driver
+    if [ "$quale" = sim-solo ]; then exec build/host/sim --stampa "$@" "$stanza"; fi
+    build/host/sim "$stanza" > build/sim.log 2>&1 &
+    pid_sim=$!
+    trap 'kill $pid_sim 2>/dev/null; wait $pid_sim 2>/dev/null' EXIT
+    for _ in $(seq 50); do [ -e build/sim/lidar ] && break; sleep 0.1; done
+    kill -0 $pid_sim 2>/dev/null || { cat build/sim.log; exit 1; }
+    echo "== simulatore: $stanza, pagina http://localhost:8080 (registro in build/sim.log)"
+    export RTES_GD32=build/sim/gd32 RTES_LIDAR=build/sim/lidar
+    # come sul robot: 4 core (0-3), così affinità e priorità dei task si comportano allo stesso modo
+    core=(); command -v taskset >/dev/null && core=(taskset -c 0-3)
+    if [ $# -gt 0 ]; then
+      echo "== avvio $* sui core 0-3 (RTES_GD32=$RTES_GD32, RTES_LIDAR=$RTES_LIDAR)"
+      "${core[@]}" "$@"
+    else
+      echo "== rtes-driver: scrivi i comandi (v 0.1 0, stop, lidar 1, spazzole 0 30, led 3, fine...)"
+      "${core[@]}" build/host/rtes-driver --senza-rt
+    fi ;;
+  valida-sim) shift; make --no-print-directory build/host/sim; exec python3 tools/valida-sim.py "$@" ;;
+  taratura)  python3 tools/taratura/tara.py > sim/parametri.txt && echo "scritto sim/parametri.txt" ;;
+  prova-pagina) shift; make --no-print-directory build/host/sim; exec node tools/prova-pagina.mjs "$@" ;;
   install)   da_fare install "fase 5" ;;
   uninstall) da_fare uninstall "fase 5" ;;
   ssh)       shift; exec "$SSH_ROBOT" "$@" ;;

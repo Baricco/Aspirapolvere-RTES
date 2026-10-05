@@ -1,0 +1,40 @@
+# Parametri del simulatore ricavati dalle registrazioni del robot (tools/taratura/tara.py).
+# Formato: chiave = valore    # fonte. Il simulatore li legge all'avvio (sim/parametri.c).
+gd32_periodo_ms = 20.00056    # sessione d, 47877 frame
+arrivo_probabilita = 0 0.01 0.05 0.1 0.25 0.5 0.75 0.9 0.95 0.99 0.999 0.9999 1    # quantili della distribuzione qui sotto
+arrivo_ritardo_ms = 0.000 0.293 0.324 0.329 0.334 0.342 0.352 0.361 0.365 0.375 0.407 0.800 5.000    # sessione d (spia guida, lidar acceso) + coda fino a 5 ms vista dal driver in fase 3 (r7)
+ruote_ritardo_ms = 29    # c2/c2b: dal gradino al 10% della risposta, meno un frame
+ruote_rampa_v = 16584 16761    # c2/c2b: tick/s² per ruota, accelerando e rallentando (SOLLEVATO: a terra [?])
+ruote_rampa_w = 2214 2223    # c2/c2b: idem per la rotazione (il GD32 frena piano in rotazione)
+ruote_finestra_misura_ms = 70    # v e omega dei byte 32/36: passi di ~7 unità = 0,5 tick / 70 ms (c2)
+ruote_corrente_base_ma = 64    # mediana in movimento, robot sollevato (c2)
+ruote_corrente_picchi_ma = 290    # 90° percentile: picchi sparsi (c2)
+ruote_corrente_avvio_ma = 772    # picco alla partenza (c2/c2b)
+ruote_timeout_heartbeat_s = 2.04    # c2b: senza 0x06 il GD32 toglie potenza ai motori dopo...
+ruote_inerzia = 1879    # c2b: decelerazione delle ruote senza potenza (si fermano da sole), tick/s²
+imu_deriva_gradi_s = -0.000083    # c8scarica: 5 h fermo, pendenza dell'angolo di imbardata
+imu_rumore_velocita = 0.5    # 0,01 °/s: a riposo 0 o +-1 (c8scarica)
+imu_beccheggio = -55    # 0,01°, robot fermo a terra (c8scarica)
+imu_rollio = 38    # 0,01°, robot fermo a terra (c8scarica)
+corrente_riposo_laterale_ma = 2    # byte 78 a riposo (c8scarica)
+corrente_riposo_centrale_ma = 58    # byte 80 a riposo (c8scarica)
+corrente_riposo_aspirazione_ma = 14    # byte 82 a riposo (c8scarica)
+byte84_riposo = 2    # byte 84 a riposo (c8scarica)
+temperatura_c = 33    # c8scarica (32-34 °C)
+frame_riposo = 0100000f04000000a21f0000000000009037000000000000cd3800000000000000000000000000000000000000000b000000dbff000000006400000000000000e20c00000000000000000000000002003b000d00020000000319000000000000    # byte più frequenti di 2000 frame veri (sessione d)
+lidar_giri_per_potenza = 0.0856 0.167    # c1: giri/s = a x potenza + b (regime a 40..80)
+lidar_tau_salita_s = 0.18    # c1: 63% del salto di velocità
+lidar_tau_discesa_s = 0.24    # c1: 63% della discesa con potenza > 0
+lidar_tau_spento_s = 0.54    # c1: potenza 0, il rotore rallenta da solo
+lidar_misure_al_secondo = 2037    # c1: punti per giro x giri/s
+lidar_rumore_mm = 7.2 6.6 6.8 8.8 12.3 16.3 36.8    # c1: deviazione standard per 0-1, 1-2, ... 6+ m (stesso angolo, giri consecutivi)
+lidar_buchi_isolati = 0.0229    # c1: punto senza eco fra due vicini validi, sotto 2 m
+lidar_intensita = 131 35    # c1: media e deviazione standard
+lidar_portata_m = 8.37    # c1: distanza massima misurata nella stanza
+centrale_corrente_accesa_ma = 202    # c3/spazzola: comandi [30, 60]
+centrale_corrente_sblocco_ma = 617    # c3/spazzola: comando negativo (sblocco)
+aspirazione_giri_per_pwm = 219    # c3/c3b: giri/min per punto di PWM
+aspirazione_corrente_max = 1878 18200    # c3: corrente (mA) ai giri/min indicati
+aspirazione_esponente = 2.27    # c3: corrente - 14 mA proporzionale a giri^esponente
+batteria_capacita_utile_ah = 2.45    # c8scarica: 15,9->14,0 V in 4.79 h a ~0.45 A stimati [?]
+batteria_capacita_totale_ah = 3.2    # scheda tecnica (3200 mAh): sotto 13,8 V c'è la riserva fino alla protezione

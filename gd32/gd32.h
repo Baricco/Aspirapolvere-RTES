@@ -165,7 +165,8 @@ typedef struct {
 	int tasto_accensione_ms;    /* byte 58 [V]: durata della pressione (uint16 x 10 ms) */
 	int tasto_punto_ms;         /* byte 60 [C]: tasto "punto", assente su questo modello */
 	int tasto_casa_ms;          /* byte 62 [V] */
-	uint8_t controllo;          /* byte 64 [V]: bit 5 = sensori alimentati (0x9d); bit 0 e 1 [?] */
+	uint8_t controllo;          /* byte 64 [V]: bit 5 = sensori alimentati (0x9d), bit 7 = lidar alimentato (0x97);
+	                               bit 0, 1, 6 [?] (0x42 di base) */
 	uint8_t led;                /* byte 65 [V]: stato del LED (copia dell'ultimo 0x8d) */
 	uint8_t byte66;             /* byte 66 [C]: everest usa solo i 4 bit bassi */
 	int8_t byte67;              /* byte 67 [C] int8 */

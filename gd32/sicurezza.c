@@ -8,6 +8,12 @@ void sic_init(sicurezza_t *s, int sollevato, int64_t max_eta_ns)
 	memset(s, 0, sizeof(*s));
 	s->sollevato = sollevato;
 	s->max_eta_ns = max_eta_ns;
+	s->cliff_atteso = GD32_CLIFF_TUTTI_VUOTO;
+}
+
+void sic_cliff_atteso(sicurezza_t *s, uint8_t cliff)
+{
+	s->cliff_atteso = cliff & 0x0f;
 }
 
 int sic_e_motore(uint8_t cmd)
@@ -42,10 +48,11 @@ static int scatta(sicurezza_t *s, const char *motivo, int64_t adesso)
 	return 1;
 }
 
-/* Il frame dice "sollevato": anti-caduta tutti su vuoto, sensori alimentati, robot non sulla base. */
-static int frame_sollevato(const uint8_t *d)
+/* Il frame dice "sollevato": anti-caduta come atteso (di regola tutti su vuoto), sensori alimentati, robot non
+ * sulla base. */
+static int frame_sollevato(const sicurezza_t *s, const uint8_t *d)
 {
-	return d[3] == GD32_CLIFF_TUTTI_VUOTO && (d[64] & GD32_CONTROLLO_SENSORI_ACCESI) && (d[7] & 3) == 0;
+	return (d[3] & 0x0f) == s->cliff_atteso && (d[64] & GD32_CONTROLLO_SENSORI_ACCESI) && (d[7] & 3) == 0;
 }
 
 int sic_ricevuto(sicurezza_t *s, const gd32_frame_t *f, int64_t adesso)
@@ -54,7 +61,7 @@ int sic_ricevuto(sicurezza_t *s, const gd32_frame_t *f, int64_t adesso)
 		return 0;
 	s->ha_sensori = 1;
 	s->cliff = f->dati[3];
-	s->sollevato_ora = frame_sollevato(f->dati);
+	s->sollevato_ora = frame_sollevato(s, f->dati);
 	s->ultimo_sensori = adesso;
 	if (s->sollevato_ora) {
 		s->visto_vuoto = 1;
@@ -112,4 +119,42 @@ size_t sic_frame_arresto(uint8_t *out, size_t dim)
 		tot += k;
 	}
 	return tot;
+}
+
+int sic_terra_limita(const gd32_sensori_t *s, int uscita_base, int32_t *v_tick, int32_t *w_tick)
+{
+	/* limiti per uscire dalla base: 0,1 m/s e 0,5 rad/s nelle unità di 0x66 */
+	const int32_t V_BASE = 1656, W_BASE = 1000;
+	int sensori = (s->controllo & GD32_CONTROLLO_SENSORI_ACCESI) != 0;
+	int cliff = s->cliff[0] | s->cliff[1] | s->cliff[2] | s->cliff[3];
+	int tutti_vuoto = s->cliff[0] & s->cliff[1] & s->cliff[2] & s->cliff[3];
+	int motivi = 0;
+
+	if (s->sulla_base) {
+		motivi |= SIC_LIM_BASE;
+		if (!uscita_base) {
+			*v_tick = *w_tick = 0;
+			return motivi;
+		}
+		if (*v_tick > V_BASE) *v_tick = V_BASE;
+		if (*v_tick < -V_BASE) *v_tick = -V_BASE;
+		if (*w_tick > W_BASE) *w_tick = W_BASE;
+		if (*w_tick < -W_BASE) *w_tick = -W_BASE;
+		return motivi;      /* sulla base anti-caduta e bumper non dicono niente (0f, sensori spenti) */
+	}
+	if (sensori && tutti_vuoto) {
+		*v_tick = *w_tick = 0;
+		return SIC_LIM_SOLLEVATO;
+	}
+	if (!sensori)
+		motivi |= SIC_LIM_SENSORI;
+	else {
+		if (s->bumper_sx || s->bumper_dx)
+			motivi |= SIC_LIM_BUMPER;
+		if (cliff)
+			motivi |= SIC_LIM_CLIFF;
+	}
+	if (motivi && *v_tick > 0)
+		*v_tick = 0;
+	return motivi;
 }

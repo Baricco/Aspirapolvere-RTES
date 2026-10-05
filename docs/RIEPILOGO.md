@@ -52,6 +52,7 @@ direttamente al SoC su `/dev/ttyS1`, ma il suo motore lo comanda il GD32.
 | Bumper sinistro / destro | GD32 → frame sensori | byte 1: sx = bit 2\|3, dx = bit 1\|0 (1 = premuto); con i sensori spenti leggono "premuti" | [verificato] |
 | 4 anti-caduta | GD32 | byte 3: bit 0 sx laterale, 1 sx anteriore, 2 dx anteriore, 3 dx laterale (1 = nessun pavimento). Sulla base leggono `0f` | [verificato] |
 | Sensori alimentati | GD32 | byte 64 bit 5 (comando `0x9d`) | [verificato] |
+| Lidar alimentato | GD32 | byte 64 bit 7 (comando `0x97`): `0xE2` con il lidar acceso, `0x62` spento | [verificato, registrazione c1] |
 | Cassetto della polvere | GD32 | byte 4, bit 2 (1 = presente) | [verificato] |
 | Tasto accensione / casa | GD32 | uint16 ai byte 58 / 62 × 10 = durata della pressione in ms | [verificato] |
 | Encoder ruota sinistra / destra | GD32 | int32 ai byte 16 / 24; in avanti aumentano | [verificato] |
@@ -245,3 +246,23 @@ poi i dati.
 | 605 | AuxCtrl → everest | scansioni del lidar elaborate | con il lidar acceso |
 | 606 | entrambe | controllo del lidar | ai cambi |
 | 607 | everest → AuxCtrl | stato di sospensione | ai cambi |
+
+---
+
+## 4. Il nostro software (fase 3, notte del 4-5/10; diario in `fase3.md`, uso in `GUIDA.md` sezioni 11–13)
+
+```
+GD32 ⇄ /dev/ttyS3 ⇄ driver (2 thread su CPU0: tempo 99, ricezione 98) ⇄ dati senza mutex / comandi atomici ⇄ task (CPU1–3, RM)
+lidar → /dev/ttyS1 ↗
+```
+- Il driver sostituisce AuxCtrl e la parte di everest-server che guida il GD32: sequenza di avvio, keepalive `0x0d`
+  (3 s), heartbeat `0x06` (200 ms), `0x66` ogni 20 ms, sensori pubblicati a 50 Hz con sveglia dei task, lidar regolato
+  a 6 giri/s (potenza ~68, come AuxCtrl) con giri completi, batteria (bassa 14,2 V, critica 13,8 V), sensori spenti
+  sulla base (`0x9d`), limiti del moto a terra (bumper, vuoto, sollevato, base), watchdog dei task, stato di guasto
+  (motori fermi, LED 8, `sound_erro_harefault`).
+- Verificato sul robot senza motori: pronto in 0,23 s, 50,0 Hz senza frame errati, ritardo del ciclo da 20 ms
+  < 160 µs, task svegliato dai sensori con latenza < 100 µs, guasto 0,1 s dopo il blocco di un task critico.
+- Il simulatore (`sim/`) riproduce GD32 e lidar sulle seriali; le parti NON misurate sono elencate in `GUIDA.md`
+  sezione 12.
+- Volume del suono di accensione: `volume=1` in `device_config.ini` (dal disassemblato di RobotApp: volume 1 → mixer
+  ~36–40 su 63, volume 10 → ~50–54). Effetto da verificare al prossimo riavvio.

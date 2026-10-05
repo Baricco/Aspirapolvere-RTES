@@ -8,6 +8,7 @@
 #define _GNU_SOURCE   /* per sched_getcpu */
 #include <errno.h>
 #include <sched.h>
+#include <stdatomic.h>
 #include <string.h>
 
 #include "test.h"
@@ -140,6 +141,85 @@ static void mutex_priority_inheritance(void)
 	pthread_mutex_destroy(&m);
 }
 
+/* ---- fase 3: task sporadici, watchdog, priorità Rate Monotonic ---- */
+
+static atomic_int blocca_sporadico;
+
+static void job_sporadico(void *arg)
+{
+	(void)arg;
+	contatore++;
+	while (atomic_load(&blocca_sporadico))
+		rt_dormi_fino_a(rt_adesso() + RT_MS(1));
+}
+
+static void task_sporadici(void)
+{
+	contatore = 0;
+	atomic_store(&blocca_sporadico, 0);
+	rt_task_cfg_t c = { .nome = "sporadico", .priorita = 50, .cpu = RT_CPU_QUALSIASI, .sporadico = 1,
+	                    .periodo_ns = RT_MS(20), .job = job_sporadico };
+	rt_task_t t;
+	CONTROLLA(rt_task_avvia(&t, &c, rt_adesso()) == 0);
+	rt_dormi_fino_a(rt_adesso() + RT_MS(20));
+	CONTROLLA(contatore == 0);                         /* senza sveglie non gira */
+	for (int i = 0; i < 5; i++) {
+		CONTROLLA(rt_task_sveglia(&t, rt_adesso()) == 1);
+		rt_dormi_fino_a(rt_adesso() + RT_MS(5));
+	}
+	CONTROLLA(contatore == 5);
+	CONTROLLA(t.stats.job == 5 && t.stats.latenza_max_ns < RT_MS(5));
+	CONTROLLA(!rt_task_bloccato(&t, rt_adesso(), RT_MS(10)));
+
+	/* il job si blocca: la prima sveglia durante il job si accoda, la seconda si perde */
+	atomic_store(&blocca_sporadico, 1);
+	rt_task_sveglia(&t, rt_adesso());
+	rt_dormi_fino_a(rt_adesso() + RT_MS(5));         /* il job è partito ed è bloccato */
+	CONTROLLA(rt_task_sveglia(&t, rt_adesso()) == 1);
+	CONTROLLA(rt_task_sveglia(&t, rt_adesso()) == 0);
+	CONTROLLA(atomic_load(&t.attivazioni_perse) == 1);
+	rt_dormi_fino_a(rt_adesso() + RT_MS(30));
+	CONTROLLA(rt_task_bloccato(&t, rt_adesso(), RT_MS(20)));        /* il watchdog lo vede */
+	atomic_store(&blocca_sporadico, 0);
+	rt_dormi_fino_a(rt_adesso() + RT_MS(10));
+	CONTROLLA(contatore == 7);                         /* il job bloccato e quello accodato */
+	CONTROLLA(atomic_load(&t.mancate_totali) >= 1);    /* il job bloccato ha sforato i 20 ms */
+	CONTROLLA(!rt_task_bloccato(&t, rt_adesso(), RT_MS(20)));
+	rt_task_ferma(&t);                                 /* deve svegliarlo anche mentre aspetta */
+	CONTROLLA(!t.attivo);
+}
+
+static void bloccato_periodico(void)
+{
+	atomic_store(&blocca_sporadico, 0);
+	rt_task_cfg_t c = { .nome = "periodico", .priorita = 50, .cpu = RT_CPU_QUALSIASI, .periodo_ns = RT_MS(10),
+	                    .job = job_sporadico };
+	rt_task_t t;
+	CONTROLLA(rt_task_avvia(&t, &c, rt_adesso()) == 0);
+	rt_dormi_fino_a(rt_adesso() + RT_MS(35));
+	CONTROLLA(!rt_task_bloccato(&t, rt_adesso(), RT_MS(15)));
+	atomic_store(&blocca_sporadico, 1);
+	rt_dormi_fino_a(rt_adesso() + RT_MS(50));
+	CONTROLLA(rt_task_bloccato(&t, rt_adesso(), RT_MS(15)));
+	CONTROLLA(atomic_load(&t.mancate_di_fila) == 0);  /* il job bloccato non è ancora finito: non è ancora contato */
+	atomic_store(&blocca_sporadico, 0);
+	rt_dormi_fino_a(rt_adesso() + RT_MS(30));
+	CONTROLLA(!rt_task_bloccato(&t, rt_adesso(), RT_MS(15)));
+	rt_task_ferma(&t);
+}
+
+static void priorita_rate_monotonic(void)
+{
+	rt_task_cfg_t a = { .periodo_ns = RT_MS(20) }, b = { .periodo_ns = RT_MS(200) }, c = { .periodo_ns = RT_MS(20) },
+	              d = { .periodo_ns = RT_MS(500) }, e = { .periodo_ns = RT_MS(100) };
+	rt_task_cfg_t *v[] = { &b, &a, &d, &c, &e };
+	CONTROLLA(rt_priorita_rm(v, 5, RT_PRIO_TASK_MAX) == 0);
+	CONTROLLA(a.priorita == 90 && c.priorita == 90);   /* periodi uguali: stessa priorità */
+	CONTROLLA(e.priorita == 89 && b.priorita == 88 && d.priorita == 87);
+	CONTROLLA(rt_priorita_rm(v, 5, 3) == EINVAL);      /* 4 periodi diversi non stanno in 3..1 */
+	CONTROLLA(rt_priorita_rm(v, 0, 90) == 0);
+}
+
 int main(void)
 {
 	/* Come nei programmi veri: memoria bloccata in RAM prima di creare i task.
@@ -150,6 +230,7 @@ int main(void)
 
 	ESEGUI(config_non_valide);
 	ESEGUI(mutex_priority_inheritance);
+	ESEGUI(priorita_rate_monotonic);
 
 	/* Prova a creare un task: se manca il permesso, salta il resto. */
 	rt_task_cfg_t prova = { .priorita = 1, .cpu = RT_CPU_QUALSIASI, .periodo_ns = RT_MS(1),
@@ -165,6 +246,8 @@ int main(void)
 		ESEGUI(conta_le_deadline_mancate);
 		ESEGUI(salva_i_campioni);
 		ESEGUI(ferma_un_task_infinito);
+		ESEGUI(task_sporadici);
+		ESEGUI(bloccato_periodico);
 	} else {
 		printf("  SALTATI i test con task SCHED_FIFO: %s (servono root o ulimit -r > 0)\n", strerror(r));
 	}

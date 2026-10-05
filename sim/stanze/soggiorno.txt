@@ -1,0 +1,20 @@
+# soggiorno di 6 x 3,9 m (formato in sim/mondo.h): divano, tavolo con 4 gambe, pianta, muretto, mobile,
+# credenza rialzata (il robot si incastra con la torretta: niente bumper), scala nel vuoto, base in basso a sinistra
+stanza nome=soggiorno larghezza=6 profondita=3.9
+robot x=0.8 y=2.5 angolo=-90
+base x=0.6 y=0.22 angolo=90
+muro da=0,0.05 a=6,0.05 spessore=0.1
+muro da=0,3.85 a=6,3.85 spessore=0.1
+muro da=0.05,0.1 a=0.05,3.8 spessore=0.1
+muro da=5.95,0.1 a=5.95,3.8 spessore=0.1
+rettangolo nome=divano x=1.15 y=3.4 larghezza=2.1 profondita=0.8 angolo=0 quota_da=0 quota_a=0.45
+rettangolo nome=piano x=3.9 y=2.05 larghezza=1 profondita=0.8 angolo=0 quota_da=0.72 quota_a=0.75 gruppo=tavolo
+cerchio nome=gamba x=3.45 y=1.7 raggio=0.025 quota_da=0 quota_a=0.72 gruppo=tavolo
+cerchio nome=gamba x=4.35 y=1.7 raggio=0.025 quota_da=0 quota_a=0.72 gruppo=tavolo
+cerchio nome=gamba x=3.45 y=2.4 raggio=0.025 quota_da=0 quota_a=0.72 gruppo=tavolo
+cerchio nome=gamba x=4.35 y=2.4 raggio=0.025 quota_da=0 quota_a=0.72 gruppo=tavolo
+cerchio nome=pianta x=1.15 y=1.15 raggio=0.15 quota_da=0 quota_a=1.2
+rettangolo nome=muretto x=2.65 y=0.65 larghezza=0.1 profondita=1.1 angolo=0 quota_da=0 quota_a=1
+rettangolo nome=mobile x=5.7 y=3.55 larghezza=0.4 profondita=0.5 angolo=0 quota_da=0 quota_a=0.9
+rettangolo nome=credenza x=5.35 y=2.7 larghezza=1.1 profondita=0.6 angolo=0 quota_da=0.09 quota_a=0.4
+vuoto nome=scala punti=5,0.1 5.9,0.1 5.9,0.9 5,0.9

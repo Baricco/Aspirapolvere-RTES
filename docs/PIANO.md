@@ -9,15 +9,19 @@ I task dell'esame li scrive l'utente da solo, sopra un framework e un driver pre
 - **Linux resta il sistema operativo** (kernel 3.4.39 `SMP PREEMPT`, non RT): niente cambio di OS né di kernel.
   Niente `SCHED_DEADLINE` (il kernel 3.4 non lo ha).
 - **Ogni task RT** usa `mlockall()` e risvegli ad istanti assoluti (`clock_nanosleep(TIMER_ABSTIME)` o equivalente).
-- **Sviluppo anche senza robot:** HAL con due backend, robot e simulatore, più unit test.
+- **Sviluppo anche senza robot:** simulatore **a livello di seriali** (`sim/`, fase 3): finge di essere il GD32 e il lidar
+  su due pseudo-seriali, quindi driver e task girano sul PC senza cambiare una riga (niente HAL separata). Stanza
+  disegnabile da una pagina web. Più unit test e prove d'insieme. La prova finale si fa sempre sul robot.
 - **Repository git** `Aspirapolvere-RTES`, privata su GitHub, senza GitHub Actions. `./rtes.sh test` prima di ogni
   commit.
 - **Persistenza senza flash:** binari in `/mnt/UDISK/rt/`, script in `/etc/init.d/` (overlay ext4).
 - **All'accensione, a lavoro finito, parte il nostro software**, con interruttore di sicurezza
   (`/mnt/UDISK/rt/enable`) e ritorno allo stack originale se il nostro non parte.
 - **Gestione della batteria nel driver:** il driver espone tensione, temperatura, stato di carica e la percentuale
-  stimata dalla curva di scarica (il GD32 non dà la corrente); le soglie di sicurezza (fermare i motori, LED 6) stanno
-  nel driver; i task usano solo i valori.
+  stimata come il software originale (il GD32 non dà la corrente); le soglie di sicurezza (fermare i motori, LED 6)
+  stanno nel driver; i task usano solo i valori.
+- **Quando non gira un nostro programma** gira il custode (keepalive e heartbeat al GD32, motori a zero): il robot non
+  si resetta e sulla base si carica. A progetto finito sul robot resta installato il nostro software.
 - **Robustezza:** stato sicuro all'avvio (motori, spazzole, aspirazione a zero prima di tutto), watchdog dei task
   (se un task critico salta le scadenze o non risponde, tutti i motori si fermano) e **stato di guasto ben
   riconoscibile** (colore del LED + suono dall'altoparlante). Il rilancio automatico del programma si aggiunge in
@@ -74,9 +78,13 @@ lidar → /dev/ttyS1 → AuxCtrl
    `gd32/sicurezza.h`), prove su lidar, ruote, spazzole, aspirazione, carica, LED, audio, IMU, anti-caduta, IR della
    base. Aperti: carica ferma a 16,3 V (batteria degradata?), curva di scarica, scarto di ~8° del lidar.
    `docs/fase2.md`, `docs/RIEPILOGO.md`.
-3. **Driver e framework RT** (insieme, PROSSIMA) — il nostro driver al posto di AuxCtrl + parte di everest-server (keepalive,
-   avvio, sensori decodificati, attuatori, lidar, audio, batteria, stato sicuro, stato di guasto); scelta e
-   preparazione del framework RT (vedi "Ancora da decidere"), con esempi e guida.
+3. **Driver, framework RT e simulatore** — QUASI FATTA (notte del 4-5/10, `docs/fase3.md`). Driver (`driver/`: avvio,
+   keepalive, heartbeat, sensori, lidar regolato, batteria, limiti di sicurezza "a terra", watchdog dei task, stato di
+   guasto con LED 8 e suono), framework (`rt/`: task sporadici, watchdog, priorità RM), simulatore con pagina web,
+   guida (`GUIDA.md` sezioni 11–13). Provato sul robot **senza motori** (0 scadenze mancate, ritardo del ciclo
+   < 160 µs, poi < 110 µs con il driver a due thread). Il 5/10 il simulatore è diventato fedele: geometria vera, dinamica
+   tarata sulle registrazioni e validata contro di esse, stanza a oggetti con editor, ispettore dei messaggi. Manca, con
+   l'utente: ruote e spazzole attraverso il driver, a terra e sollevato, e le verifiche elencate in `fase3.md`.
 4. **Task RT** (utente, da solo) — sicurezza, controllo del moto, lidar, comportamento, watchdog dei task, mappatura
    in hard RT; WCET, jitter, analisi di schedulabilità.
 5. **App e server aperiodico** (insieme) — scelta del tipo di app e del server; comandi e telemetria.
@@ -108,4 +116,6 @@ batteria, watchdog dei task + stato di guasto (~50 ms).
 | `deploy` | copia il binario in `/tmp/rtes` sul robot e lo avvia (solo in RAM) |
 | `scarica` | copia un file dal robot |
 | `ssh` | apre una shell sul robot |
-| `sim`, `install`, `uninstall` | da fare |
+| `sim [stanza] [programma]` | simulatore + pagina web (http://localhost:8080) + `rtes-driver` o il tuo programma |
+| `sim-solo [stanza]` | solo simulatore e pagina |
+| `install`, `uninstall` | da fare (fase 6) |

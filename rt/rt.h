@@ -45,6 +45,11 @@
 #define RT_PRIO_MAX 99
 #define RT_CPU_QUALSIASI (-1)
 
+/* Convenzione del progetto (docs/PIANO.md): il driver sta a 99, fuori dallo scheduling dei task; i task usano le
+ * priorità da RT_PRIO_TASK_MAX in giù (rt_priorita_rm le assegna con Rate Monotonic). */
+#define RT_PRIO_DRIVER   99
+#define RT_PRIO_TASK_MAX 90
+
 /* Stack di ogni task, come lo usStackDepth di xTaskCreate in FreeRTOS.
  * Va dichiarato esplicitamente: il default di glibc è 8 MB per thread e,
  * con mlockall, ogni byte di stack resta bloccato in RAM. */
@@ -60,6 +65,13 @@ typedef struct {
 	const char *nome;
 	int priorita;            /* SCHED_FIFO, RT_PRIO_MIN..RT_PRIO_MAX */
 	int cpu;                 /* core a cui fissare il task, o RT_CPU_QUALSIASI */
+	/*
+	 * Task periodico (sporadico = 0): un job ogni periodo_ns, a istanti fissi.
+	 * Task sporadico (sporadico = 1): un job per ogni rt_task_sveglia() (es. a ogni frame dei sensori, vedi
+	 * drv_sveglia_ai_sensori). periodo_ns è allora l'intervallo MINIMO fra due attivazioni: è il T da usare
+	 * nell'analisi e nell'assegnazione delle priorità; il rilascio di ogni job è l'istante della sveglia.
+	 */
+	int sporadico;
 	int64_t periodo_ns;      /* > 0 */
 	int64_t deadline_ns;     /* deadline relativa; 0 = uguale al periodo */
 	int64_t fase_ns;         /* ritardo del primo rilascio rispetto all'istante zero */
@@ -93,7 +105,19 @@ typedef struct {
 	sem_t avviato;      /* il thread segnala qui l'esito della sua configurazione */
 	int errore_avvio;   /* 0 oppure un codice errno */
 	int attivo;
+	int senza_rt;       /* partito senza SCHED_FIFO (solo sul PC, vedi rt_consenti_senza_privilegi) */
 	rt_stats_t stats;
+
+	/* Task sporadici: la sveglia e l'istante dell'attivazione non ancora servita (0 = nessuna). */
+	sem_t sveglia;
+	_Atomic int64_t rilascio_pendente_ns;
+	_Atomic uint64_t attivazioni_perse;     /* sveglie arrivate mentre la precedente non era ancora partita */
+
+	/* Per il watchdog del driver (letti da un altro thread mentre il task gira, quindi atomici). */
+	_Atomic int64_t battito_ns;             /* fine dell'ultimo job (all'avvio: il primo rilascio) */
+	_Atomic int64_t job_iniziato_ns;        /* inizio del job in corso, 0 se il task aspetta */
+	_Atomic uint64_t mancate_di_fila;       /* deadline mancate consecutive */
+	_Atomic uint64_t mancate_totali;
 } rt_task_t;
 
 /*
@@ -122,6 +146,36 @@ void rt_task_attendi(rt_task_t *t);
 
 /* Stampa le statistiche del task su stdout, in microsecondi. */
 void rt_stats_stampa(const rt_task_t *t);
+
+/*
+ * Attiva un task sporadico: il suo prossimo job viene rilasciato all'istante `rilascio_ns` (di solito adesso).
+ * Non si blocca mai (si può chiamare dal driver). Se l'attivazione precedente non è ancora partita, questa va
+ * persa: si conta in attivazioni_perse e la funzione ritorna 0; altrimenti ritorna 1.
+ */
+int rt_task_sveglia(rt_task_t *t, int64_t rilascio_ns);
+
+/*
+ * Per il watchdog: 1 se il task sembra bloccato all'istante `adesso`, cioè se da più di `soglia_ns`
+ *   - un suo job è iniziato e non è ancora finito, oppure
+ *   - (sporadico) un'attivazione aspetta e il job non è partito, oppure
+ *   - (periodico) non finisce un job (oltre al suo periodo).
+ */
+int rt_task_bloccato(rt_task_t *t, int64_t adesso, int64_t soglia_ns);
+
+/*
+ * Assegna le priorità con Rate Monotonic: periodo (o intervallo minimo) più corto = priorità più alta.
+ * Il task più frequente riceve prio_max, gli altri scendono di 1 a ogni periodo diverso; periodi uguali hanno la
+ * stessa priorità. Ritorna 0, oppure EINVAL se le priorità scenderebbero sotto RT_PRIO_MIN.
+ * L'analisi di schedulabilità (fattore di utilizzo, tempi di risposta) resta a chi scrive i task.
+ */
+int rt_priorita_rm(rt_task_cfg_t *cfg[], int n, int prio_max);
+
+/*
+ * Sul PC, senza i permessi per SCHED_FIFO, rt_task_avvia fallirebbe con EPERM. Con si = 1 invece fa partire il
+ * thread con lo scheduling normale (t->senza_rt = 1) e lo scrive una volta su stderr. Utile solo per provare la
+ * LOGICA nel simulatore: i tempi non valgono niente. Sul robot non serve (si gira da root).
+ */
+void rt_consenti_senza_privilegi(int si);
 
 /*
  * Inizializza un mutex con priority inheritance: se un task a bassa

@@ -1255,7 +1255,7 @@ static int cmd_guida(int argc, char **argv)
 {
 	const char *disp = "/dev/ttyS3", *uscita = NULL, *file_seq = NULL, *file_csv = NULL, *file_comandi = NULL;
 	int durata = 0, solo_se_ricevi = 0, forza = 0, sollevato = 0, keepalive = 1, heartbeat = 1;
-	int tensione_minima = 0, csv_ogni_ms = 0;
+	int tensione_minima = 0, csv_ogni_ms = 0, cliff_atteso = -1;
 	static periodico_t per[GUIDA_MAX_PERIODICI];
 	static passo_t passi[GUIDA_MAX_PASSI];
 	static comando_t una[32];
@@ -1271,7 +1271,7 @@ static int cmd_guida(int argc, char **argv)
 		{ "sollevato", no_argument, 0, 'S' }, { "senza-keepalive", no_argument, 0, 'K' },
 		{ "senza-heartbeat", no_argument, 0, 'H' }, { "tensione-minima", required_argument, 0, 'v' },
 		{ "csv", required_argument, 0, 'c' }, { "csv-ogni", required_argument, 0, 'C' },
-		{ "comandi", required_argument, 0, 'X' }, { 0, 0, 0, 0 },
+		{ "comandi", required_argument, 0, 'X' }, { "cliff-atteso", required_argument, 0, 'A' }, { 0, 0, 0, 0 },
 	};
 	int o;
 	while ((o = getopt_long(argc, argv, "d:i:t:ro:", opz, NULL)) != -1) {
@@ -1282,6 +1282,7 @@ static int cmd_guida(int argc, char **argv)
 		case 'o': uscita = optarg; break;
 		case 'F': forza = 1; break;
 		case 'S': sollevato = 1; break;
+		case 'A': cliff_atteso = (int)strtol(optarg, NULL, 0) & 0x0f; break;
 		case 'K': keepalive = 0; break;
 		case 'H': heartbeat = 0; break;
 		case 'v': tensione_minima = atoi(optarg); break;
@@ -1401,6 +1402,11 @@ static int cmd_guida(int argc, char **argv)
 	sched_setscheduler(0, SCHED_FIFO, &sp);
 
 	sic_init(&g.sic, sollevato, RT_MS(100));
+	if (cliff_atteso >= 0) {
+		sic_cliff_atteso(&g.sic, (uint8_t)cliff_atteso);
+		printf("guida: ATTENZIONE, \"sollevato\" = anti-caduta 0x%x invece di 0x%x (--cliff-atteso)\n",
+		       cliff_atteso, GD32_CLIFF_TUTTI_VUOTO);
+	}
 	gd32_deframer_t dfr;
 	gd32_deframer_init(&dfr);
 	static uint8_t buf[4096];

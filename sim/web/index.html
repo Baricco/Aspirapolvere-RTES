@@ -1,0 +1,107 @@
+<!doctype html>
+<html lang="it">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Simulatore RTES</title>
+<link rel="stylesheet" href="stile.css">
+</head>
+<body>
+<div id="vista">
+  <canvas id="tela" tabindex="0"></canvas>
+  <div id="barra">
+    <button data-s="seleziona" class="attivo" title="seleziona, sposta, ruota (tasto V)">Seleziona</button>
+    <button data-s="muro" title="trascina da un capo all'altro (Shift: angoli di 15°)">Muro</button>
+    <button data-s="rettangolo" title="trascina un rettangolo (mobile dal pavimento)">Rettangolo</button>
+    <button data-s="cerchio" title="trascina dal centro (gamba, pianta)">Cerchio</button>
+    <button data-s="vuoto" title="trascina un'area di vuoto (scala, gradino)">Vuoto</button>
+    <select id="libreria" title="oggetti pronti: scegli, poi clic sulla stanza">
+      <option value="">Oggetti pronti…</option>
+      <option value="divano">divano</option><option value="tavolo">tavolo con 4 gambe</option>
+      <option value="sedia">sedia</option><option value="letto">letto (rialzato)</option>
+      <option value="armadio">armadio</option><option value="credenza">credenza rialzata (incastra)</option>
+      <option value="pianta">pianta</option><option value="soglia">soglia 1,5 cm (si supera)</option>
+      <option value="cavo">gradino o cavo 3 cm</option><option value="scala">scala (vuoto)</option>
+      <option value="base">base di ricarica</option>
+    </select>
+  </div>
+  <div id="legenda"></div>
+  <div id="coordinate"></div>
+</div>
+
+<div id="pannello">
+  <div id="avviso"></div>
+  <div id="schede">
+    <button data-scheda="stanza" class="attivo">Stanza</button>
+    <button data-scheda="robot">Robot</button>
+    <button data-scheda="messaggi">Messaggi</button>
+  </div>
+
+  <section id="s-stanza">
+    <div class="riga">
+      <select id="stanze"></select>
+      <button id="carica">Carica</button>
+      <button id="salva">Salva…</button>
+      <button id="nuova">Nuova…</button>
+    </div>
+    <div class="riga">
+      <button id="annulla" title="Ctrl+Z">Annulla</button>
+      <button id="ripeti" title="Ctrl+Y">Ripeti</button>
+      <button id="duplica" title="Ctrl+D">Duplica</button>
+      <button id="elimina" title="Canc">Elimina</button>
+      <button id="riposiziona" title="rimette il robot nella posizione iniziale">Robot all'inizio</button>
+    </div>
+    <h2>Selezione</h2>
+    <div id="proprieta"><p class="tenue">Clic su un oggetto, sul robot o sulla base per selezionarlo.</p></div>
+    <h2>Comandi</h2>
+    <p class="tenue">Trascina per spostare, la maniglia tonda per ruotare (Shift: scatti di 15°), i quadratini per cambiare
+      misura. Tastiera: R / Shift+R ruota di 15°, frecce 1 cm (Shift: 10 cm), Canc elimina, Ctrl+D duplica,
+      Ctrl+Z / Ctrl+Y annulla e ripeti, Esc deseleziona. Rotella = zoom, tasto destro trascinato = sposta la vista,
+      doppio clic sul vuoto = adatta.</p>
+  </section>
+
+  <section id="s-robot" hidden>
+    <div class="riga">
+      <button id="solleva">Solleva</button>
+      <button id="cassetto">Togli cassetto</button>
+      <button id="tasto_acc" title="tieni premuto">Tasto accensione</button>
+      <button id="tasto_casa" title="tieni premuto">Tasto casa</button>
+    </div>
+    <div class="riga">Batteria <input id="soc" type="range" min="0" max="100" value="90"> <button id="imposta_soc">Imposta</button></div>
+    <table id="tab-robot"></table>
+    <h2>GD32 e lidar</h2>
+    <table id="tab-gd32"></table>
+  </section>
+
+  <section id="s-messaggi" hidden>
+    <div class="riga">
+      <button id="pausa">Pausa</button>
+      <button id="indietro" title="messaggio precedente (←)" disabled>◀</button>
+      <button id="avanti" title="messaggio successivo (→)" disabled>▶</button>
+      <span id="posizione" class="tenue"></span>
+    </div>
+    <h2>Frame dei sensori 0x15 <span id="sens-info" class="tenue"></span></h2>
+    <div id="griglia"></div>
+    <div id="bit"></div>
+    <div id="dettaglio" class="tenue">Passa con il mouse su un byte o su un bit per la spiegazione.</div>
+    <details id="valori"><summary>Tutti i valori decodificati</summary><table id="tab-valori"></table></details>
+    <h2>Ultimo comando di ogni tipo</h2>
+    <table id="tab-comandi" class="piccola"></table>
+    <h2>Ultimo pacchetto del lidar <span id="lidar-info" class="tenue"></span></h2>
+    <div id="lidar-pacchetto" class="mono piccola"></div>
+    <h2>Messaggi</h2>
+    <div class="riga piccola">
+      <label><input type="checkbox" id="f-ripetizioni"> ripetizioni</label>
+      <label><input type="checkbox" id="f-sensori"> frame dei sensori</label>
+      <label><input type="checkbox" id="f-lidar"> pacchetti del lidar</label>
+    </div>
+    <div id="lista" class="mono"></div>
+  </section>
+</div>
+
+<script src="stanza.js"></script>
+<script src="editor.js"></script>
+<script src="ispettore.js"></script>
+<script src="principale.js"></script>
+</body>
+</html>

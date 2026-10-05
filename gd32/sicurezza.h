@@ -38,6 +38,7 @@ typedef enum {
 
 typedef struct {
 	int sollevato;             /* dichiarato da chi usa il programma */
+	uint8_t cliff_atteso;      /* byte 3 che vale "sollevato": GD32_CLIFF_TUTTI_VUOTO, salvo sic_cliff_atteso() */
 	int64_t max_eta_ns;        /* età massima dell'ultimo frame dei sensori */
 
 	int ha_sensori;            /* è arrivato almeno un frame dei sensori */
@@ -54,6 +55,14 @@ typedef struct {
 } sicurezza_t;
 
 void sic_init(sicurezza_t *s, int sollevato, int64_t max_eta_ns);
+
+/*
+ * ECCEZIONE, solo per i banchi di prova in cui il robot è sollevato ma alcuni anti-caduta sono coperti dal supporto
+ * (2026-10-05: scatole sotto il muso, byte 3 = 0x09). Cambia lo schema degli anti-caduta che vale "sollevato" da
+ * 0x0f (tutti nel vuoto, la regola normale) a `cliff`. Il resto non cambia: sensori alimentati, non sulla base,
+ * frame recenti, e il blocco SCATTA se lo schema cambia (robot appoggiato o toccato).
+ */
+void sic_cliff_atteso(sicurezza_t *s, uint8_t cliff);
 
 /* 1 se cmd comanda un motore pericoloso (ruote, spazzole, aspirazione), 0 altrimenti. */
 int sic_e_motore(uint8_t cmd);
@@ -81,5 +90,23 @@ sic_esito_t sic_permesso(sicurezza_t *s, uint8_t cmd, const uint8_t *dati, size_
  * a zero, spazzole a zero, aspirazione a zero (anche in PWM). Ritorna i byte scritti (0 se dim non basta).
  */
 size_t sic_frame_arresto(uint8_t *out, size_t dim);
+
+/*
+ * Modalità "A TERRA" (il driver, uso normale; fase 3). Riduce il comando di velocità (v, omega in tick/s, le unità
+ * di 0x66) in base all'ultimo frame dei sensori e ritorna i motivi (bit SIC_LIM_*), 0 se il comando passa intero:
+ *   - SIC_LIM_SOLLEVATO: tutti e 4 gli anti-caduta nel vuoto, sensori accesi e fuori dalla base -> il robot è stato
+ *     sollevato (o è caduto): v = omega = 0;
+ *   - SIC_LIM_BASE: sulla base (contatto o carica) -> v = omega = 0, salvo uscita_base = 1, che permette di
+ *     muoversi piano (|v| <= 0,1 m/s, |omega| <= 0,5 rad/s) per uscire;
+ *   - SIC_LIM_SENSORI: sensori spenti (0x9d 00) fuori dalla base -> niente moto in avanti (bumper e anti-caduta
+ *     non sono affidabili);
+ *   - SIC_LIM_BUMPER: un bumper premuto -> niente moto in avanti (indietro e rotazione sì, per allontanarsi);
+ *   - SIC_LIM_CLIFF: un anti-caduta nel vuoto -> niente moto in avanti.
+ * Le spazzole non sono limitate qui (il driver le ferma con il robot sollevato o sulla base).
+ */
+enum {
+	SIC_LIM_SOLLEVATO = 1, SIC_LIM_BASE = 2, SIC_LIM_SENSORI = 4, SIC_LIM_BUMPER = 8, SIC_LIM_CLIFF = 16,
+};
+int sic_terra_limita(const gd32_sensori_t *s, int uscita_base, int32_t *v_tick, int32_t *w_tick);
 
 #endif /* GD32_SICUREZZA_H */

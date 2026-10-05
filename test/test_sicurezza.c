@@ -187,6 +187,38 @@ static void frame_arresto(void)
 	CONTROLLA(sic_frame_arresto(buf, 10) == 0);      /* buffer troppo piccolo */
 }
 
+/* Eccezione del banco di prova (2026-10-05): scatole sotto il muso, anti-caduta 0x09 invece di 0x0f. */
+static void cliff_atteso(void)
+{
+	sicurezza_t s;
+	sic_init(&s, 1, MS(100));
+	gd32_frame_t f = sensori(0x09);
+	sic_ricevuto(&s, &f, MS(0));
+	CONTROLLA(sic_permesso(&s, GD32_VELOCITA, V_AVANTI, 8, MS(1)) == SIC_RIFIUTATO);   /* di regola serve 0x0f */
+	sic_init(&s, 1, MS(100));
+	sic_cliff_atteso(&s, 0x09);
+	CONTROLLA(sic_ricevuto(&s, &f, MS(0)) == 0);
+	CONTROLLA(sic_permesso(&s, GD32_VELOCITA, V_AVANTI, 8, MS(1)) == SIC_PERMESSO);
+	/* ora 0x0f (lo sollevano dalle scatole) è un cambiamento: scatta */
+	f = sensori(0x0f);
+	CONTROLLA(sic_ricevuto(&s, &f, MS(20)) == 1);
+	CONTROLLA(sic_permesso(&s, GD32_VELOCITA, V_AVANTI, 8, MS(21)) == SIC_RIFIUTATO);
+	/* e se lo appoggiano (0x00) idem */
+	sic_init(&s, 1, MS(100));
+	sic_cliff_atteso(&s, 0x09);
+	f = sensori(0x09);
+	sic_ricevuto(&s, &f, MS(0));
+	f = sensori(0x00);
+	CONTROLLA(sic_ricevuto(&s, &f, MS(20)) == 1);
+	/* sulla base resta vietato anche con lo schema giusto */
+	sic_init(&s, 1, MS(100));
+	sic_cliff_atteso(&s, 0x09);
+	f = sensori(0x09);
+	f.dati[7] = 0x02;
+	sic_ricevuto(&s, &f, MS(0));
+	CONTROLLA(sic_permesso(&s, GD32_VELOCITA, V_AVANTI, 8, MS(1)) == SIC_RIFIUTATO);
+}
+
 int main(void)
 {
 	ESEGUI(senza_sollevato_niente_motori);
@@ -197,5 +229,6 @@ int main(void)
 	ESEGUI(base_e_sensori_spenti);
 	ESEGUI(vietati);
 	ESEGUI(frame_arresto);
+	ESEGUI(cliff_atteso);
 	return TEST_FINE();
 }
