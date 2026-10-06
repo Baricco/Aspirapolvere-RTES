@@ -48,13 +48,20 @@ I task dell'esame li scrive l'utente da solo, sopra un framework e un driver pre
     sono sporadici con T = intervallo minimo), gli altri **a timer**;
   - **server aperiodico** per batteria (lettura), spazzole, aspirazione, LED, comandi da remoto;
   - rete di sicurezza del kernel sui task RT (95% della CPU per secondo) lasciata attiva.
+- **Lidar a 6 giri/s** (come AuxCtrl, ~340 punti per giro), deciso il 2026-10-06 all'inizio della fase 4: il task
+  del lidar elabora un giro ogni 200 ms.
 
 ## Ancora da decidere
 - **Tipo di server aperiodico** (polling, deferrable, sporadic) e **tipo di app** (con l'home server, più avanti:
   zone proibite, preferenze, programmazione della pulizia).
-- **Velocità del lidar** (6 giri/s come AuxCtrl, oppure più veloce con meno punti per giro: ~2050 misure al secondo
-  fisse; provare la potenza 100) e periodo della navigazione (100 o 200 ms).
-- **Assegnazione dei task ai core**, quando conosceremo i WCET (Worst-Fit sulle utilizzazioni per bilanciare).
+- **Periodo della navigazione** (100 o 200 ms).
+- **Assegnazione dei task ai core**: rimandata (2026-10-06) a quando ci saranno i WCET misurati sul robot; il criterio
+  (per esempio Worst-Fit sulle utilizzazioni, per bilanciare) si sceglie allora.
+- **Scambio dei dati fra i task.** Proposta (2026-10-06, da confermare): doppio buffer con numero di versione
+  (`driver/scambio.h`, lo stesso del driver) per ogni dato pubblicato da un solo task (posizione, allarmi, ostacoli,
+  obiettivo, posizione corretta): lo scrittore non aspetta mai e non c'è tempo di blocco nell'analisi. Mutex con
+  Priority Inheritance solo dove il doppio buffer non va bene: dati grandi (la griglia della mappa, a meno che la
+  tocchi solo la mappatura e pubblichi un estratto piccolo) o dati con più scrittori.
 
 ## Architettura del software originale (dettagli in `RIEPILOGO.md`)
 ```
