@@ -70,9 +70,6 @@ void printDrvState(drv_stato_t *drv_state) {
        (unsigned long long)drv_state->risvegli, drv_state->senza_rt);
 }
 
-
-rt_task_t lidar_task;
-
 int main(void) {
 
 	// fai il bind dei segnali di terminazione alla funzione per la terminazione graceful
@@ -94,9 +91,47 @@ int main(void) {
 	// Avvia i task
 	init_lidar();
 
-	rt_task_cfg_t task_cfg_lidar;
-	task_cfg_lidar.nome = // da continuare dopo sono rotto di palle sinc
+       // Task del lidar
+	rt_task_cfg_t task_cfg_lidar = {
+              .nome = "task_lidar",              // nome del task
+              .cpu = 1,                          // su quale core gira
+              .sporadico = 0,                    // task periodico
+              .periodo_ns = RT_MS(200),          // periodo in ms
+              .job = job_lidar,                  // job da eseguire
+       };
 
+       // Creiamo l'array di puntatori ai task_cfg per
+       // poter calcolare le priorità dei task usando
+       // RM a partire dai loro periodi
+       rt_task_cfg_t *task_cfgs[] = { &task_cfg_lidar };
+
+       // calcola il numero di task dentro l'array
+       int task_number = sizeof(task_cfgs) / sizeof(task_cfgs[0]);
+
+       // Assegna le priorità corrispondenti ai task in base al
+       // periodo di ciascun task
+       if (rt_priorita_rm(task_cfgs, task_number, RT_PRIO_TASK_MAX)) {
+              // In caso di problemi, ferma tutto e ritorna 1
+              drv_ferma();
+              return 1;
+       }
+
+       // salvati il timestamp attuale per poter far partire tutti 
+       // i task contemporaneamente
+       int64_t now_time = rt_adesso(); 
+
+       // Dopo aver creato i task, avviali
+	if (rt_task_avvia(&lidar_task, &task_cfg_lidar, now_time)) {   // lidar
+              // in caso di problemi (task_number < 0 o > 64)
+              // ferma tutto e ritorna 1
+              drv_ferma();
+		return 1;
+	}
+
+
+       // attiva il watchdog dei task, questa verifica che non 
+       // missati più di 3 periodi
+       drv_sorveglia(&lidar_task, 0, 0);
 
 
 	// ciclo di esecuzione main loop
@@ -108,15 +143,38 @@ int main(void) {
 		sleep(1);
 		
 		// Leggi lo stato del driver
-		drv_stato_t drv_state;
-		drv_stato(&drv_state);
+		// drv_stato_t drv_state;
+		// drv_stato(&drv_state);
 
 		// Stampa lo stato del driver
-		printDrvState(&drv_state);
-	
+		// printDrvState(&drv_state);
+
+
+              // Leggi Lidar
+              lidar_scan_data_t last_scan_data = read_lidar();
+              
+              // Stampa la lettura del lidar
+              printf("Scan Number: %u\nValid: %d\nScan Sectors:\n", last_scan_data.num, last_scan_data.valid);
+
+              for (int i = 0; i < SECTOR_NUMBER; i++) {
+                     printf("\tSector Number %d has a minimum distance of: %umm\n", i, last_scan_data.sector_distance[i]);
+              }
+
+
 	}
 
-	// Uscita Graceful
-	drv_ferma();
+       // Spegni il Watchdog dei task
+       drv_dimentica(&lidar_task); // lidar
+
+       // ferma i task
+       rt_task_ferma(&lidar_task); // lidar
+
+	// ferma il driver 
+       drv_ferma();
+
+       // Alla fine stampa le statistiche dei task
+       // cioè job eseguiti, deadline miss e tempi di esecuzione
+       rt_stats_stampa(&lidar_task);      // lidar
+
 	return 0;
 }
