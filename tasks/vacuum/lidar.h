@@ -18,8 +18,7 @@ typedef struct {
 
     uint32_t num;                   // numero della scansione
     int64_t scan_end_t;             // timestamp di fine scansione
-    bool valid;                     // indica se la scansione ha abbastanza
-                                    // punti letti correttamente
+    bool valid;                     // indica se la scansione ha abbastanza punti letti correttamente
     
     // si prende la circonferenza tracciata dal lidar e la si scompone in 12 distanze
     uint16_t sector_distance[SECTOR_NUMBER];    // distanze in mm divisa per settori
