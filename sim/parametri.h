@@ -28,6 +28,7 @@ typedef struct {
 
 	/* IMU */
 	double imu_deriva_gradi_s, imu_rumore_velocita;   /* deriva dell'angolo di imbardata; rumore in 0,01 °/s */
+	double imu_scala;                                 /* angolo misurato / angolo vero (l'IMU vera conta meno) */
 	int imu_beccheggio, imu_rollio;                   /* 0,01° a riposo */
 
 	/* valori a riposo e attuatori */

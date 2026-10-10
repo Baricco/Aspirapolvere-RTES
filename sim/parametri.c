@@ -17,7 +17,7 @@ sim_parametri_t par = {
 	.ruote_finestra_ms = 70,
 	.ruote_timeout_hb = 2.04, .ruote_inerzia = 1879,
 	.corrente_ruota_base = 64, .corrente_ruota_picchi = 290, .corrente_ruota_avvio = 772,
-	.imu_deriva_gradi_s = -0.000083, .imu_rumore_velocita = 0.5, .imu_beccheggio = -55, .imu_rollio = 38,
+	.imu_deriva_gradi_s = -0.000083, .imu_scala = 0.9723, .imu_rumore_velocita = 0.5, .imu_beccheggio = -55, .imu_rollio = 38,
 	.corrente_riposo_laterale = 2, .corrente_riposo_centrale = 58, .corrente_riposo_aspirazione = 14, .byte84 = 2,
 	.temperatura_c = 33,
 	.corrente_centrale_accesa = 202, .corrente_centrale_sblocco = 617,
@@ -109,6 +109,7 @@ int parametri_leggi(const char *percorso)
 		UNO("ruote_corrente_avvio_ma", corrente_ruota_avvio);
 		UNO("imu_deriva_gradi_s", imu_deriva_gradi_s);
 		UNO("imu_rumore_velocita", imu_rumore_velocita);
+		UNO("imu_scala", imu_scala);
 		UNO("imu_beccheggio", imu_beccheggio);
 		UNO("imu_rollio", imu_rollio);
 		UNO("corrente_riposo_laterale_ma", corrente_riposo_laterale);

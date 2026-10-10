@@ -631,8 +631,8 @@ static void passo(gd32sim_t *g, const mondo_t *m, double t, double dt)
 
 	/* IMU: il GD32 integra la velocità angolare, con la deriva misurata */
 	double w_vera = (g->sollevato || g->caduto) ? 0 : w;
-	g->vel_imbardata = w_vera;
-	g->imbardata += (w_vera + par.imu_deriva_gradi_s * M_PI / 180) * dt;
+	g->vel_imbardata = w_vera * par.imu_scala;
+	g->imbardata += (w_vera * par.imu_scala + par.imu_deriva_gradi_s * M_PI / 180) * dt;
 
 	/* spazzole e aspirazione */
 	g->eco_lat = g->motori_alimentati ? g->spazzola_lat : 0;

@@ -102,6 +102,8 @@ Dinamica del GD32 misurata sulle registrazioni (fase 2 da sollevato; fase 3, val
 | Spazzola centrale | 58 mA ferma, ~200 accesa, ~620 nello sblocco | c3, spazzola |
 | Aspirazione | 219 giri/min per punto di PWM; corrente − 14 mA ∝ giri^2,27 (1,88 A a 18 200 giri/min) | c3, c3b |
 | IMU a riposo | deriva dell'imbardata −0,3°/h; beccheggio −0,55°, rollio +0,38°; rumore ±1 (0,01 °/s) | c8scarica |
+| IMU in rotazione | conta il **2,8 % in meno**: due giri a sinistra 745,2° contro 766,6° visti dal lidar, a destra −730,0° contro −750,7° (fattore 1,0285, uguale nei due versi). Corretto in `tasks/vacuum` (`YAW_SCALE`) e nel simulatore (`imu_scala`) | k1, 2026-10-10 |
+| Encoder su 1,36 m dritti | 1,345 m contro 1,361 m del lidar (1,2 %, dentro l'incertezza della misura col lidar): scala 4580 tick/m lasciata com'è | k2, 2026-10-10 |
 | Lidar | giri/s = 0,0856 × potenza + 0,17; salita 0,18 s, discesa 0,24 s, da spento ~0,5 s; ~2040 misure/s; rumore 7 mm fino a 3 m, 12 a 4–5 m, 37 oltre 6 m; ~2% di punti isolati senza eco sotto 2 m | c1 |
 | Byte 64 | bit 7 = lidar alimentato (nuovo: `0xE2` acceso, `0x62` spento) | c1 |
 

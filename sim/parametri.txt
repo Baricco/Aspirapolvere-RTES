@@ -15,6 +15,7 @@ ruote_timeout_heartbeat_s = 2.04    # c2b: senza 0x06 il GD32 toglie potenza ai 
 ruote_inerzia = 1879    # c2b: decelerazione delle ruote senza potenza (si fermano da sole), tick/s²
 imu_deriva_gradi_s = -0.000083    # c8scarica: 5 h fermo, pendenza dell'angolo di imbardata
 imu_rumore_velocita = 0.5    # 0,01 °/s: a riposo 0 o +-1 (c8scarica)
+imu_scala = 0.9723    # 2026-10-10 k1: 2 giri a sx e a dx, IMU 745,2/-730,0° contro lidar 766,6/-750,7° (1/1,0285)
 imu_beccheggio = -55    # 0,01°, robot fermo a terra (c8scarica)
 imu_rollio = 38    # 0,01°, robot fermo a terra (c8scarica)
 corrente_riposo_laterale_ma = 2    # byte 78 a riposo (c8scarica)

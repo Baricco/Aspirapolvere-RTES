@@ -198,12 +198,15 @@ int main(void) {
 
 
               // obiettivi di prova: per ora li scrive il main al posto della navigazione
+              // velocità massime della prova (il driver limita a 0,5 m/s e 2π rad/s)
+              #define TEST_V      0.25    // m/s
+              #define TEST_OMEGA  1.0     // rad/s
               static const navigation_objective_t objectives[] = {
-                     { .num = 1, .obj_type = OBJ_MOVE,   .x = 0.5, .y = 0.0, .v = 0.1, .omega = 0.5 },  // dritto
-                     { .num = 2, .obj_type = OBJ_ROTATE, .theta = M_PI / 2, .omega = 0.5 },         // a sinistra di 90°
-                     { .num = 3, .obj_type = OBJ_MOVE,   .x = 0.5, .y = 0.5, .v = 0.1, .omega = 0.5 },  // dritto (già girato)
-                     { .num = 4, .obj_type = OBJ_MOVE,   .x = 0.0, .y = 0.0, .v = 0.1, .omega = 0.5 },  // all'origine: prima gira di 135°
-                     { .num = 5, .obj_type = OBJ_ROTATE, .theta = 0.0, .omega = 0.5 },              // di nuovo verso x
+                     { .num = 1, .obj_type = OBJ_MOVE,   .x = 0.5, .y = 0.0, .v = TEST_V, .omega = TEST_OMEGA },  // dritto
+                     { .num = 2, .obj_type = OBJ_ROTATE, .theta = M_PI / 2, .omega = TEST_OMEGA },         // a sinistra di 90°
+                     { .num = 3, .obj_type = OBJ_MOVE,   .x = 0.5, .y = 0.5, .v = TEST_V, .omega = TEST_OMEGA },  // dritto (già girato)
+                     { .num = 4, .obj_type = OBJ_MOVE,   .x = 0.0, .y = 0.0, .v = TEST_V, .omega = TEST_OMEGA },  // all'origine: prima gira di 135°
+                     { .num = 5, .obj_type = OBJ_ROTATE, .theta = 0.0, .omega = TEST_OMEGA },              // di nuovo verso x
                      { .num = 6, .obj_type = OBJ_STOP },
               };
               static const int obj_count = sizeof(objectives) / sizeof(objectives[0]);

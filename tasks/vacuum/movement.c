@@ -226,6 +226,9 @@ void job_movement(void *arg) {
         // Da questo punto in poi yaw_diff è in radianti
         yaw_diff *= M_PI / 18000;
 
+        // Correggi l'errore di scala dell'IMU (vedi YAW_SCALE in movement.h)
+        yaw_diff *= YAW_SCALE;
+
         // La direzione del robot è quindi quella attuale + metà dell'imbardata 
         // appena calcolata, la salviamo in cur_state.theta
         double mean_direction = mov_state.theta + yaw_diff / 2;
