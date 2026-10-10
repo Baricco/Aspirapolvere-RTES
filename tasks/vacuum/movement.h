@@ -5,7 +5,16 @@
 #include <stdint.h>
 #include "driver/driver.h"
 
+// Tolleranze per dichiarare raggiunto un obiettivo
+#define ROTATE_TOLERANCE_RAD    0.0175  // OBJ_ROTATE: 1°;
+#define MOVE_TOLERANCE_M        0.02    // OBJ_MOVE: 2 cm;
+#define STOP_V_TOLERANCE        0.005   // OBJ_STOP: m/s misurati
+#define STOP_OMEGA_TOLERANCE    0.02    // OBJ_STOP: rad/s misurati
+#define ALIGNMENT_THRESHOLD     0.52    // soglia di allineamneto in OBJ_MOVE: 0,52 rad, circa 30°
 
+// Guadagno da usare quando si corregge l'errore
+#define ROTATION_GAIN           2.5
+#define MOVE_GAIN               1.0
 
 
 // struttura dati che verrà mandata al task di navigazione

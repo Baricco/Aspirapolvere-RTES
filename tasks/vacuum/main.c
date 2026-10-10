@@ -2,9 +2,12 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
+#include <math.h>
 
 #include "driver/driver.h"
 #include "lidar.h"
+#include "movement.h"
+#include "navigation.h"
 
 
 // Gestione Graceful Exit dei segnali CTRL + C 
@@ -90,6 +93,8 @@ int main(void) {
 
 	// Avvia i task
 	init_lidar();
+       init_movement();
+       init_navigation();
 
        // Task del lidar
 	rt_task_cfg_t task_cfg_lidar = {
@@ -100,10 +105,20 @@ int main(void) {
               .job = job_lidar,                  // job da eseguire
        };
 
+       // Task del movimento
+       rt_task_cfg_t task_cfg_movement = {
+              .nome = "task_movement",
+              .cpu = 1,
+              .sporadico = 1,
+              .periodo_ns = RT_MS(15),
+              .job = job_movement,
+       };
+
+       
        // Creiamo l'array di puntatori ai task_cfg per
        // poter calcolare le priorità dei task usando
        // RM a partire dai loro periodi
-       rt_task_cfg_t *task_cfgs[] = { &task_cfg_lidar };
+       rt_task_cfg_t *task_cfgs[] = { &task_cfg_lidar, &task_cfg_movement };
 
        // calcola il numero di task dentro l'array
        int task_number = sizeof(task_cfgs) / sizeof(task_cfgs[0]);
@@ -111,7 +126,8 @@ int main(void) {
        // Assegna le priorità corrispondenti ai task in base al
        // periodo di ciascun task
        if (rt_priorita_rm(task_cfgs, task_number, RT_PRIO_TASK_MAX)) {
-              // In caso di problemi, ferma tutto e ritorna 1
+              // In caso di problemi (task_number < 0 o > 64)
+              // ferma tutto e ritorna 1
               drv_ferma();
               return 1;
        }
@@ -121,26 +137,43 @@ int main(void) {
        int64_t now_time = rt_adesso(); 
 
        // Dopo aver creato i task, avviali
-	if (rt_task_avvia(&lidar_task, &task_cfg_lidar, now_time)) {   // lidar
-              // in caso di problemi (task_number < 0 o > 64)
+
+       // Avvia il task lidar
+	if (rt_task_avvia(&lidar_task, &task_cfg_lidar, now_time)) {
+              // in caso di problemi (permessi mancanti o errore di creazione del thread)
               // ferma tutto e ritorna 1
               drv_ferma();
 		return 1;
 	}
 
+       if (rt_task_avvia(&movement_task, &task_cfg_movement, now_time)) {
+              // in caso di problemi ferma tutto, inclusi i task
+              // avviati prima e ritorna 1
+              rt_task_ferma(&lidar_task);
+              drv_ferma();
+              return 1;
+       }
+
+
+       // sveglia il task del moto con l'arrivo del frame dai sensori
+       drv_sveglia_ai_sensori(&movement_task);
+
 
        // attiva il watchdog dei task, questa verifica che non 
        // missati più di 3 periodi
        drv_sorveglia(&lidar_task, 0, 0);
+       drv_sorveglia(&movement_task, 1, 0);
+
 
 
 	// ciclo di esecuzione main loop
 	// dopo aver avviato i task nei loro thread
 	// il main aspetta solo il segnale per terminare
 	// e stampa i dati eventualmente
+
 	while (!fine) {
 
-		sleep(1);
+		usleep(20000); // aspetta 20ms
 		
 		// Leggi lo stato del driver
 		// drv_stato_t drv_state;
@@ -151,23 +184,70 @@ int main(void) {
 
 
               // Leggi Lidar
-              lidar_scan_data_t last_scan_data = read_lidar();
+              //mlidar_scan_data_t last_scan_data = read_lidar();
               
               // Stampa la lettura del lidar
-              printf("Scan Number: %u\nValid: %d\nScan Sectors:\n", last_scan_data.num, last_scan_data.valid);
+              // printf("Scan Number: %u\nValid: %d\nScan Sectors:\n", last_scan_data.num, last_scan_data.valid);
 
-              for (int i = 0; i < SECTOR_NUMBER; i++) {
-                     printf("\tSector Number %d has a minimum distance of: %umm\n", i, last_scan_data.sector_distance[i]);
+              // for (int i = 0; i < SECTOR_NUMBER; i++) {
+              //       printf("\tSector Number %d has a minimum distance of: %umm\n", i, last_scan_data.sector_distance[i]);
+              // }
+
+              
+
+
+
+              // obiettivi di prova: per ora li scrive il main al posto della navigazione
+              static const navigation_objective_t objectives[] = {
+                     { .num = 1, .obj_type = OBJ_MOVE,   .x = 0.5, .y = 0.0, .v = 0.1, .omega = 0.5 },  // dritto
+                     { .num = 2, .obj_type = OBJ_ROTATE, .theta = M_PI / 2, .omega = 0.5 },         // a sinistra di 90°
+                     { .num = 3, .obj_type = OBJ_MOVE,   .x = 0.5, .y = 0.5, .v = 0.1, .omega = 0.5 },  // dritto (già girato)
+                     { .num = 4, .obj_type = OBJ_MOVE,   .x = 0.0, .y = 0.0, .v = 0.1, .omega = 0.5 },  // all'origine: prima gira di 135°
+                     { .num = 5, .obj_type = OBJ_ROTATE, .theta = 0.0, .omega = 0.5 },              // di nuovo verso x
+                     { .num = 6, .obj_type = OBJ_STOP },
+              };
+              static const int obj_count = sizeof(objectives) / sizeof(objectives[0]);
+              static int obj_index = -1;      // -1 = nessun obiettivo scritto
+              static unsigned iteration = 0;
+
+              movement_position_data_t cur_mov_data = read_movement();
+
+              // primo giro: scrivi il primo obiettivo; poi passa al successivo quando
+              // il moto dice che ha raggiunto PROPRIO quello corrente
+              int changed = 0;
+              if (obj_index < 0) {
+                     obj_index = 0;
+                     changed = 1;
+              } else if (obj_index + 1 < obj_count &&
+                         cur_mov_data.num_obj == objectives[obj_index].num &&
+                         cur_mov_data.obj_achieved) {
+                     obj_index++;
+                     changed = 1;
               }
+              if (changed) {
+                     write_objective(&objectives[obj_index]);
+                     printf("--> obiettivo %u (tipo %d)\n", objectives[obj_index].num, objectives[obj_index].obj_type);
+              }
+
+              // stampa ogni 25 giri (0,5 s) e a ogni cambio di obiettivo
+              if (changed || ++iteration % 25 == 0)
+                     printf("Frame: %u  valid: %d  x: %+.3f m  y: %+.3f m  theta: %+.4f rad (%+.1f°)  v: %+.3f m/s  omega: %+.3f rad/s  obj: %u%s\n",
+                            cur_mov_data.num, cur_mov_data.valid,
+                            cur_mov_data.x, cur_mov_data.y,
+                            cur_mov_data.theta, cur_mov_data.theta * 180.0 / M_PI,
+                            cur_mov_data.v, cur_mov_data.omega,
+                            cur_mov_data.num_obj, cur_mov_data.obj_achieved ? " (raggiunto)" : "");
 
 
 	}
 
        // Spegni il Watchdog dei task
-       drv_dimentica(&lidar_task); // lidar
+       drv_dimentica(&lidar_task);               // lidar
+       drv_dimentica(&movement_task);            // movimento
 
        // ferma i task
-       rt_task_ferma(&lidar_task); // lidar
+       rt_task_ferma(&lidar_task);               // lidar
+       rt_task_ferma(&movement_task);            // movimento
 
 	// ferma il driver 
        drv_ferma();
@@ -175,6 +255,7 @@ int main(void) {
        // Alla fine stampa le statistiche dei task
        // cioè job eseguiti, deadline miss e tempi di esecuzione
        rt_stats_stampa(&lidar_task);      // lidar
+       rt_stats_stampa(&movement_task);   // movimento
 
 	return 0;
 }

@@ -63,6 +63,13 @@ I task dell'esame li scrive l'utente da solo, sopra un framework e un driver pre
   Priority Inheritance solo dove il doppio buffer non va bene: dati grandi (la griglia della mappa, a meno che la
   tocchi solo la mappatura e pubblichi un estratto piccolo) o dati con più scrittori.
 
+## Da fare dopo i task (fase 4)
+- **Guasto chiesto da un task** (2026-10-10): oggi un task non può mandare il driver in guasto (`entra_in_guasto` è
+  `static` e va chiamata solo dal thread del driver). Aggiungere `drv_segnala_guasto(const char *motivo)` con lo
+  stesso schema di `drv_azzera_guasto`: campo atomico in `cmd` (come `cmd.suono`), letto e azzerato dal driver con
+  `atomic_exchange` vicino a `prova_ad_azzerare_guasto`, poi `entra_in_guasto(motivo)`; azzerarlo anche all'avvio.
+  Primo uso: il `default` dello `switch` del moto (tipo di obiettivo sconosciuto), che intanto fa solo stop.
+
 ## Architettura del software originale (dettagli in `RIEPILOGO.md`)
 ```
 GD32 ⇄ /dev/ttyS3 ⇄ AuxCtrl ⇄ /tmp/AuxEverest_Sock ⇄ everest-server ⇄ /tmp/everest_sock ⇄ RobotApp ⇄ cloud

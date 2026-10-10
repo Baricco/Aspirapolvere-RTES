@@ -119,7 +119,7 @@ static movement_position_data_t get_cur_pos_data_from_cur_state(const movement_s
     
     next_mov_pos_data.valid = true; // Questa è da modificare per gestire il sollevamento del robot
     next_mov_pos_data.num_obj = cur_state->cur_obj_num;
-    next_mov_pos_data.obj_achieved = false;
+    next_mov_pos_data.obj_achieved = cur_state->obj_achieved;
 
     // Ritorna il movement_position_data
     return next_mov_pos_data;
@@ -149,6 +149,21 @@ static void update_mov_state(movement_state_t *cur_state, const movement_state_t
     
     cur_state->theta = next_state->theta;
 
+}
+
+// Funzione helper che normalizza un angolo tra due i valori -max_min_value e max_min_value
+static void normalize_angle(const double max_min_value, double *to_normalize) {
+    if (*to_normalize > max_min_value) *to_normalize -= max_min_value * 2;
+    else if (*to_normalize < -max_min_value) *to_normalize += max_min_value * 2;
+}
+
+// Funzione helper che limita un valore tra -max_min e max_min, conservando il segno
+static double saturate_value(const double max_min, double value) {
+    if (fabs(value) > max_min) {
+        // ritorna value saturato a max_min
+        return max_min * (value < 0 ? -1 : 1);
+    }
+    return value;
 }
 
 // job del task
@@ -206,8 +221,7 @@ void job_movement(void *arg) {
         double yaw_diff = cur_state.last_yaw - mov_state.last_yaw;
 
         // Normalizza la differenza tra -18000 e 18000
-        if (yaw_diff > 18000) yaw_diff -= 36000;
-        else if (yaw_diff < -18000) yaw_diff += 3600018000;
+        normalize_angle(18000, &yaw_diff);
 
         // Da questo punto in poi yaw_diff è in radianti
         yaw_diff *= M_PI / 18000;
@@ -225,11 +239,153 @@ void job_movement(void *arg) {
         cur_state.theta = mov_state.theta + yaw_diff;
 
         // Normalizza il theta finale tra -PI e PI
-        if (cur_state.theta > M_PI) cur_state.theta -= M_PI * 2;
-        else if (cur_state.theta < -M_PI) cur_state.theta += M_PI * 2;
+        normalize_angle(M_PI, &cur_state.theta);
 
         // Aggiorna lo stato del movimento
         update_mov_state(&mov_state, &cur_state);
+
+        // Leggi l'obiettivo da raggiungere
+        navigation_objective_t cur_obj = read_navigation();
+
+        // Controlla se l'obiettivo è cambiato rispetto al precedente
+        if (mov_state.cur_obj_num != cur_obj.num) {
+            // se è cambiato segna il numero del nuovo obiettivo
+            // nello stato e imposta obj_achieved a false
+
+            mov_state.cur_obj_num = cur_obj.num;
+
+            mov_state.obj_achieved = false;
+
+        }
+
+        // dichiara le prossime v e omega da impostare dopo
+        // usando drv_velocità(...)
+        double next_v = 0, next_omega = 0;
+
+        // Controlla se l'obiettivo è stato raggiunto
+        if (mov_state.obj_achieved) {
+            // Se sì, ferma i motori
+            next_v = 0;
+            next_omega = 0;
+        } else {
+            
+            // Altrimenti controlla il tipo di obiettivo da raggiungere
+            switch (cur_obj.obj_type) {
+                case OBJ_STOP: {        // se l'obiettivo è stare fermi
+                    // ferma i motori
+                    next_v = 0;
+                    next_omega = 0;
+
+                    // controlla se la velocità e la rotazione sono a 0
+                    if (fabs(mov_state.v) <= STOP_V_TOLERANCE &&
+                        fabs(mov_state.omega) <= STOP_OMEGA_TOLERANCE) {
+                        // se sono entrambi a 0 (entro una certa tolleranza)
+                        // imposta obj_achieved a true
+                        mov_state.obj_achieved = true;    
+                    }
+                    
+                    break;
+                }
+                
+                case OBJ_ROTATE: {      // se l'obiettivo è ruotare
+                    // calcola l'errore di rotazione attuale
+                    double cur_error = cur_obj.theta - mov_state.theta;
+                    normalize_angle(M_PI, &cur_error);
+                    
+                    // controlla se l'errore è <= della tolleranza
+                    if (fabs(cur_error) <= ROTATE_TOLERANCE_RAD) {
+                        // Se sì, imposta obj_achieved a true
+                        mov_state.obj_achieved = true;
+                        // esci dallo switch, l'obiettivo è già raggiunto
+                        // quindi possiamo lasciare v e omega a 0
+                        break;
+                    }
+                    
+
+                    // se l'errore è > 0, gira a sinistra, altrimenti a destra
+                    next_omega = cur_error * ROTATION_GAIN;
+                    
+                    // satura next_omega alla velocità massima di rotazione 
+                    next_omega = saturate_value(cur_obj.omega, next_omega);
+
+                    break;
+                }
+
+                case OBJ_MOVE: {        // se l'obiettivo è spostarsi
+
+                    // calcola dx e dy del robot rispetto all'obiettivo
+                    double dx = cur_obj.x - mov_state.x,
+                           dy = cur_obj.y - mov_state.y;
+
+                    // calcola la distanza tra il robot e l'obiettivo
+                    double dist_error = hypot(dx, dy);
+
+                    // verifica se la distanza è <= della tolleranza
+                    if (dist_error <= MOVE_TOLERANCE_M) {
+                        // se sì, imposta obj_achieved a true
+                        mov_state.obj_achieved = true;
+
+                        // esci dallo switch, l'obiettivo è già raggiunto
+                        // quindi possiamo lasciare v e omega a 0
+                        break;
+                    }
+
+                    // Calcola la direzione dell'obiettivo rispetto a quella del robot
+                    double dir_error = atan2(dy, dx) - mov_state.theta;
+                    normalize_angle(M_PI, &dir_error);
+
+                    
+                    // la velocità di rotazione sarà l'errore di direzione
+                    // moltiplicato per il guadagno di rotazione
+                    next_omega = dir_error * ROTATION_GAIN;
+
+                    // satura next_omega alla velocità massima di rotazione 
+                    next_omega = saturate_value(cur_obj.omega, next_omega);
+
+                    // prima di modificare anche la velocità verifica
+                    // che l'errore di direzione sia sotto
+                    // una certa soglia
+                    if (fabs(dir_error) > ALIGNMENT_THRESHOLD) break;
+
+                    // la velocità di movimento sarà la distanza
+                    // moltiplicata per il guadagno di spostamento
+                    next_v = dist_error * MOVE_GAIN;
+
+                    // satura next_v alla velocità massima di spostamento
+                    next_v = saturate_value(cur_obj.v, next_v);
+
+                    // moltiplica la velocità per il coseno della direzione
+                    // in questo modo, la velocità sarà al massimo quando 
+                    // la direzione è corretta, e sarà modulata dal coseno
+                    // quando è sbagliata
+                    next_v *= cos(dir_error);
+
+                    break;
+                }
+
+                case OBJ_CONST_SPEED: {     // se l'obiettivo è mantenere velocità costante
+
+                    // Questa è abbastanza banale, basta copiare dall'obiettivo
+                    next_omega = cur_obj.omega;
+                    next_v = cur_obj.v;
+                    
+                    break;
+                }
+
+                default: {
+                    // Qualcosa è andato storto, per adesso facciamo che si ferma 
+                    // e basta, in futuro deve anche andare in guasto
+                    next_v = 0;
+                    next_omega = 0;
+
+                    break;
+                }
+            }
+
+        }
+
+        // Imposta la velocità di movimento e rotazione a next_v e next_omega
+        drv_velocita(next_v, next_omega);
 
         // Crea un oggetto movement_position_data_t e riempilo con la funzione helper
         movement_position_data_t cur_pos_data = get_cur_pos_data_from_cur_state(&mov_state);
