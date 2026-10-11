@@ -50,11 +50,19 @@ I task dell'esame li scrive l'utente da solo, sopra un framework e un driver pre
   - rete di sicurezza del kernel sui task RT (95% della CPU per secondo) lasciata attiva.
 - **Lidar a 6 giri/s** (come AuxCtrl, ~340 punti per giro), deciso il 2026-10-06 all'inizio della fase 4: il task
   del lidar elabora un giro ogni 200 ms.
+- **Navigazione ogni 100 ms** (2026-10-11): accorcia la catena sicurezza → navigazione → moto (circa 0,3 s nel caso
+  peggiore, compresa la frenata, invece di 0,4).
+- **Sicurezza del moto** (2026-10-11): sporadica sul frame, come il moto. Riconosce incastro (velocità mandata contro
+  misurata), slittamento (ω degli encoder contro IMU), sforzo dei motori (correnti delle ruote), ostacolo vicino
+  (settori del lidar) e bordo delle zone proibite. **Non comanda i motori e non parla con il moto**: pubblica
+  l'allarme, la navigazione lo legge e cambia l'obiettivo; il moto non vede la sicurezza. Per ostacoli e zone: sotto
+  una soglia di "vicino" la velocità massima scende in proporzione alla distanza, e così si ottiene anche lo stop;
+  il bumper del driver resta la protezione in caso di errori. L'inclinazione da sola non è un allarme (salire su un
+  tappeto è normale; i casi pericolosi finiscono in incastro o slittamento).
 
 ## Ancora da decidere
 - **Tipo di server aperiodico** (polling, deferrable, sporadic) e **tipo di app** (con l'home server, più avanti:
   zone proibite, preferenze, programmazione della pulizia).
-- **Periodo della navigazione** (100 o 200 ms).
 - **Assegnazione dei task ai core**: rimandata (2026-10-06) a quando ci saranno i WCET misurati sul robot; il criterio
   (per esempio Worst-Fit sulle utilizzazioni, per bilanciare) si sceglie allora.
 - **Scambio dei dati fra i task.** Proposta (2026-10-06, da confermare): doppio buffer con numero di versione
@@ -69,6 +77,14 @@ I task dell'esame li scrive l'utente da solo, sopra un framework e un driver pre
   stesso schema di `drv_azzera_guasto`: campo atomico in `cmd` (come `cmd.suono`), letto e azzerato dal driver con
   `atomic_exchange` vicino a `prova_ad_azzerare_guasto`, poi `entra_in_guasto(motivo)`; azzerarlo anche all'avvio.
   Primo uso: il `default` dello `switch` del moto (tipo di obiettivo sconosciuto), che intanto fa solo stop.
+- **Grande refactoring dopo la fase 4** (richiesta dell'utente, 2026-10-11), insieme alle modifiche al driver:
+  - **nomi che dicono cosa c'è dentro.** Il caso peggiore: `gd32_sensori_t.vel_sx` / `vel_dx` sembrano le velocità
+    delle ruote sinistra e destra, ma sono v e ω del robot (misurate dal GD32 sugli encoder). Ha già confuso il codice
+    dei task (scale scambiate in `tasks/vacuum/safety.c`). Da cercare anche gli altri nomi storici o ambigui;
+  - **funzioni, tipi e variabili in inglese** (driver, framework `rt/`, GD32, simulatore), come quelli scritti
+    dall'utente nei task: nomi semplici e facili da capire;
+  - **prima di iniziare, decidere insieme lo stile** (prefissi dei moduli, maiuscole e minuscole, nomi delle strutture
+    e dei `#define`, lingua dei commenti), poi applicarlo a tutto il codice.
 
 ## Architettura del software originale (dettagli in `RIEPILOGO.md`)
 ```

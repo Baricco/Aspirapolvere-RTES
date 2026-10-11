@@ -7,14 +7,18 @@
 
 // struttura dati interna che contiene lo stato interno del task
 typedef struct {
+    
     uint32_t last_frame_num;            // numero dell'ultimo frame ricevuto, se 0 nessun frame ricevuto
     int64_t last_frame_arrival_time;    // timestamp dell'arrivo dell'ultimo frame
+    
     int32_t l_enc, r_enc;               // posizione della ruota sinistra e destra nel frame precedente
     int16_t last_yaw;                   // imbardata misurata nell'ultimo frame
+    
     double x, y;                        // posizione x e y del robot rispetto alla posizione iniziale
     double theta;                       // rotazione del robot rispetto alla rotazione iniziale, normalizzato tra -M_PI e +M_PI
     double v;                           // velocità misurata del robot 
     double omega;                       // velocità angolare misurata del robot
+    
     uint32_t cur_obj_num;               // numero dell'obiettivo in esecuzione al momento
     bool obj_achieved;                  // indica se l'obiettivo attuale è stato raggiunto
 
