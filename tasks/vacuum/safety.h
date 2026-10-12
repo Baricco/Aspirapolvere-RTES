@@ -20,12 +20,14 @@
 #define THRESHOLD_STUCK_RATIO_W 0.2         // frazione della velocità angolare comandata sotto al quale la velocità angolare effettiva è considerata 0
 #define THRESHOLD_SLIP_W        0.3         // differenza massima tra velocità angolare sulle ruote e velocità angolare misurata dall'IMU sopra la quale il robot sta scivolando, espressa in rad/s
 #define THRESHOLD_MAX_CURRENT   1000        // massima corrente a cui possono essere sottoposti i motori prima che scatti l'allarme, espressa in mA
-
 #define THRESHOLD_STUCK_FRAME_COUNTER 38    // numero di frame consecutivi in cui il robot deve risultare bloccato, prima che si attivi l'allarme reale. corrispondono a circa 0,75s
 #define THRESHOLD_SLIP_FRAME_COUNTER  25    // numero di frame consecutivi in cui il robot deve risultare in slittamento, prima che si attivi l'allarme reale. corrispondono a circa 0,50s
 #define THRESHOLD_OVRLD_FRAME_COUNTER 25    // numero di frame consecutivi in cui il robot deve risultare in sovraccarico, prima che si attivi l'allarme reale. corrispondono a circa 0,50s
 
 #define THRESHOLD_DISTANCE  0.25              // soglia di distanza per considerare vicino un ostacolo/zona proibita, espresso in metri
+#define STOP_DISTANCE       0.02              // distanza percorsa dal robot durante la frenata, espressa in metri
+#define MOVEMENT_SAFE_GAIN  1.0               // guadagno usato nella formula per calcolare la velocità massima del robot in base agli ostacoli/zone proibite rilevate, espresso in 1/secondi
+#define LIDAR_SCAN_MAX_AGE  RT_MS(500)        // età massima che può avere una scan del lidar prima di essere considerata invalida, espressa in nanosecondi
 
 typedef struct {    
 

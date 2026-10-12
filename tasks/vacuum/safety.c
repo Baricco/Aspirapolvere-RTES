@@ -5,22 +5,22 @@
 #include "safety.h"
 #include "movement.h"
 #include "lidar.h"
+#include "mapping.h"
 
 // Macro Helper per calcolare il minimo tra due numeri
 #define MIN(a, b) ((a) < (b) ? (a) : (b))
+
+// Macro Helper per calcolare il massimo tra due numeri
+#define MAX(a, b) ((a) > (b) ? (a) : (b))
 
 // struttura dati interna che contiene lo stato interno del task
 typedef struct {
     
     uint32_t last_frame_num;            // numero dell'ultimo frame ricevuto, se 0 nessun frame ricevuto
-    int64_t last_frame_arrival_time;    // timestamp dell'arrivo dell'ultimo frame
     
     uint32_t stuck_frame_counter;       // conta per quanti frame di fila il robot è incastrato
     uint32_t slip_frame_counter;        // conta per quanti frame di fila le ruota slittano
     uint32_t overload_frame_counter;    // conta per quanti frame di file il motore è sotto sforzo
-
-    uint32_t last_scan_num;             // numero dell'ultima scansione del lidar
-    int64_t last_scan_end_t;            // timestamp di fine scansione del lidar
 
 } safety_state_t;
 
@@ -61,6 +61,22 @@ safety_alarm_t read_safety(void) {
 
     // ritorna safety_alarm
     return safety_alarm;
+}
+
+
+
+// Helper che calcola la velocità massima che il robot può raggiungere in sicurezza, data la distanza dell'ostacolo più vicino, limitata tra 0 e MAX_ABSOLUTE_SPEED
+static double get_max_speed(double obstacle_distance) {
+    
+    // calcolo della velocità massima usando il guadagno e la distanza dell'ostacolo
+    double max_speed = MOVEMENT_SAFE_GAIN * (obstacle_distance - STOP_DISTANCE);
+
+    // clamp tra 0 e MAX_ABSOLUTE_SPEED
+    if (max_speed <= 0) return 0;
+    else if (max_speed >= MAX_ABSOLUTE_SPEED) return MAX_ABSOLUTE_SPEED;
+    
+    return max_speed;   
+
 }
 
 // job del task
@@ -163,13 +179,119 @@ void job_safety(void *arg) {
     // Leggi i dati dello scan del lidar
     lidar_scan_data_t scan_data = read_lidar();
 
-    // calcola la distanza minima davanti al robot (prendi i tre settori anteriori), convertiti in metri
-    double front_distance = (MIN(MIN(scan_data.sector_distance[11], scan_data.sector_distance[1]), scan_data.sector_distance[0]) / 1000.0);
 
-    // calcola la distanza minima dietro al robot (prendi i tre settori posteriori), convertiti in metri
-    double back_distance = (MIN(MIN(scan_data.sector_distance[5], scan_data.sector_distance[6]), scan_data.sector_distance[7])/ 1000.0);
-    
-    
+    // crea le variabili di distanza degli ostacoli davanti e dietro l'aspirapolvere e inizializzali alla distanza minima
+    double obstacle_front_distance = THRESHOLD_DISTANCE;
+    double obstacle_back_distance = THRESHOLD_DISTANCE;
 
+
+    // Controlla che i dati dello scan del lidar siano validi
+    if (scan_data.valid && scan_data.num != 0 && (cur_frame.t_ns - scan_data.scan_end_t) < LIDAR_SCAN_MAX_AGE) {
+
+        // calcola la distanza minima davanti al robot (prendi i tre settori anteriori), convertiti in metri
+        obstacle_front_distance = (MIN(MIN(scan_data.sector_distance[11], scan_data.sector_distance[1]), scan_data.sector_distance[0]) / 1000.0);
+
+        // calcola la distanza minima dietro al robot (prendi i tre settori posteriori), convertiti in metri
+        obstacle_back_distance = (MIN(MIN(scan_data.sector_distance[5], scan_data.sector_distance[6]), scan_data.sector_distance[7])/ 1000.0);
+
+    }
+
+    // Attiva l'allarme dell'ostacolo se la distanza davanti o dietro è sotto la soglia di sicurezza
+    if (obstacle_front_distance < THRESHOLD_DISTANCE || obstacle_back_distance < THRESHOLD_DISTANCE) {
+        cur_error_mask |= SAFETY_ERROR_OBSTACLE;
+    }
+
+    // Calcola la velocità massima che il robot può raggiungere avanti e indietro, compresa tra 0 e MAX_ABSOLUTE_SPEED
+    double obstacle_front_max_v = get_max_speed(obstacle_front_distance);
+    double obstacle_back_max_v = get_max_speed(obstacle_back_distance);
+
+
+    // Controllo delle Zone Proibite
+
+    // crea le variabili di distanza delle zone proibite davanti e dietro l'aspirapolvere e inizializzali a infinito
+    double zone_front_distance = INFINITY;
+    double zone_back_distance = INFINITY;
+
+    // Leggi la lista di zone proibite
+    mapping_forbidden_zone_list_t cur_forb_zones = read_forbidden_zone_list();
+
+    // Leggi la posizione attuale del robot
+    movement_position_data_t cur_position = read_movement();
+
+    // se la posizione attuale non è valida e ci sono delle zone proibite
+    if (!cur_position.valid && cur_forb_zones.num_zones > 0) {
+
+        // metti le distanze al minimo, per sicurezza
+        zone_back_distance = THRESHOLD_DISTANCE;
+        zone_front_distance = THRESHOLD_DISTANCE;
+    
+    } else {                    // Se la posizione è valida
+        
+        // Per ogni zona proibita
+
+        // Pre calcola seno e coseno dell'angolo del robot, non dipende dalla zona
+        double sin_theta = sin(cur_position.theta);
+        double cos_theta = cos(cur_position.theta);
+
+        for (int i = 0; i < cur_forb_zones.num_zones; i++) {
+            
+            mapping_forbidden_zone_t cur_forbidden_zone = cur_forb_zones.forbidden_zones[i];
+
+            // Calcola la posizione del robot rispetto alla zona proibita
+            double b_x = cur_forbidden_zone.x - cur_position.x;                             // positivo se il robot è prima della zona proibita nelle x
+            double a_x = cur_position.x - (cur_forbidden_zone.x + cur_forbidden_zone.w);    // positivo se il robot è dopo la zona proibita nelle x
+            double b_y = cur_forbidden_zone.y - cur_position.y;                             // positivo se il robot è prima della zona proibita nelle y
+            double a_y = cur_position.y - (cur_forbidden_zone.y + cur_forbidden_zone.h);    // positivo se il robot è dopo la zona proibita nelle y
+
+            // Calcola il vettore tra il robot e il punto più vicino alla zona proibita
+            double vect_x = MAX(b_x, 0) - MAX(a_x, 0);     // componente x del vettore
+            double vect_y = MAX(b_y, 0) - MAX(a_y, 0);     // componente y del vettore
+            
+            // Se entrambe le componenti del vettore sono 0, il robot si trova dentro la zona proibita
+            if (vect_x == 0 && vect_y == 0) {
+                // attiva l'allarme della forbidden zone
+                cur_error_mask |= SAFETY_ERROR_FORB_ZONE;
+                
+                // procedi con la prossima zona, in modo che per uscire dalla zona il robot non entri
+                // nelle eventuali zone proibite adiacenti
+                continue;
+            }
+
+            // Calcola la distanza e la direzione del robot rispetto alla zona proibita
+            double dist = hypot(vect_x, vect_y) - ROBOT_RADIUS / 1000.0;
+
+            // in base alla direzione del robot rispetto alla zona proibita, aggiorna la front/back distance
+            if (vect_x * cos_theta + vect_y * sin_theta >= 0) zone_front_distance = MIN(zone_front_distance, dist);
+            else zone_back_distance = MIN(zone_back_distance, dist);
+
+        }
+
+        // se la distanza dalle zone proibite rispetto al robot è inferiore alla THRESHOLD_DISTANCE, attiva l'allarme
+        if (zone_front_distance < THRESHOLD_DISTANCE || zone_back_distance < THRESHOLD_DISTANCE) {
+            cur_error_mask |= SAFETY_ERROR_FORB_ZONE;
+        }
+    }
+
+    // calcola le velocità massime per il robot rispetto alle zone proibite
+    double zone_front_max_v = get_max_speed(zone_front_distance);
+    double zone_back_max_v = get_max_speed(zone_back_distance);
+
+    // Pubblicazione degli allarmi generati
+    
+    // inizializza a 0 la struttura allarme corrente
+    safety_alarm_t cur_alarm = {0};
+
+    // riempi l'allarme corrente con i dati appena ricavati
+    cur_alarm.frame_num = cur_frame.numero;
+    cur_alarm.frame_acq_t = cur_frame.t_ns;
+    cur_alarm.error_mask = cur_error_mask;
+    cur_alarm.max_v_forw = MIN(obstacle_front_max_v, zone_front_max_v);
+    cur_alarm.max_v_backw = MIN(obstacle_back_max_v, zone_back_max_v);
+
+    // pubblica il dato sul doppio buffer
+    scambio_scrivi(&double_buffer, &cur_alarm);
+    
+    // aggiorna il numero dell'ultimo frame analizzato
+    safe_state.last_frame_num = cur_frame.numero;
 
 }  
