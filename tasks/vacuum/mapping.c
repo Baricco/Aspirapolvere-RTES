@@ -11,6 +11,13 @@ static mapping_forbidden_zone_list_t buffer1, buffer2;
 // caratteristiche del task
 rt_task_t mapping_task;
 
+
+
+// Griglia di Navigazione come Array piatto
+static uint8_t mapping_navigation_grid[NAV_MAP_CELL_NUMBER*NAV_MAP_CELL_NUMBER];       // Questa mappa dovrebbe essere di 65536 celle int da 1 Byte, quindi una coordinata è un numero di 2 Byte (trick di ottimizzazione della memoria per cui le dimensioni sono così)
+
+
+
 // funzione di inizializzazione del task
 void init_mapping(void) {
 

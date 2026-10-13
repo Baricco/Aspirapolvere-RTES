@@ -60,11 +60,46 @@ I task dell'esame li scrive l'utente da solo, sopra un framework e un driver pre
   il bumper del driver resta la protezione in caso di errori. L'inclinazione da sola non è un allarme (salire su un
   tappeto è normale; i casi pericolosi finiscono in incastro o slittamento).
 
+- **Navigazione e mappatura** (2026-10-13):
+  - **tre strutture**: la **griglia fine** (occupazione, 5 cm) è privata della mappatura; la **griglia di navigazione**
+    (celle larghe poco meno della striscia di pulizia: libera / bloccata / proibita / sconosciuta, con gli ostacoli
+    già ingrossati del raggio del robot) è **condivisa con un mutex con Priority Inheritance**, la scrive solo la
+    mappatura e la legge la navigazione; la **copertura** (una maschera di bit, una per cella di navigazione) è
+    privata della navigazione;
+  - la mappatura aggiorna la griglia di navigazione **a ogni job**, insieme alla griglia fine, non solo al
+    salvataggio: un ostacolo imprevisto visto dal lidar entra nella mappa prima che scatti la sicurezza, e la
+    navigazione prende la mappa nuova (serve un segnale "mappa cambiata" dalla mappatura alla navigazione);
+  - **sezioni critiche brevi**: la navigazione tiene il mutex solo per copiare la griglia di navigazione, poi lavora
+    sulla copia; la mappatura solo per scrivere le celle della griglia di navigazione;
+  - **due fasi**: senza una mappa salvata il robot prima la costruisce con un giro di esplorazione (verso le
+    frontiere fra libero e sconosciuto), poi pulisce con **BA\*** (strisce + ritorno alla cella non pulita più vicina)
+    sulla mappa. La pulizia parte sempre dalla base, la cui posizione è salvata nella mappa;
+  - **la base è una zona proibita permanente** (nella lista delle zone, non come celle occupate, così la mappatura
+    non la cancella quando il lidar vede libero): il robot non deve urtarla né trascinarla. Si parte uscendo in
+    avanti fino a un punto davanti alla base. **L'aggancio non lo fanno i task RT** (niente eccezioni nella
+    sicurezza): la navigazione porta il robot al bordo della zona, poi chiede al driver (o a un altro componente
+    fuori dai task) di fare la messa in carica con l'infrarosso della base; durante l'aggancio il driver ignora le
+    velocità mandate dai task e tiene attive le sue protezioni (bumper, anti-caduta). Da progettare con il driver;
+  - **dimensioni**: griglia fine 1024 × 1024 celle da 5 cm, griglia di navigazione 256 × 256 celle da 20 cm
+    (segnaposto, dipende dalla striscia): 51,2 m di lato, ±25,6 m dalla base. Le potenze di due fanno stare le
+    coordinate di una cella di navigazione in un `uint8_t` e il suo indice in un `uint16_t`;
+  - **segnale "mappa cambiata"**: numero di versione atomico (`stdatomic.h`) nella mappa condivisa; la mappatura lo
+    incrementa (dentro il mutex) quando una cella di navigazione cambia stato, la navigazione lo legge a ogni job
+    senza mutex e copia la griglia solo se è cambiato, salvando la versione letta dentro il mutex;
+  - **trasferimenti e ritorno alla base** cercando il percorso sulle celle già pulite (terreno già percorso), con
+    ripiego su tutte le celle libere: A* quando la meta è nota (la base), ricerca in ampiezza quando la meta è "la
+    cella non pulita più vicina".
+
 ## Ancora da decidere
+- **Mappa e navigazione, punti aperti** (2026-10-13): larghezza della striscia (dalla spazzola centrale), ingombro
+  della base, aggancio alla base nel driver (passaggio di consegne dai task al driver e ritorno).
 - **Tipo di server aperiodico** (polling, deferrable, sporadic) e **tipo di app** (con l'home server, più avanti:
   zone proibite, preferenze, programmazione della pulizia).
 - **Assegnazione dei task ai core**: rimandata (2026-10-06) a quando ci saranno i WCET misurati sul robot; il criterio
-  (per esempio Worst-Fit sulle utilizzazioni, per bilanciare) si sceglie allora.
+  (per esempio Worst-Fit sulle utilizzazioni, per bilanciare) si sceglie allora. Già deciso (2026-10-13):
+  **navigazione e mappatura sullo stesso core**, perché condividono la mappa con il mutex. Sullo stesso core
+  l'ereditarietà di priorità vale come nella teoria a un processore, e nessuno dei due aspetta un task che gira su un
+  altro core.
 - **Scambio dei dati fra i task.** Proposta (2026-10-06, da confermare): doppio buffer con numero di versione
   (`driver/scambio.h`, lo stesso del driver) per ogni dato pubblicato da un solo task (posizione, allarmi, ostacoli,
   obiettivo, posizione corretta): lo scrittore non aspetta mai e non c'è tempo di blocco nell'analisi. Mutex con
@@ -135,7 +170,7 @@ batteria, watchdog dei task + stato di guasto (~50 ms).
 | Controllo del moto | frame del GD32 | 20 ms | odometria (encoder + imbardata dell'IMU) e v/ω verso l'obiettivo della navigazione, in anello chiuso sulle misure |
 | Sicurezza del moto | frame del GD32 | 20 ms | incastrato/slittamento (comandato vs encoder, correnti, IMU), bordo delle zone proibite: ferma il robot |
 | Lidar | timer | 200 ms | elaborazione del giro: ostacoli, distanze, dati per mappa e navigazione |
-| Navigazione | timer | 200 ms (forse 100) | dove andare: copertura, seguimuro, evitare ostacoli e zone proibite |
+| Navigazione | timer | 100 ms | dove andare: esplorazione, copertura con BA*, evitare ostacoli e zone proibite |
 | Mappatura | timer | 200 ms (500 se il WCET non ci sta) | griglia di occupazione + allineamento delle scansioni |
 | Comandi, LED, spazzole, aspirazione, stato | server aperiodico | budget del server | eventi dall'app e dall'home server |
 | Telemetria e log | sfondo | best effort | non RT |

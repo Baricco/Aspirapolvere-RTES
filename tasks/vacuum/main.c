@@ -8,7 +8,8 @@
 #include "lidar.h"
 #include "movement.h"
 #include "navigation.h"
-
+#include "safety.h"
+#include "mapping.h"
 
 // Gestione Graceful Exit dei segnali CTRL + C 
 static volatile sig_atomic_t fine;
@@ -95,6 +96,8 @@ int main(void) {
 	init_lidar();
        init_movement();
        init_navigation();
+       init_safety();
+       init_mapping();
 
        // Task del lidar
 	rt_task_cfg_t task_cfg_lidar = {
@@ -114,11 +117,20 @@ int main(void) {
               .job = job_movement,
        };
 
+       // Task della safety
+       rt_task_cfg_t task_cfg_safety = {
+              .nome = "task_safety",
+              .cpu = 1,
+              .sporadico = 1,
+              .periodo_ns = RT_MS(15),
+              .job = job_safety,
+       };
+
        
        // Creiamo l'array di puntatori ai task_cfg per
        // poter calcolare le priorità dei task usando
        // RM a partire dai loro periodi
-       rt_task_cfg_t *task_cfgs[] = { &task_cfg_lidar, &task_cfg_movement };
+       rt_task_cfg_t *task_cfgs[] = { &task_cfg_lidar, &task_cfg_movement, &task_cfg_safety };
 
        // calcola il numero di task dentro l'array
        int task_number = sizeof(task_cfgs) / sizeof(task_cfgs[0]);
@@ -146,6 +158,7 @@ int main(void) {
 		return 1;
 	}
 
+       // Avvia il task movement
        if (rt_task_avvia(&movement_task, &task_cfg_movement, now_time)) {
               // in caso di problemi ferma tutto, inclusi i task
               // avviati prima e ritorna 1
@@ -154,16 +167,29 @@ int main(void) {
               return 1;
        }
 
+       // Avvia il task safety
+       if (rt_task_avvia(&safety_task, &task_cfg_safety, now_time)) {
+              // in caso di problemi ferma tutto, inclusi i task
+              // avviati prima e ritorna 1
+              rt_task_ferma(&lidar_task);
+              rt_task_ferma(&movement_task);
+              drv_ferma();
+              return 1;
+       }
+
 
        // sveglia il task del moto con l'arrivo del frame dai sensori
        drv_sveglia_ai_sensori(&movement_task);
+
+       // sveglia il task della safety con l'arrivo del frame dai sensori
+       drv_sveglia_ai_sensori(&safety_task);
 
 
        // attiva il watchdog dei task, questa verifica che non 
        // missati più di 3 periodi
        drv_sorveglia(&lidar_task, 0, 0);
        drv_sorveglia(&movement_task, 1, 0);
-
+       drv_sorveglia(&safety_task, 1, 0);
 
 
 	// ciclo di esecuzione main loop
@@ -247,10 +273,13 @@ int main(void) {
        // Spegni il Watchdog dei task
        drv_dimentica(&lidar_task);               // lidar
        drv_dimentica(&movement_task);            // movimento
+       drv_dimentica(&safety_task);              // safety
+
 
        // ferma i task
        rt_task_ferma(&lidar_task);               // lidar
        rt_task_ferma(&movement_task);            // movimento
+       rt_task_ferma(&safety_task);            // safety
 
 	// ferma il driver 
        drv_ferma();
@@ -259,6 +288,8 @@ int main(void) {
        // cioè job eseguiti, deadline miss e tempi di esecuzione
        rt_stats_stampa(&lidar_task);      // lidar
        rt_stats_stampa(&movement_task);   // movimento
+       rt_stats_stampa(&safety_task);     // safety
+
 
 	return 0;
 }
