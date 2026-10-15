@@ -97,7 +97,12 @@ int main(void) {
        init_movement();
        init_navigation();
        init_safety();
-       init_mapping();
+       // se mapping fallisce nell'inizializzazione del mutex, 
+       // chiudi il driver e ferma tutto
+       if (init_mapping() != 0) {
+              drv_ferma();
+              return 1;
+       }
 
        // Task del lidar
 	rt_task_cfg_t task_cfg_lidar = {

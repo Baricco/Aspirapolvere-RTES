@@ -32,26 +32,46 @@ enum mapping_nav_cell_state{
 };
 
 // Funzione helper per calcolare l'indice della cella nella navigation map partendo dalle coordinate espresse in metri rispetto all'origine
-static inline uint16_t coord_to_index(double x, double y) { 
+static inline uint16_t coord_to_nav_index(double x, double y) { 
     // prende le due coordinate (x,y) e ne calcola l'indice nella navigation map. l'indice è un numero a 16bit composto da 8bit che sono la y + 8bit che sono la x
     return (uint16_t)(floor(y / NAV_MAP_CELL_SIZE) + NAV_MAP_ORIGIN) << 8 | (uint16_t)(floor(x / NAV_MAP_CELL_SIZE) + NAV_MAP_ORIGIN);
 }
 
 // Funzione helper per calcolare le coordinate x,y del robot partendo da una cella della navigation map
-static inline void index_to_coord(uint16_t index, double *x, double *y) {
+static inline void nav_index_to_coord(uint16_t index, double *x, double *y) {
 
     // esegue l'operazione inversa di coord_to_index per ottenere la y e la x dall'indice della cella.
     // siccome in coord_to_index tutti i punti in una cella cadono nello stesso indice, questa funzione
-    // aggiunge 0.5 per prendere il punto che si trova nel centro geometrico della cella, l'errore è di 5cm al massimo
+    // aggiunge 0.5 per prendere il punto che si trova nel centro geometrico della cella, l'errore è di 10cm al massimo
     *y = index >> 8;
-    *y -= NAV_MAP_ORIGIN + 0.5;
+    *y -= NAV_MAP_ORIGIN - 0.5;
     *y *= NAV_MAP_CELL_SIZE;
 
     *x = index & 0xFF;
-    *x -= NAV_MAP_ORIGIN + 0.5;
+    *x -= NAV_MAP_ORIGIN - 0.5;
     *x *= NAV_MAP_CELL_SIZE;
 }
 
+// Funzione helper per calcolare l'indice della cella nella fine map partendo dalle coordinate espresse in metri rispetto all'origine
+static inline uint32_t coord_to_fine_index(double x, double y) { 
+    // prende le due coordinate (x,y) e ne calcola l'indice nella fine map. l'indice è un numero a 20bit composto da 10bit che sono la y + 10bit che sono la x
+    return (uint32_t)(floor(y / FINE_MAP_CELL_SIZE) + FINE_MAP_ORIGIN) << 10 | (uint16_t)(floor(x / FINE_MAP_CELL_SIZE) + FINE_MAP_ORIGIN);
+}
+
+// Funzione helper per calcolare le coordinate x,y del robot partendo da una cella della fine map
+static inline void fine_index_to_coord(uint32_t index, double *x, double *y) {
+
+    // esegue l'operazione inversa di coord_to_index per ottenere la y e la x dall'indice della cella.
+    // siccome in coord_to_index tutti i punti in una cella cadono nello stesso indice, questa funzione
+    // aggiunge 0.5 per prendere il punto che si trova nel centro geometrico della cella, l'errore è di 2,5cm al massimo
+    *y = index >> 10;
+    *y -= FINE_MAP_ORIGIN - 0.5;
+    *y *= FINE_MAP_CELL_SIZE;
+
+    *x = index & 0x3FF;
+    *x -= FINE_MAP_ORIGIN - 0.5;
+    *x *= FINE_MAP_CELL_SIZE;
+}
 // Struttura dati che identifica una zona proibita (rettangolo)
 typedef struct {    
 
@@ -72,10 +92,12 @@ typedef struct {
 // caratteristiche del task mapping, definita in mapping.c
 extern rt_task_t mapping_task;
 
-void init_mapping(void);
+int init_mapping(void);
 mapping_forbidden_zone_list_t read_forbidden_zone_list(void);
 // funzione per pubblicare la lista di zone proibite (lo leggerà task navigation e safety)
 void write_forbidden_zone_list(const mapping_forbidden_zone_list_t *new_forbidden_zones);
+uint32_t read_nav_map_version_number(void);
+uint32_t read_nav_map(uint8_t *navigation_map);
 void job_mapping(void *arg);
 
 
