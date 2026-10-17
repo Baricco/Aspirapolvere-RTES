@@ -24,12 +24,12 @@
 
 
 // Enum degli stati delle celle di navigazione
-enum mapping_nav_cell_state{
+typedef enum {
     NAV_CELL_UNKNOWN,                    // Cella Sconosciuta: la cella non è ancora stata esplorata
     NAV_CELL_FREE,                       // Cella Libera: la cella è vuota e percorribile
     NAV_CELL_BLOCKED,                    // Cella Bloccata: la cella è coperta da un ostacolo
     NAV_CELL_FORBIDDEN                   // Cella Proibita: la cella è in una Zona Proibita, non è percorribile
-};
+} mapping_nav_cell_state;
 
 // Funzione helper per calcolare l'indice della cella nella navigation map partendo dalle coordinate espresse in metri rispetto all'origine
 static inline uint16_t coord_to_nav_index(double x, double y) { 

@@ -97,6 +97,7 @@ int main(void) {
        init_movement();
        init_navigation();
        init_safety();
+
        // se mapping fallisce nell'inizializzazione del mutex, 
        // chiudi il driver e ferma tutto
        if (init_mapping() != 0) {
@@ -130,12 +131,21 @@ int main(void) {
               .periodo_ns = RT_MS(15),
               .job = job_safety,
        };
+       
+       // Task della mappatura
+       rt_task_cfg_t task_cfg_mapping = {
+              .nome = "task_mapping",
+              .cpu = 2,
+              .sporadico = 0,
+              .periodo_ns = RT_MS(200),
+              .job = job_mapping,
+       };
 
        
        // Creiamo l'array di puntatori ai task_cfg per
        // poter calcolare le priorità dei task usando
        // RM a partire dai loro periodi
-       rt_task_cfg_t *task_cfgs[] = { &task_cfg_lidar, &task_cfg_movement, &task_cfg_safety };
+       rt_task_cfg_t *task_cfgs[] = { &task_cfg_lidar, &task_cfg_movement, &task_cfg_safety, &task_cfg_mapping };
 
        // calcola il numero di task dentro l'array
        int task_number = sizeof(task_cfgs) / sizeof(task_cfgs[0]);
@@ -182,6 +192,16 @@ int main(void) {
               return 1;
        }
 
+       // Avvia il task mapping
+       if (rt_task_avvia(&mapping_task, &task_cfg_mapping, now_time)) {
+              // in caso di problemi ferma tutto, inclusi i task
+              // avviati prima e ritorna 1
+              rt_task_ferma(&lidar_task);
+              rt_task_ferma(&movement_task);
+              rt_task_ferma(&safety_task);
+              drv_ferma();
+              return 1;
+       }
 
        // sveglia il task del moto con l'arrivo del frame dai sensori
        drv_sveglia_ai_sensori(&movement_task);
@@ -195,6 +215,7 @@ int main(void) {
        drv_sorveglia(&lidar_task, 0, 0);
        drv_sorveglia(&movement_task, 1, 0);
        drv_sorveglia(&safety_task, 1, 0);
+       drv_sorveglia(&mapping_task, 0, 0);
 
 
 	// ciclo di esecuzione main loop
@@ -279,12 +300,14 @@ int main(void) {
        drv_dimentica(&lidar_task);               // lidar
        drv_dimentica(&movement_task);            // movimento
        drv_dimentica(&safety_task);              // safety
+       drv_dimentica(&mapping_task);             // mappatura
 
 
        // ferma i task
        rt_task_ferma(&lidar_task);               // lidar
        rt_task_ferma(&movement_task);            // movimento
-       rt_task_ferma(&safety_task);            // safety
+       rt_task_ferma(&safety_task);              // safety
+       rt_task_ferma(&mapping_task);             // mappatura
 
 	// ferma il driver 
        drv_ferma();
@@ -294,6 +317,8 @@ int main(void) {
        rt_stats_stampa(&lidar_task);      // lidar
        rt_stats_stampa(&movement_task);   // movimento
        rt_stats_stampa(&safety_task);     // safety
+       rt_stats_stampa(&mapping_task);    // mappatura
+
 
 
 	return 0;

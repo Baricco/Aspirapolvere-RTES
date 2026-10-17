@@ -89,6 +89,14 @@ I task dell'esame li scrive l'utente da solo, sopra un framework e un driver pre
   - **trasferimenti e ritorno alla base** cercando il percorso sulle celle già pulite (terreno già percorso), con
     ripiego su tutte le celle libere: A* quando la meta è nota (la base), ricerca in ampiezza quando la meta è "la
     cella non pulita più vicina".
+  - **mappatura, prima versione scritta** (2026-10-17, `tasks/vacuum/mapping.c`, senza allineamento delle scansioni):
+    periodo 200 ms sul core 2 (ci andrà anche la navigazione), watchdog non critico. Punteggio per cella fine in
+    `int8_t` (colpo +30, raggio che attraversa −10, limiti ±100), **niente isteresi**: occupata se > 50. Raggi con
+    Bresenham, tagliati a 6 m senza colpo (oltre il rumore del lidar triplica, `docs/hardware.md`); punti senza eco
+    scartati (possono essere ostacoli che assorbono la luce). Due contatori per cella di navigazione aggiornati solo
+    quando una cella fine cambia categoria: osservate (celle fini dentro la cella con punteggio ≠ 0) e occupate
+    (celle fini occupate entro 20 cm dal centro: ingrossamento preciso). Pubblicazione a ogni job del quadrato ±31
+    celle attorno al robot, sotto mutex, con versione incrementata solo se qualcosa cambia.
 
 ## Ancora da decidere
 - **Mappa e navigazione, punti aperti** (2026-10-13): larghezza della striscia (dalla spazzola centrale), ingombro
