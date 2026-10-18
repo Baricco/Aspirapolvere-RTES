@@ -97,6 +97,25 @@ I task dell'esame li scrive l'utente da solo, sopra un framework e un driver pre
     quando una cella fine cambia categoria: osservate (celle fini dentro la cella con punteggio ≠ 0) e occupate
     (celle fini occupate entro 20 cm dal centro: ingrossamento preciso). Pubblicazione a ogni job del quadrato ±31
     celle attorno al robot, sotto mutex, con versione incrementata solo se qualcosa cambia.
+  - **correzione del giro** (2026-10-18, fatta): ogni punto del lidar si mette in mappa con la posa del robot
+    nel suo istante (tempi del giro `t_inizio_ns`/`t_fine_ns`), ricavata tornando indietro dalla posa del moto con `v`
+    e `omega` (velocità costante durante il giro), anche come partenza del raggio. Rete di sicurezza: giro scartato se
+    |omega| > 1,5 rad/s. Visto con la griglia sovrapposta nel simulatore: senza correzione una rotazione a 1 rad/s
+    sposta i muri lontani fino a ~1 m;
+  - **ostacoli che il lidar non vede** (2026-10-18): tutta la memoria degli ostacoli sta nella **mappatura** (la
+    navigazione naviga e basta). Il **driver** tiene un registro dei contatti (`driver/contatti.h`, `drv_contatti()`,
+    FATTO): gli ultimi 32 scatti di anti-caduta (dopo 3 frame di fila, contro i falsi allarmi dei tappeti scuri) e di
+    bumper, con numero progressivo, sensore e istante; niente eventi con sensori spenti, sulla base o con tutti e
+    quattro gli anti-caduta nel vuoto (sollevato). Ogni evento porta la **posizione del robot** che il moto dà al driver
+    a ogni frame con `drv_posa()` (quella del primo frame attivo, 20 ms prima al massimo: la ricostruzione con `v` e
+    `omega` sbagliava proprio quando il robot reagisce all'evento). La **mappatura** (fatto) applica gli eventi
+    nuovi: posizione del sensore (anti-caduta a 15 cm dal centro a
+    +50/+18/-18/-50 gradi; bumper 2 cm oltre il bordo a +-45 gradi, davanti se premuti tutti e due: da verificare sul
+    robot), cella fine con un valore speciale che il lidar non può più cambiare (-128 vuoto, 127 ostacolo basso) e
+    contatori come per una cella diventata occupata. Facoltativo: l'incastro dalla sicurezza (`read_safety`), che resta
+    attivo abbastanza a lungo da non perderlo. I segni valgono per la sessione;
+  - **rumore della mappa** (2026-10-18): la versione cresce anche con il robot fermo (celle di bordo che cambiano
+    stato); si accetta per ora, da misurare e tarare dopo la correzione del giro.
 
 ## Ancora da decidere
 - **Mappa e navigazione, punti aperti** (2026-10-13): larghezza della striscia (dalla spazzola centrale), ingombro

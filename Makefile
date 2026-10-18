@@ -36,8 +36,8 @@ SPIA_SRC = spia/spia.c spia/registro.c spia/everest.c
 SPIA_HDR = spia/registro.h spia/everest.h
 
 # Driver (driver/): il nostro sostituto di AuxCtrl. rtes-driver è il programma per provarlo da solo.
-DRIVER_SRC = driver/driver.c driver/scambio.c driver/batteria.c driver/lidar_giro.c spia/registro.c
-DRIVER_HDR = driver/driver.h driver/scambio.h driver/batteria.h driver/lidar_giro.h spia/registro.h
+DRIVER_SRC = driver/driver.c driver/scambio.c driver/batteria.c driver/lidar_giro.c driver/contatti.c spia/registro.c
+DRIVER_HDR = driver/driver.h driver/scambio.h driver/batteria.h driver/lidar_giro.h driver/contatti.h spia/registro.h
 
 # Simulatore (sim/): GD32 e lidar finti su pseudo-seriali, pagina web con la stanza. Solo per il PC.
 SIM_LIB = sim/mondo.c sim/gd32sim.c sim/lidarsim.c sim/parametri.c
@@ -48,7 +48,7 @@ SIM_HDR = sim/mondo.h sim/gd32sim.h sim/lidarsim.h sim/parametri.h sim/robot.h
 
 all: host arm
 
-host: $(addprefix build/host/,$(PROGRAMMI) $(STRUMENTI) $(TEST)) build/host/sim
+host: $(addprefix build/host/,$(PROGRAMMI) $(STRUMENTI) $(TEST)) build/host/sim build/host/osserva
 arm:  $(addprefix build/arm/,$(PROGRAMMI) $(STRUMENTI) $(TEST))
 
 # Programmi in bench/: un file bench/<nome>.c diventa l'eseguibile <nome>.
@@ -105,8 +105,13 @@ build/host/sim: $(SIM_SRC) $(SIM_HDR) $(PROTO_SRC) $(PROTO_HDR)
 	@mkdir -p $(@D)
 	$(CC_HOST) $(CFLAGS_HOST) -o $@ $(SIM_SRC) $(PROTO_SRC) -lm
 
+# Lancia un programma dei task e ne legge la griglia di navigazione per la pagina del simulatore (sim/osserva.c).
+build/host/osserva: sim/osserva.c
+	@mkdir -p $(@D)
+	$(CC_HOST) $(CFLAGS_HOST) -o $@ sim/osserva.c
+
 # Ogni test si collega a tutte le librerie (sono piccole): protocolli, rt, driver (senza il thread) e simulatore.
-TEST_LIB = $(RT_SRC) $(PROTO_SRC) spia/registro.c driver/scambio.c driver/batteria.c driver/lidar_giro.c $(SIM_LIB)
+TEST_LIB = $(RT_SRC) $(PROTO_SRC) spia/registro.c driver/scambio.c driver/batteria.c driver/lidar_giro.c driver/contatti.c $(SIM_LIB)
 TEST_HDR = $(RT_HDR) $(PROTO_HDR) $(SPIA_HDR) $(DRIVER_HDR) $(SIM_HDR) test/test.h
 
 build/host/test_%: test/test_%.c $(TEST_LIB) $(TEST_HDR)

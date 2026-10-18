@@ -12,6 +12,7 @@
  *     GD32 toglie potenza ai motori dopo ~1,9 s); velocità 0x66 ogni 20 ms;
  *   - sensori: decodifica il frame 0x15 (50 Hz), lo pubblica e sveglia i task iscritti (drv_sveglia_ai_sensori);
  *   - lidar: alimentazione, regolazione della velocità (come AuxCtrl), giri completi pubblicati;
+ *   - contatti: registro degli scatti di anti-caduta e bumper, per i task lenti (contatti.h, drv_contatti);
  *   - batteria: tensione media, percentuale, soglie (batteria.h); alimentazione dei sensori secondo la base (0x9d);
  *   - sicurezza: ogni comando ai motori passa dai limiti "a terra" (sic_terra_limita in gd32/sicurezza.h), oppure
  *     dal blocco del banco di prova se il robot è sollevato apposta (drv_config_t.banco);
@@ -44,6 +45,7 @@
 #include "../gd32/gd32.h"
 #include "../rt/rt.h"
 #include "batteria.h"
+#include "contatti.h"
 #include "lidar_giro.h"
 
 /* ---------------------------------------------------------------------------------------- configurazione --- */
@@ -144,6 +146,9 @@ typedef struct {
 uint32_t drv_sensori(drv_sensori_t *out);
 uint32_t drv_giro(lidar_giro_t *out);       /* ultimo giro completo del lidar (struttura grande: ~4 KB) */
 uint32_t drv_stato(drv_stato_t *out);
+/* Registro dei contatti (driver/contatti.h): gli ultimi CONTATTI_N scatti di anti-caduta e bumper, ciascuno con il
+ * suo numero progressivo, il sensore e l'istante. Il numero di versione cambia solo quando arriva un evento nuovo. */
+uint32_t drv_contatti(drv_contatti_t *out);
 
 /* Punto del lidar nel sistema del robot: origine al CENTRO del robot, x in avanti, y a sinistra, in metri. Tiene conto
  * di verso degli angoli, scarto (già tolto in p->angolo_cdeg), posizione del lidar e scostamento ottico
@@ -158,6 +163,9 @@ void drv_spazzole(int laterale, int centrale);      /* -100..100; centrale < 0 =
 void drv_aspirazione(int giri_min);                 /* 0..30000; rifiutata se drv_config_t.aspirazione = 0 */
 void drv_led(int modo);                             /* 0x8d: 0 spento, 1 azzurro... (tabella in docs/RIEPILOGO.md) */
 void drv_lidar(int acceso, double giri_s);          /* giri_s <= 0: la velocità della configurazione */
+/* La posizione del robot (metri e radianti nel sistema della mappa), dal task del moto a ogni frame quando è valida:
+ * il driver la attacca agli eventi del registro dei contatti (contatti.h). La deve chiamare UN SOLO task. */
+void drv_posa(double x, double y, double theta);
 void drv_esci_dalla_base(int si);                   /* 1 = permette di muoversi piano anche sulla base (i contatti
                                                        sono dietro: si esce IN AVANTI) */
 void drv_suono(const char *nome);                   /* es. "sound_beep_beep" (file in /usr/share/audio/english) */

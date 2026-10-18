@@ -397,6 +397,9 @@ void job_movement(void *arg) {
         // Crea un oggetto movement_position_data_t e riempilo con la funzione helper
         movement_position_data_t cur_pos_data = get_cur_pos_data_from_cur_state(&mov_state);
 
+        // se la posizione è valida, manda la posizione al driver
+        if (cur_pos_data.valid) drv_posa(cur_pos_data.x, cur_pos_data.y, cur_pos_data.theta);
+
         // Pubblica la nuova pos_data appena calcolata
         scambio_scrivi(&double_buffer, &cur_pos_data);
 

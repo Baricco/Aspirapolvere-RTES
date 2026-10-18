@@ -13,7 +13,11 @@
  *
  * HTTP: GET / e i file di sim/web; GET /stato (JSON); GET /stanza (testo) e POST /stanza (sostituisce la stanza);
  *       GET /stanze; POST /comando (una riga: vedi esegui_comando); GET /campi (descrizione dei messaggi, JSON);
- *       GET /storia?dopo=N (messaggi registrati dopo il numero N, JSON).
+ *       GET /storia?dopo=N (messaggi registrati dopo il numero N, JSON);
+ *       GET /mappa-robot (la griglia di navigazione del programma, letta da build/host/osserva: vedi sim/osserva.c).
+ * Griglia del robot: quando nel file di osserva compare un programma nuovo (pid diverso), il simulatore si segna la
+ * posizione vera del robot in quel momento: è l'origine dell'odometria del programma, e la pagina disegna la griglia
+ * a partire da lì (in /stato, campo "programma").
  *
  * Uso: build/host/sim [opzioni] [stanza.txt]
  *   --porta N            porta della pagina (default 8080; 0 = niente pagina)
@@ -66,6 +70,8 @@ static double t0;
 static const char *dir_stanze = "sim/stanze", *dir_web = "sim/web";
 static char stanza_corrente[600] = "(nuova)";
 static volatile sig_atomic_t fermati;
+static char file_mappa[600];             /* il file scritto da osserva (dir/mappa_robot) */
+static struct { uint32_t pid; double x, y, dir; } programma;   /* origine del programma osservato */
 
 static void al_segnale(int s) { (void)s; fermati = 1; }
 
@@ -309,7 +315,9 @@ static void stato_json(testo_t *s)
 		ag(s, "%s%.3f,%.3f", i ? "," : "", l.giro_x[i], l.giro_y[i]);
 	ag(s, "]},\"avviso\":");
 	ag_stringa(s, g.avviso);
-	ag(s, ",\"t_avviso\":%.1f,\"storia_n\":%llu}", g.t_avviso, (unsigned long long)storia_n);
+	ag(s, ",\"t_avviso\":%.1f,\"storia_n\":%llu,", g.t_avviso, (unsigned long long)storia_n);
+	ag(s, "\"programma\":{\"pid\":%u,\"x\":%.4f,\"y\":%.4f,\"dir\":%.5f}}", programma.pid, programma.x, programma.y,
+	   programma.dir);
 }
 
 static void campo_json(testo_t *s, const campo_t *c)
@@ -549,6 +557,15 @@ static void servi(int fd)
 		int r = esegui_comando(corpo, risp, sizeof risp);
 		pthread_mutex_unlock(&mx);
 		rispondi_testo(fd, r ? "400 Bad Request" : "200 OK", risp);
+	} else if (get && !strcmp(percorso, "/mappa-robot")) {
+		size_t k;
+		char *b = leggi_file(file_mappa, &k);
+		if (!b) {
+			rispondi_testo(fd, "404 Not Found", "nessun programma osservato");
+		} else {
+			rispondi(fd, "200 OK", "application/octet-stream", b, k);
+			free(b);
+		}
 	} else if (get && percorso[0] == '/' && !strchr(percorso + 1, '/')) {
 		servi_file(fd, percorso + 1);
 	} else {
@@ -588,6 +605,28 @@ static void stampa_stato(double t)
 	       g.tensione, g.led, l.giri_s, (unsigned long long)g.frame_ricevuti, fmin(999, t - g.ultimo_hb),
 	       t - g.ultimo_ka, g.reset ? "  RESET!" : "", g.sollevato ? "  sollevato" : "", g.incastrato ? "  incastrato" : "");
 	fflush(stdout);
+}
+
+/* Programma nuovo nel file di osserva? Allora la posizione vera di adesso è l'origine della sua odometria (il robot è
+ * ancora fermo: osserva scrive il file appena lancia il programma, prima che il driver parta). Va chiamata con mx. */
+static void controlla_programma(void)
+{
+	int fd = open(file_mappa, O_RDONLY);
+	if (fd < 0)
+		return;
+	uint8_t b[8];
+	ssize_t k = read(fd, b, sizeof b);
+	close(fd);
+	uint32_t pid;
+	if (k != (ssize_t)sizeof b || memcmp(b, "RTNM", 4))
+		return;
+	memcpy(&pid, b + 4, 4);
+	if (pid == programma.pid)
+		return;
+	programma.pid = pid;
+	programma.x = g.x;
+	programma.y = g.y;
+	programma.dir = g.dir;
 }
 
 int main(int argc, char **argv)
@@ -648,6 +687,7 @@ int main(int argc, char **argv)
 	char p_gd32[512], p_lidar[512];
 	snprintf(p_gd32, sizeof p_gd32, "%s/gd32", dir);
 	snprintf(p_lidar, sizeof p_lidar, "%s/lidar", dir);
+	snprintf(file_mappa, sizeof file_mappa, "%s/mappa_robot", dir);
 	pty_t pg, pl;
 	if (apri_pty(&pg, p_gd32) || apri_pty(&pl, p_lidar)) {
 		fprintf(stderr, "sim: non riesco a creare le pseudo-seriali: %s\n", strerror(errno));
@@ -693,7 +733,7 @@ int main(int argc, char **argv)
 
 	gd32_deframer_t dfr;
 	gd32_deframer_init(&dfr);
-	double prossimo_passo = 0.002, prossima_stampa = 1;
+	double prossimo_passo = 0.002, prossima_stampa = 1, prossimo_controllo = 0;
 	while (!fermati) {
 		/* dorme fino al prossimo passo della fisica (2 ms) o alla prossima consegna, se viene prima */
 		pthread_mutex_lock(&mx);
@@ -727,6 +767,12 @@ int main(int argc, char **argv)
 		pthread_mutex_unlock(&mx);
 		while (prossimo_passo <= t)
 			prossimo_passo += 0.002;
+		if (t >= prossimo_controllo) {                  /* 10 volte al secondo: c'è un programma nuovo? */
+			pthread_mutex_lock(&mx);
+			controlla_programma();
+			pthread_mutex_unlock(&mx);
+			prossimo_controllo = t + 0.1;
+		}
 		if (stampa && t >= prossima_stampa) {
 			pthread_mutex_lock(&mx);
 			stampa_stato(t);

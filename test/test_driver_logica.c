@@ -1,6 +1,7 @@
 /*
  * Test della logica del driver che non usa Linux: scambio senza mutex (anche con più thread), batteria,
- * giri del lidar (con un pacchetto vero del robot), regolatore della velocità del lidar, limiti "a terra".
+ * giri del lidar (con un pacchetto vero del robot), regolatore della velocità del lidar, limiti "a terra",
+ * registro dei contatti (anti-caduta e bumper).
  */
 #include <math.h>
 #include <pthread.h>
@@ -10,6 +11,7 @@
 
 #include "test.h"
 #include "../driver/batteria.h"
+#include "../driver/contatti.h"
 #include "../driver/lidar_giro.h"
 #include "../driver/scambio.h"
 #include "../gd32/gd32.h"
@@ -401,6 +403,119 @@ static void a_terra(void)
 	CONTROLLA(sic_terra_limita(&s, 0, &v, &w) == SIC_LIM_SENSORI && v == 0);
 }
 
+/* -------------------------------------------------------------------------------------------- contatti --- */
+
+#define MS(x) ((int64_t)(x) * 1000000)
+
+static gd32_sensori_t sensori_a_terra(void)
+{
+	gd32_sensori_t s;
+	memset(&s, 0, sizeof s);
+	s.controllo = GD32_CONTROLLO_SENSORI_ACCESI;
+	return s;
+}
+
+static void contatti(void)
+{
+	contatti_t c;
+	contatti_init(&c);
+	gd32_sensori_t s = sensori_a_terra();
+	int64_t t = MS(1000);
+
+	/* niente attivo: niente eventi */
+	CONTROLLA(contatti_frame(&c, &s, t, NULL) == 0 && c.pub.ultimo == 0);
+
+	/* anti-caduta 1: 2 frame non bastano, al terzo l'evento, con l'istante del primo */
+	s.cliff[1] = 1;
+	CONTROLLA(contatti_frame(&c, &s, t += MS(20), NULL) == 0);
+	int64_t primo = t;
+	CONTROLLA(contatti_frame(&c, &s, t += MS(20), NULL) == 0);
+	CONTROLLA(contatti_frame(&c, &s, t += MS(20), NULL) == 1);
+	CONTROLLA(c.pub.ultimo == 1 && c.pub.ev[1].numero == 1 && c.pub.ev[1].sensore == CONTATTO_VUOTO_SX_ANT);
+	CONTROLLA(c.pub.ev[1].t_ns == primo);
+	/* resta attivo: nessun altro evento */
+	for (int i = 0; i < 10; i++)
+		CONTROLLA(contatti_frame(&c, &s, t += MS(20), NULL) == 0);
+	CONTROLLA(c.pub.ultimo == 1);
+
+	/* un lampo di 2 frame dopo essere tornato normale: niente (falso allarme filtrato) */
+	s.cliff[1] = 0;
+	contatti_frame(&c, &s, t += MS(20), NULL);
+	s.cliff[1] = 1;
+	contatti_frame(&c, &s, t += MS(20), NULL);
+	contatti_frame(&c, &s, t += MS(20), NULL);
+	s.cliff[1] = 0;
+	contatti_frame(&c, &s, t += MS(20), NULL);
+	CONTROLLA(c.pub.ultimo == 1);
+
+	/* bumper destro: basta un frame */
+	s.bumper_dx = 1;
+	CONTROLLA(contatti_frame(&c, &s, t += MS(20), NULL) == 1);
+	CONTROLLA(c.pub.ultimo == 2 && c.pub.ev[2].sensore == CONTATTO_BUMPER_DX && c.pub.ev[2].t_ns == t);
+	CONTROLLA(contatti_frame(&c, &s, t += MS(20), NULL) == 0);
+	s.bumper_dx = 0;
+	contatti_frame(&c, &s, t += MS(20), NULL);
+	s.bumper_dx = 1;
+	CONTROLLA(contatti_frame(&c, &s, t += MS(20), NULL) == 1 && c.pub.ultimo == 3);   /* nuovo scatto, nuovo evento */
+	s.bumper_dx = 0;
+
+	/* robot sollevato (tutti e 4 nel vuoto): niente eventi, e i conteggi ripartono */
+	s.cliff[0] = 1;
+	contatti_frame(&c, &s, t += MS(20), NULL);
+	contatti_frame(&c, &s, t += MS(20), NULL);
+	s.cliff[1] = s.cliff[2] = s.cliff[3] = 1;
+	for (int i = 0; i < 10; i++)
+		CONTROLLA(contatti_frame(&c, &s, t += MS(20), NULL) == 0);
+	s.cliff[1] = s.cliff[2] = s.cliff[3] = 0;          /* posato con un solo sensore sul vuoto: si riconta da 1 */
+	CONTROLLA(contatti_frame(&c, &s, t += MS(20), NULL) == 0);
+	CONTROLLA(c.pub.ultimo == 3);
+	s.cliff[0] = 0;
+
+	/* sensori spenti o robot sulla base: anti-caduta e bumper non significano niente */
+	s.bumper_sx = 1;
+	s.controllo = 0;
+	CONTROLLA(contatti_frame(&c, &s, t += MS(20), NULL) == 0);
+	s.controllo = GD32_CONTROLLO_SENSORI_ACCESI;
+	s.sulla_base = 1;
+	CONTROLLA(contatti_frame(&c, &s, t += MS(20), NULL) == 0);
+	CONTROLLA(c.pub.ultimo == 3);
+	s.sulla_base = 0;
+	CONTROLLA(contatti_frame(&c, &s, t += MS(20), NULL) == 1 && c.pub.ev[4].sensore == CONTATTO_BUMPER_SX);
+	s.bumper_sx = 0;
+	contatti_frame(&c, &s, t += MS(20), NULL);
+
+	/* lista circolare: dopo 40 eventi restano gli ultimi CONTATTI_N, ognuno al suo posto */
+	for (int i = 0; i < 36; i++) {
+		s.bumper_sx = 1;
+		contatti_frame(&c, &s, t += MS(20), NULL);
+		s.bumper_sx = 0;
+		contatti_frame(&c, &s, t += MS(20), NULL);
+	}
+	CONTROLLA(c.pub.ultimo == 40);
+	int ok = 1;
+	for (uint32_t n = 40 - CONTATTI_N + 1; n <= 40; n++)
+		ok &= c.pub.ev[n % CONTATTI_N].numero == n;
+	CONTROLLA(ok);
+
+	/* posizione: l'evento porta quella data dal moto; senza, posa_valida = 0 */
+	CONTROLLA(c.pub.ev[40 % CONTATTI_N].posa_valida == 0);
+	drv_posa_t posa = { .x = 1.25, .y = -0.5, .theta = 0.75, .t_ns = t };
+	s.bumper_sx = 1;
+	CONTROLLA(contatti_frame(&c, &s, t += MS(20), &posa) == 1);
+	drv_contatto_t e = c.pub.ev[c.pub.ultimo % CONTATTI_N];
+	CONTROLLA(e.posa_valida && e.posa.x == 1.25 && e.posa.y == -0.5 && e.posa.theta == 0.75 && e.posa.t_ns == posa.t_ns);
+	s.bumper_sx = 0;
+	contatti_frame(&c, &s, t += MS(20), &posa);
+	/* anti-caduta: la posizione è quella del PRIMO frame attivo, non di quello in cui l'evento viene confermato */
+	s.cliff[3] = 1;
+	drv_posa_t p1 = { .x = 2, .t_ns = t }, p2 = { .x = 3, .t_ns = t + MS(20) }, p3 = { .x = 4, .t_ns = t + MS(40) };
+	contatti_frame(&c, &s, t += MS(20), &p1);
+	contatti_frame(&c, &s, t += MS(20), &p2);
+	CONTROLLA(contatti_frame(&c, &s, t += MS(20), &p3) == 1);
+	e = c.pub.ev[c.pub.ultimo % CONTATTI_N];
+	CONTROLLA(e.sensore == CONTATTO_VUOTO_DX_LAT && e.posa_valida && e.posa.x == 2);
+}
+
 int main(void)
 {
 	ESEGUI(scambio_base);
@@ -409,5 +524,6 @@ int main(void)
 	ESEGUI(lidar_giri);
 	ESEGUI(lidar_regolatore);
 	ESEGUI(a_terra);
+	ESEGUI(contatti);
 	return TEST_FINE();
 }

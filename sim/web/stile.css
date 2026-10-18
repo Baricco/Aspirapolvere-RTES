@@ -72,3 +72,10 @@ input[type=number], input[type=text] { width: 100%; padding: 2px 6px; }
   #vista { height: 60vh; } #pannello { width: 100%; border-left: 0; }
 }
 h2 span { text-transform: none; letter-spacing: 0; font-weight: 400; }
+#barra label.spunta { display: inline-flex; align-items: center; gap: 4px; background: var(--sfondo); border: 1px solid var(--bordo);
+  border-radius: 6px; padding: 4px 8px; cursor: pointer; }
+#info-griglia { position: absolute; right: 8px; top: 8px; background: var(--pannello); border: 1px solid var(--bordo);
+  border-radius: 6px; padding: 4px 8px; font-size: 11px; opacity: .94; max-width: 330px; }
+#info-griglia span.c { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 4px; vertical-align: -1px; }
+#info-griglia .err { color: var(--errore); }
+#info-griglia code { font: 10px ui-monospace, monospace; }

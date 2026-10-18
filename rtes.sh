@@ -21,6 +21,8 @@ Uso: ./rtes.sh <comando> [argomenti]
   sim [stanza] [prog arg...] simulatore + pagina (http://localhost:8080) + il driver da tastiera (rtes-driver),
                             oppure il TUO programma: le seriali sono in RTES_GD32 e RTES_LIDAR (drv_config_default)
                             es. ./rtes.sh sim sim/stanze/soggiorno.txt build/host/mio-programma
+                            (un build/host/<nome> di tasks/ viene ricompilato prima; il programma parte sotto
+                            build/host/osserva, che ne mostra la griglia di navigazione sulla pagina)
   sim-solo [stanza] [opz]   solo il simulatore e la pagina (opzioni in sim/sim.c, es. --porta 8081)
   valida-sim [c2 c2b c3 c1] confronta il simulatore con le registrazioni del robot (build/robot/fase2)
   taratura                  ricalcola sim/parametri.txt dalle registrazioni (tools/taratura/tara.py)
@@ -62,8 +64,14 @@ case "${1:-}" in
     quale=$1; shift
     stanza=sim/stanze/soggiorno.txt
     if [ $# -gt 0 ] && [ -f "$1" ] && [[ $1 == *.txt ]]; then stanza=$1; shift; fi
-    make --no-print-directory build/host/sim build/host/rtes-driver
+    make --no-print-directory build/host/sim build/host/rtes-driver build/host/osserva
+    # un programma dei task (tasks/<nome>.c o tasks/<nome>/) si ricompila da solo: niente binari vecchi per sbaglio
+    if [ $# -gt 0 ] && [[ $1 == build/host/* ]]; then
+      nome=${1#build/host/}
+      if [ -f "tasks/$nome.c" ] || [ -f "tasks/$nome/main.c" ]; then make --no-print-directory "$1" || exit 1; fi
+    fi
     if [ "$quale" = sim-solo ]; then exec build/host/sim --stampa "$@" "$stanza"; fi
+    mkdir -p build/sim; rm -f build/sim/mappa_robot
     build/host/sim "$stanza" > build/sim.log 2>&1 &
     pid_sim=$!
     trap 'kill $pid_sim 2>/dev/null; wait $pid_sim 2>/dev/null' EXIT
@@ -75,7 +83,8 @@ case "${1:-}" in
     core=(); command -v taskset >/dev/null && core=(taskset -c 0-3)
     if [ $# -gt 0 ]; then
       echo "== avvio $* sui core 0-3 (RTES_GD32=$RTES_GD32, RTES_LIDAR=$RTES_LIDAR)"
-      "${core[@]}" "$@"
+      # osserva lancia il programma come suo figlio e ne legge la griglia di navigazione (sim/osserva.c)
+      build/host/osserva --uscita build/sim/mappa_robot -- "${core[@]}" "$@"
     else
       echo "== rtes-driver: scrivi i comandi (v 0.1 0, stop, lidar 1, spazzole 0 30, led 3, fine...)"
       "${core[@]}" build/host/rtes-driver --senza-rt

@@ -268,7 +268,7 @@ questo kernel, a volte si sveglia con millisecondi di ritardo, mentre uno che do
                        │ limiti di sicurezza · watchdog dei task · stato di guasto (LED 8)     │
                        └───────┬──────────────────────────────────────────────▲───────────────┘
             pubblica (senza mutex: driver/scambio.h)              comandi (atomici, non bloccano)
-                drv_sensori() drv_giro() drv_stato()     drv_velocita() drv_spazzole() drv_led() ...
+      drv_sensori() drv_giro() drv_stato() drv_contatti()   drv_velocita() drv_spazzole() drv_led() ...
                        ▼                                                       │
         task sporadici a 20 ms (sveglia a ogni frame)    task periodici (100, 200, 500 ms...)
 ```
@@ -279,6 +279,7 @@ questo kernel, a volte si sveglia con millisecondi di ritardo, mentre uno che do
 | `driver/scambio.h`, `.c` | doppio buffer con numero di versione: il driver scrive senza mai aspettare, i lettori ottengono sempre una copia coerente |
 | `driver/batteria.h`, `.c` | percentuale calcolata come il software originale (`hardware.md`, "Batteria"); livelli con isteresi sulla media di 1 s: bassa < 14,2 V (LED 6), critica < 13,8 V (motori fermi) |
 | `driver/lidar_giro.h`, `.c` | settori `0xAD` → giri completi; regolatore di AuxCtrl (`60 + I + 10 e + 10 Δe`) |
+| `driver/contatti.h`, `.c` | registro degli scatti di anti-caduta (dopo 3 frame di fila) e bumper, per i task lenti come la mappatura: `drv_contatti()` |
 | `gd32/sicurezza.h` | `sic_terra_limita`: i limiti del moto "a terra"; `sic_permesso`: il blocco del banco di prova |
 | `driver/rtes-driver.c` | il programma `rtes-driver`: il driver da solo, comandato a mano |
 
@@ -289,6 +290,10 @@ questo kernel, a volte si sveglia con millisecondi di ritardo, mentre uno che do
 - **keepalive** `0x0d` ogni 3 s e **heartbeat** `0x06` ogni 200 ms; **velocità** `0x66` ogni 20 ms (anche zero);
 - **sensori**: a ogni frame `0x15` li decodifica, li pubblica e **sveglia i task iscritti**;
 - **lidar**: lo accende/spegne (`0x97`), regola la velocità ogni 20 ms (`0x71`) e pubblica ogni giro completo;
+- **contatti**: annota ogni scatto di un anti-caduta (vuoto per 3 frame di fila) o di un bumper, con numero
+  progressivo e istante, negli ultimi 32 eventi di `drv_contatti()`: un task che legge ogni 200 ms non ne perde
+  nessuno (niente eventi con i sensori spenti, sulla base o con il robot sollevato). Ogni evento porta anche la
+  posizione del robot che il moto gli dà a ogni frame con `drv_posa(x, y, theta)` (quella del primo frame attivo);
 - **batteria e base**: sensori spenti sulla base e accesi fuori (`0x9d`, come everest), LED 4 in carica, LED 6
   con la batteria bassa;
 - **limiti**: ogni comando di velocità passa da `sic_terra_limita` (vedi sotto), le spazzole si fermano con il
@@ -456,7 +461,16 @@ L'indirizzo può aprire direttamente una scheda o una selezione: `#messaggi`, `#
 | `./rtes.sh prova-pagina` | prova automatica della pagina (serve Brave o Chromium) |
 
 `./rtes.sh sim` mette le pseudo-seriali in `RTES_GD32` e `RTES_LIDAR`, e `drv_config_default()` le usa al posto di
-`/dev/ttyS3` e `/dev/ttyS1`.
+`/dev/ttyS3` e `/dev/ttyS1`. Se il programma è un `build/host/<nome>` di `tasks/`, lo ricompila prima di lanciarlo.
+
+**Griglia del robot.** Con `./rtes.sh sim stanza.txt build/host/vacuum` la pagina disegna sopra la stanza vera la
+**griglia di navigazione** del programma (casella "Griglia del robot"): celle libere in azzurro, bloccate in rosso,
+proibite in viola, più la versione della mappa in alto a destra. Il codice del robot non cambia: il programma parte
+sotto `build/host/osserva` (`sim/osserva.c`), che ne legge la memoria da fuori, come un debugger, cercando il simbolo
+`navigation_map_data` di `tasks/vacuum/mapping.c` (griglia di 65.536 byte, poi la versione). Il simulatore si segna la
+posizione vera del robot quando il programma parte: è l'origine dell'odometria, e la griglia si disegna da lì. Se
+l'odometria deriva, la griglia si scosta dalla stanza vera. Solo sul PC; se il nome o l'ordine dei campi cambiano, il
+riquadro in alto a destra dice cosa non trova.
 
 **Tempi.** Nel simulatore i task girano con le stesse priorità, gli stessi core e lo stesso SCHED_FIFO del robot, e i
 frame arrivano con i ritardi misurati. La **logica** e le **attivazioni** sono quindi realistiche. I **tempi di

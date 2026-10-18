@@ -502,6 +502,8 @@ const Editor = (() => {
       if (App.sel && App.sel.k === "base") { ctx.strokeStyle = col.sel; ctx.lineWidth = 2.5; ctx.strokeRect(-0.12 * V.s, -0.15 * V.s, 0.12 * V.s, 0.30 * V.s); }
       ctx.restore();
     }
+    // griglia di navigazione del programma osservato (griglia.js), sopra gli oggetti e sotto robot e lidar
+    if (typeof Griglia !== "undefined") Griglia.disegna(ctx, V);
     // posizione iniziale
     { const r = st.robot, [ix, iy] = aSchermo(r.x, r.y), R = (App.stato ? App.stato.geometria.raggio : 0.175) * V.s;
       ctx.strokeStyle = col.tenue; ctx.setLineDash([4, 4]); ctx.lineWidth = 1; ctx.beginPath(); ctx.arc(ix, iy, R, 0, 7); ctx.stroke();

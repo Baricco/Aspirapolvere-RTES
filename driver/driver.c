@@ -52,7 +52,12 @@ static struct {
 } cmd;
 
 /* Dati pubblicati: doppio buffer senza mutex (scambio.h). */
-static scambio_t sc_sensori, sc_giro, sc_stato;
+static scambio_t sc_sensori, sc_giro, sc_stato, sc_contatti;
+static drv_contatti_t buf_contatti[2];
+/* Nell'altro verso: la posizione che il moto dà al driver (un solo scrittore, il task del moto). */
+static scambio_t sc_posa;
+static drv_posa_t buf_posa[2];
+static atomic_int posa_pronta;               /* sc_posa inizializzato: drv_posa può scrivere */
 static drv_sensori_t buf_sensori[2];
 static lidar_giro_t buf_giro[2];
 static drv_stato_t buf_stato[2];
@@ -91,6 +96,7 @@ static struct {
 	lidar_giro_t giro;                    /* appoggio per il giro appena completato (grande: non sullo stack) */
 	batteria_t bat;
 	sicurezza_t sic;                      /* solo banco di prova */
+	contatti_t contatti;                  /* scatti di anti-caduta e bumper (contatti.h) */
 
 	int fase;
 	char guasto[96];
@@ -648,6 +654,10 @@ static void frame_gd32(const gd32_frame_t *f, void *ctx)
 		}
 		drv_sensori_t p = { .numero = d.n_sensori, .t_ns = t, .s = d.s };
 		scambio_scrivi(&sc_sensori, &p);
+		drv_posa_t posa;
+		int ha_posa = scambio_leggi(&sc_posa, &posa) != 0;
+		if (contatti_frame(&d.contatti, &d.s, t, ha_posa ? &posa : NULL))   /* prima di svegliare i task: trovano già l'evento */
+			scambio_scrivi(&sc_contatti, &d.contatti.pub);
 		for (int i = 0; i < MAX_ISCRITTI; i++) {
 			rt_task_t *k = atomic_load(&iscritti[i]);
 			if (k)
@@ -1004,12 +1014,16 @@ int drv_avvia(const drv_config_t *c)
 	lidar_assemblatore_init(&d.ass, c->scarto_lidar_cdeg);
 	lidar_regolatore_init(&d.reg, 0);
 	batteria_init(&d.bat);
+	contatti_init(&d.contatti);
 	sic_init(&d.sic, 1, SENSORI_VECCHI_NS);
 	if (c->cliff_atteso >= 0)
 		sic_cliff_atteso(&d.sic, (uint8_t)c->cliff_atteso);
 	scambio_init(&sc_sensori, &buf_sensori[0], &buf_sensori[1], sizeof buf_sensori[0]);
 	scambio_init(&sc_giro, &buf_giro[0], &buf_giro[1], sizeof buf_giro[0]);
 	scambio_init(&sc_stato, &buf_stato[0], &buf_stato[1], sizeof buf_stato[0]);
+	scambio_init(&sc_contatti, &buf_contatti[0], &buf_contatti[1], sizeof buf_contatti[0]);
+	scambio_init(&sc_posa, &buf_posa[0], &buf_posa[1], sizeof buf_posa[0]);
+	atomic_store(&posa_pronta, 1);
 	atomic_store(&cmd.vw, 0);
 	atomic_store(&cmd.spazzola_lat, 0);
 	atomic_store(&cmd.spazzola_cen, 0);
@@ -1116,6 +1130,7 @@ void drv_ferma(void)
 uint32_t drv_sensori(drv_sensori_t *out) { return scambio_leggi(&sc_sensori, out); }
 uint32_t drv_giro(lidar_giro_t *out) { return scambio_leggi(&sc_giro, out); }
 uint32_t drv_stato(drv_stato_t *out) { return scambio_leggi(&sc_stato, out); }
+uint32_t drv_contatti(drv_contatti_t *out) { return scambio_leggi(&sc_contatti, out); }
 
 void drv_punto_xy(const lidar_punto_t *p, double *x, double *y)
 {
@@ -1125,6 +1140,14 @@ void drv_punto_xy(const lidar_punto_t *p, double *x, double *y)
 	/* il punto è a distanza r lungo b, spostato di LIDAR_OTTICO_M a destra del raggio (triangolatore) */
 	*x = LIDAR_X_M + r * cos(b) + LIDAR_OTTICO_M * sin(b);
 	*y = LIDAR_Y_M + r * sin(b) - LIDAR_OTTICO_M * cos(b);
+}
+
+void drv_posa(double x, double y, double theta)
+{
+	if (!atomic_load(&posa_pronta) || !(x == x) || !(y == y) || !(theta == theta))   /* prima di drv_avvia, o NaN */
+		return;
+	drv_posa_t p = { .x = x, .y = y, .theta = theta, .t_ns = adesso() };
+	scambio_scrivi(&sc_posa, &p);
 }
 
 void drv_velocita(double v, double w)

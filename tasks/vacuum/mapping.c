@@ -20,6 +20,20 @@
 #define FINE_CELL_INFLATION_RADIUS  (int)(ceil(((ROBOT_RADIUS + INFLATION_MARGIN_MM) / 1000) / FINE_MAP_CELL_SIZE)) // indica di quanto vengono ingrossate le celle con ostacoli nella mappa di navigazione, il margine serve per essere certi che il robot non sbatta contro gli ostacoli, considerando anche le dimensioni del robot e un piccolo margine d'errore
 #define FINE_CELL_OCCUPATION_THRESHOLD 50        // soglia sopra al quale una cella è considerata occupata
 #define UNKNOWN_CELL_THRESHOLD      8           // numero minimo di celle fini da osservare affinchè la cella di navigazione risulti osservata
+#define ROTATION_SPEED_MAX_THRESHOLD 1.5        // massima velocità angolare che può avere il robot prima che la scansione del lidar venga scartata, oltre questa velocità la scansione è deformata. espressa in rad/s
+#define VOID_OBSTACLE                -128       // punteggio speciale da assegnare ad una cella che viene rilevata come "dirupo" dai sensori anti-caduta, una volta che una cella viene messa a questo valore, non può essere modificata dal ciclo di aggiornamento lidar-based
+#define LOW_OBSTACLE                 127        // punteggio speciale da assegnare ad una cella che viene rilevata come ostacolo dal bumper, ma non rilevato dal lidar, una volta che una cella viene messa a questo valore, non può essere modificata dal ciclo di aggiornamento lidar-based
+
+// Posizione dei sensori di contatto rispetto al centro del robot (x in avanti, y a sinistra, angoli positivi a sinistra).
+// Valori presi da sim/robot.h, dove sono segnati come stime: da verificare sul robot.
+#define CLIFF_SENSOR_DISTANCE        0.15       // distanza degli anti-caduta dal centro del robot, espressa in m
+// angolo dell'anti-caduta k rispetto al davanti del robot, nello stesso ordine di cliff[] e di CONTATTO_VUOTO_*
+// (0 sinistro laterale +50°, 1 sinistro anteriore +18°, 2 destro anteriore -18°, 3 destro laterale -50°), espresso in radianti
+#define CLIFF_SENSOR_ANGLE(k)        (((k) == 0 ? 50 : (k) == 1 ? 18 : (k) == 2 ? -18 : -50) * M_PI / 180)
+
+#define BUMPER_DISTANCE              ((ROBOT_RADIUS + 20) / 1000)   // dove si segna l'urto: 2 cm oltre il bordo del robot (come il software originale), espresso in m
+#define BUMPER_SX_ANGLE              (45 * M_PI / 180)              // direzione dell'urto per il bumper sinistro, espressa in radianti
+#define BUMPER_DX_ANGLE              (-45 * M_PI / 180)             // direzione dell'urto per il bumper destro, espressa in radianti
 
 
 // canale di scambio del doppio buffer
@@ -72,6 +86,9 @@ typedef struct {
 
     // ultima scansione del lidar
     lidar_giro_t last_scan;
+
+    // numero dell'ultimo evento dei sensori applicato
+    uint32_t last_event;
 
 } mapping_state_t;
 
@@ -220,11 +237,96 @@ static void update_occupied_cells(const int fine_x, const int fine_y, const int 
     }
 }
 
+// Funzione Helper che imposta una cella ad un valore speciale
+static void set_fine_cell_special_value(const uint32_t cell_index, const int special_value) {
+
+    // Salva il vecchio punteggio della griglia fine
+    int old_score = map_state.fine_grid[cell_index];
+
+    // se old_score è uno dei valori speciali, esci
+    if (old_score == VOID_OBSTACLE || old_score == LOW_OBSTACLE) return;
+
+    // calcola x e y della griglia fine partendo da cell_index
+    int x_fine = cell_index & 0x3FF;
+    int y_fine = cell_index >> 10;
+
+    // Ricava l'indice della cella della griglia di navigazione
+    // che corrisponde alla cella della griglia fine all'indice cell_index
+    int nav_index = (x_fine >> 2) | ((y_fine >> 2) << 8);
+
+    // Aggiorna il numero di celle osservate, analogo a add_score_to_fine_cell
+    if (old_score == 0) map_state.num_observed_fine_cells[nav_index]++;   // se una cella che prima era sconosciuta, ora è stata vista, segnala come osservata
+
+    // Aggiorna il numero di celle occupate, analogo a add_score_to_fine_cell
+    if (old_score <= FINE_CELL_OCCUPATION_THRESHOLD) update_occupied_cells(x_fine, y_fine, 1);       // prima non era occupata, ora risulta occupata
+
+    // Scrivi il valore speciale nella griglia
+    map_state.fine_grid[cell_index] = special_value;
+}
+
+// Funzione helper per applicare gli eventi alla mappa, restituisce true se ha modificato la mappa
+static bool apply_queued_events(void) {
+        
+    // Variabile che conterrà gli ultimi 32 eventi registrati dal driver
+    drv_contatti_t last_events = {0};
+    
+    // Leggi gli ultimi eventi
+    drv_contatti(&last_events);
+    
+    bool hasChanged = false;
+
+    for (uint32_t i = map_state.last_event + 1; i <= last_events.ultimo; i++) {
+
+        // Salva l'evento corrente 
+        drv_contatto_t cur_event = last_events.ev[i % CONTATTI_N];
+
+        // l'evento che stiamo guardando è diverso da i, significa che sono avvenuti più di 32
+        // eventi nell'utimo giro, saltiamo questo evento
+        if (cur_event.numero != i) continue;
+
+        // Se l'evento corrente non ha una posizione valida, saltalo
+        if (!cur_event.posa_valida) continue;
+
+        // Se l'evento ha una posizione vecchia (>100ms), saltalo
+        if (cur_event.t_ns - cur_event.posa.t_ns > RT_MS(100)) continue;
+
+        double dist = 0, angle = 0;
+        int8_t event_value = 0;
+
+        // Ricava di che evento si tratta
+        if (cur_event.sensore <= CONTATTO_VUOTO_DX_LAT) {       // se il sensore è uno di quelli di caduta
+            dist = CLIFF_SENSOR_DISTANCE;
+            angle = CLIFF_SENSOR_ANGLE(cur_event.sensore);
+            event_value = VOID_OBSTACLE;
+        } else {                            // se il sensore è il bumper
+            dist = BUMPER_DISTANCE;
+            angle = cur_event.sensore == CONTATTO_BUMPER_DX ? BUMPER_DX_ANGLE : BUMPER_SX_ANGLE;
+            event_value = LOW_OBSTACLE;
+        }
+
+        // calcola le coordinate della cella in cui è avvenuto l'evento
+        double x = cur_event.posa.x + dist * cos(cur_event.posa.theta + angle);
+        double y = cur_event.posa.y + dist * sin(cur_event.posa.theta + angle);
+
+        set_fine_cell_special_value(coord_to_fine_index(x, y), event_value);
+
+        hasChanged = true;
+    }
+
+    map_state.last_event = last_events.ultimo;
+
+    return hasChanged;
+
+}
+
 // Funzione helper per sommare uno score ad una cella della fine map
 static void add_score_to_fine_cell(const uint32_t cell_index, const int score) {
 
     // Salva il vecchio punteggio della griglia fine
     int old_score = map_state.fine_grid[cell_index];
+
+    // se old_score è uno dei valori speciali, esci
+    if (old_score == VOID_OBSTACLE || old_score == LOW_OBSTACLE) return;
 
     // salva il punteggio in una variabile temporanea per controllare overflow e underflow
     int tot_score = old_score + score;
@@ -325,10 +427,11 @@ void job_mapping(void *arg) {
     // Leggi l'ultiima scansione del lidar
     uint32_t cur_scan_num = drv_giro(&map_state.last_scan);
 
-    // Se il numero di scansione è 0, o è uguale all'ultimo giro, esci 
-    if (cur_scan_num == map_state.last_scan_num) return;
+    // Salvati se il numero di scansione è uguale all'ultimo giro
+    bool is_same_scan = cur_scan_num == map_state.last_scan_num;
 
-    map_state.last_scan_num = cur_scan_num;
+    // Se è una nuova scansione, aggiorna il numero di scansione
+    if (!is_same_scan) map_state.last_scan_num = cur_scan_num;
 
     // Leggi la posizione attuale del robot, dal task movement
     movement_position_data_t cur_pos = read_movement();
@@ -336,56 +439,103 @@ void job_mapping(void *arg) {
     // Se la posizione attuale non è valida (il robot è sollevato), esci
     if (!cur_pos.valid) return;
 
-    // Per non ricalcolare seno e coseno di theta per ogni punto lo salviamo
-    // in una variabile fuori dal for
-    double cos_theta = cos(cur_pos.theta);
-    double sin_theta = sin(cur_pos.theta);
+    // Applica gli eventi speciali (sensori di caduta e bumper anteriore) sulla mappa
+    bool has_applied_events = apply_queued_events();
 
-    // calcola l'indice della cella della fine map dove si trova il robot,
-    // anche questo lo facciamo fuori dal for perchè è sempre uguale
-    uint32_t robot_cell_index = coord_to_fine_index(cur_pos.x, cur_pos.y);
+    // se la velocità di rotazione del robot al momento della scansione del lidar
+    // supera la soglia o la scansione è vecchia, la scansione non è valida
+    
+    bool use_scan = false;
 
-    // dall'indice ricava le coordinate del robot
-    // serviranno per l'algoritmo di Bresenham
-    int robot_cell_y = robot_cell_index >> 10;
-    int robot_cell_x = robot_cell_index & 0x3FF;
+    if (fabs(cur_pos.omega) < ROTATION_SPEED_MAX_THRESHOLD && !is_same_scan) use_scan = true;
 
+    // se gli eventi non hanno applicato nulla e la scansione non è valida, esci
+    if (!use_scan && !has_applied_events) return;
 
-    // Scorri tutti i punti della scansione del lidar e se sono != 0
-    // Calcola la posizione del punto rispetto al robot nella mappa
-    for (int i = 0; i < map_state.last_scan.n; i++) {
-        
-        // se un punto ha distanza 0, non considerarlo
-        if (map_state.last_scan.p[i].distanza_mm == 0) continue;
-        
-        // inizializza le coordinate del punto nella mappa fine a 0, relative
-        // rispetto alla posizione del robot
-        double x_coord_rel = 0, y_coord_rel = 0;
-
-        // calcola le coordinate x, y del punto scansionato rispetto al robot
-        drv_punto_xy(&map_state.last_scan.p[i], &x_coord_rel, &y_coord_rel);
-
-        // per ottenere le coordinate assolute, ruota i punti della rotazione del robot
-        // e somma le coordinate del robot a x/y_coord
-        double x_coord_abs = cur_pos.x + (x_coord_rel * cos_theta - y_coord_rel * sin_theta);
-        double y_coord_abs = cur_pos.y + (x_coord_rel * sin_theta + y_coord_rel * cos_theta);
-
-        
-        // calcola l'indice della cella della mappa fine del punto corrente
-        uint32_t cur_point_cell_index = coord_to_fine_index(x_coord_abs, y_coord_abs);
-
-        // dall'indice ricava le coordinate del punto
-        // serviranno per l'algoritmo di Bresenham
-        int cur_point_cell_y = cur_point_cell_index >> 10;
-        int cur_point_cell_x = cur_point_cell_index & 0x3FF;
+    // Definisci le coordinate del robot come celle della fine map, serviranno
+    // sia nell'algoritmo di Bresenham, che nel calcolo della navigation map
+    int robot_cell_y = cur_pos.y, robot_cell_x = cur_pos.x;
 
 
-        // Adesso facciamo l'algoritmo di Bresenham per ottenere
-        // le celle della fine map per cui passa il raggio del lidar
-        // e aggiornare sia i punti per cui è passato il raggio
-        // e non ha trovato ostacoli, sia l'ultimo punto dove il raggio si è infranto
-        exec_bresenham_algorithm(robot_cell_x, robot_cell_y, cur_point_cell_x, cur_point_cell_y);
+    {   // queste variabili mi servono solo per calcolare robot_cell_xy quindi le metto in un blocco separato
 
+        uint32_t robot_cell_index = coord_to_fine_index(cur_pos.x, cur_pos.y);
+
+        robot_cell_y = robot_cell_index >> 10;
+        robot_cell_x = robot_cell_index & 0x3FF;
+    }
+
+    // se la nuova scansione va utilizzata
+    if (use_scan) {
+        // Calcola inizio e durata della scansione, insieme alla velocità del robot serve 
+        // per compensare la deformazione della scansione del lidar
+        int64_t scan_start_time = map_state.last_scan.t_inizio_ns;
+        int64_t scan_duration = map_state.last_scan.t_fine_ns - scan_start_time;
+
+        // Scorri tutti i punti della scansione del lidar e se sono != 0
+        // Calcola la posizione del punto rispetto al robot nella mappa
+        for (int i = 0; i < map_state.last_scan.n; i++) {
+            
+            // se un punto ha distanza 0, non considerarlo
+            if (map_state.last_scan.p[i].distanza_mm == 0) continue;
+            
+            // calcola l'istante in cui è stato campionato questo punto
+            int64_t cur_point_time = scan_start_time + (scan_duration * i) / map_state.last_scan.n;
+
+            // calcola il tempo trascorso tra la scansione del punto e l'acquisizione dell'ultimo
+            // frame dai sensori. espresso in secondi
+            double dt = (cur_point_time - cur_pos.frame_acq_t) / 1e9;
+
+            // calcola l'angolo del robot nell'istante di acquisizione del punto
+            double cur_theta = cur_pos.theta + cur_pos.omega * dt;
+
+            // calcola seno e coseno dell'angolo del robot
+            double cos_theta = cos(cur_theta);
+            double sin_theta = sin(cur_theta);
+
+            // calcola la posizione del robot nell'istante di acquisizione del punto
+            double cur_robot_x = cur_pos.x + cur_pos.v * cos_theta * dt;
+            double cur_robot_y = cur_pos.y + cur_pos.v * sin_theta * dt;
+
+            // calcola l'indice della cella della fine map dove si trova il robot all'istante
+            // di acquisizione del punto 
+            uint32_t robot_cell_index = coord_to_fine_index(cur_robot_x, cur_robot_y);
+
+            // dall'indice ricava le coordinate del robot
+            // serviranno per l'algoritmo di Bresenham e anche fuori dal for
+            robot_cell_y = robot_cell_index >> 10;
+            robot_cell_x = robot_cell_index & 0x3FF;
+
+
+            // inizializza le coordinate del punto nella mappa fine a 0, relative
+            // rispetto alla posizione del robot
+            double x_coord_rel = 0, y_coord_rel = 0;
+
+            // calcola le coordinate x, y del punto scansionato rispetto al robot
+            drv_punto_xy(&map_state.last_scan.p[i], &x_coord_rel, &y_coord_rel);
+
+            // per ottenere le coordinate assolute, ruota i punti della rotazione del robot
+            // e somma le coordinate del robot a x/y_coord
+            double x_coord_abs = cur_robot_x + (x_coord_rel * cos_theta - y_coord_rel * sin_theta);
+            double y_coord_abs = cur_robot_y + (x_coord_rel * sin_theta + y_coord_rel * cos_theta);
+
+            
+            // calcola l'indice della cella della mappa fine del punto corrente
+            uint32_t cur_point_cell_index = coord_to_fine_index(x_coord_abs, y_coord_abs);
+
+            // dall'indice ricava le coordinate del punto
+            // serviranno per l'algoritmo di Bresenham
+            int cur_point_cell_y = cur_point_cell_index >> 10;
+            int cur_point_cell_x = cur_point_cell_index & 0x3FF;
+
+
+            // Adesso facciamo l'algoritmo di Bresenham per ottenere
+            // le celle della fine map per cui passa il raggio del lidar
+            // e aggiornare sia i punti per cui è passato il raggio
+            // e non ha trovato ostacoli, sia l'ultimo punto dove il raggio si è infranto
+            exec_bresenham_algorithm(robot_cell_x, robot_cell_y, cur_point_cell_x, cur_point_cell_y);
+
+        }
     }
 
     // Calcola i valori x, y massimi e minimi entro il quale si trova l'area appena aggiornata
@@ -393,7 +543,7 @@ void job_mapping(void *arg) {
     get_x_y_min_max_area_around_cell(
         robot_cell_x,
         robot_cell_y,
-        (LIDAR_MAPPING_MAX_RANGE / FINE_MAP_CELL_SIZE) + FINE_CELL_INFLATION_RADIUS,
+        (LIDAR_MAPPING_MAX_RANGE / FINE_MAP_CELL_SIZE) + (FINE_CELL_INFLATION_RADIUS * 2),
         &nav_x_min,
         &nav_x_max, 
         &nav_y_min, 
