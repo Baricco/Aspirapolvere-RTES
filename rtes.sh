@@ -72,7 +72,9 @@ case "${1:-}" in
     fi
     if [ "$quale" = sim-solo ]; then exec build/host/sim --stampa "$@" "$stanza"; fi
     mkdir -p build/sim; rm -f build/sim/mappa_robot
-    build/host/sim "$stanza" > build/sim.log 2>&1 &
+    # setsid: Ctrl+C va solo al programma, che si ferma da solo; il simulatore lo chiude la trap qui sotto, dopo.
+    # Senza, il simulatore chiudeva le seriali qualche ms prima e il driver finiva in "GUASTO" all'uscita.
+    setsid build/host/sim "$stanza" > build/sim.log 2>&1 &
     pid_sim=$!
     trap 'kill $pid_sim 2>/dev/null; wait $pid_sim 2>/dev/null' EXIT
     for _ in $(seq 50); do [ -e build/sim/lidar ] && break; sleep 0.1; done

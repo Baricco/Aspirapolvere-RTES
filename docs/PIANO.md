@@ -114,6 +114,9 @@ I task dell'esame li scrive l'utente da solo, sopra un framework e un driver pre
     robot), cella fine con un valore speciale che il lidar non può più cambiare (-128 vuoto, 127 ostacolo basso) e
     contatori come per una cella diventata occupata. Facoltativo: l'incastro dalla sicurezza (`read_safety`), che resta
     attivo abbastanza a lungo da non perderlo. I segni valgono per la sessione;
+  - **celle di navigazione da 20 cm** (2026-10-19): lungo i muri il corpo del robot resta fra 2,5 e 22,5 cm dal
+    muro (dipende da dove cade il muro rispetto alla griglia). Si lasciano così: i bordi li pulisce un **seguimuro**
+    guidato dalla distanza del lidar, da aggiungere alla navigazione dopo BA*;
   - **rumore della mappa** (2026-10-18): la versione cresce anche con il robot fermo (celle di bordo che cambiano
     stato); si accetta per ora, da misurare e tarare dopo la correzione del giro.
 
