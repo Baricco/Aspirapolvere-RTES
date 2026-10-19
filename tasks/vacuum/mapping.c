@@ -389,7 +389,7 @@ static void exec_bresenham_algorithm(const int x_coord_start, const int y_coord_
 
 
     // Esegui l'algoritmo finchè non arrivi alla cella finale
-    while(true) {
+    for(int step = 0; step <= dx - dy; step++ ) {
         // Se siamo arrivati all'ultima cella
         if (cur_cell_x == x_coord_end && cur_cell_y == y_coord_end) {
             // Aggiungi l'hit_score e esci dal ciclo

@@ -2,6 +2,7 @@
 #include "driver/scambio.h"
 #include <math.h>
 #include <string.h>
+#include <stdlib.h>
 
 #include "navigation.h"
 #include "mapping.h"
@@ -50,7 +51,7 @@ typedef struct {
     nav_state_t state;                          // stato corrente del task di navigazione (macchina a stati)    
     nav_search_queue_t s_q;                     // search_queue, coda di ricerca, serve per la ricerca del percorso
     nav_path_t path;                            // percorso che deve fare il robot
-
+    uint16_t path_idx;                          // indice del path dell'ultimo punto a cui è stato mandato mandato il robot
 } navigation_state_t;
 
 // stato interno della navigazione
@@ -249,6 +250,90 @@ static uint32_t search_cell(const uint16_t start_cell, const nav_search_goal_t g
     // Se non trovi nessun percorso, metti 0 come distanza del percorso e restituisci 0
     return nav_state.path.length = 0;
     
+}
+
+// Funzione helper che usa Bresenham per verificare se due punti cadono sulla stessa
+// retta e non ci sono celle non libere nel mezzo
+// Se fossi stato un buon programmatore avrei riutilizzato il codice
+// per fare Bresenham di mapping.c ma non ho voglia e sono stanco
+static bool line_of_sight(uint16_t start_cell, uint16_t end_cell) {
+    
+    // Ricava x e y base (il punto il punto di partenza) e da 
+    // tail (il punto di svolta)
+    int base_y = start_cell >> 8;
+    int base_x = start_cell & 0xFF;  
+    int tail_y = end_cell >> 8;
+    int tail_x = end_cell & 0xFF;
+
+    
+    // calcola la distanza tra i due punti nell'asse x
+    int dx = abs(tail_x - base_x);
+
+    // calcola il verso in cui si muove la x
+    int sx = (base_x < tail_x) ? 1 : -1;
+
+    // calcola la distanza tra i due punti nell'asse y
+    // il segno meno serve per non dover invertire i confronti e le somme di dy
+    // rispetto a dx
+    int dy = -abs(tail_y - base_y);
+
+    // calcola il verso in cui si muove la y
+    int sy = (base_y < tail_y) ? 1 : -1;
+
+    // calcola quanto la cella corrente si trova distante rispetto alla retta
+    int err = dx + dy;
+
+    // Inzializza le coordinate della cella corrente alla cella iniziale
+    int cur_cell_x = base_x, cur_cell_y = base_y;
+
+
+    // Esegui l'algoritmo finchè non arrivi alla cella finale
+    for (int step = 0; step <= dx - dy; step++) {
+        // Se siamo arrivati all'ultima cella
+        if (cur_cell_x == tail_x && cur_cell_y == tail_y) {
+            return true;
+        } else {    // Se non siamo ancora arrivati alla fine
+
+
+            // raddoppia errore e salvatelo in una variabile per fare i confronti
+            int e2 = 2 * err;
+            
+            bool vert_error = e2 <= dx;
+            bool hor_error = e2 >= dy;
+
+
+            // avanza di un passo nella direzione corrente in base all'errore
+
+            if (vert_error && hor_error) {  
+                
+                // calcola le due celle in diagonale 
+                uint8_t fd_cur_cell = nav_state.map[(cur_cell_y + sy) << 8 | cur_cell_x];
+                uint8_t sd_cur_cell = nav_state.map[cur_cell_y << 8 | (cur_cell_x + sx)];
+
+                // se una delle due celle in diagonale non è libera, ritorna false
+                if (fd_cur_cell != NAV_CELL_FREE || sd_cur_cell != NAV_CELL_FREE) return false;
+            }
+            if (hor_error) { err += dy; cur_cell_x += sx; }
+            if (vert_error) { err += dx; cur_cell_y += sy; }
+
+            if (nav_state.map[cur_cell_y << 8 | cur_cell_x] != NAV_CELL_FREE ) return false;
+        }
+    } 
+
+    return false;
+
+}
+
+// Funzione che dato nav_state.path_idx, che indica in quale punto del percorso
+// si trova il robot, restituisce l'indice del prossimo punto di svolta per mandare il 
+// prossimo obiettivo.
+static uint16_t next_turning_point(void) {
+
+    // Controlla se la posizione attuale è in una cella non libera
+    if (nav_state.map[nav_state.path.cells[nav_state.path_idx]] != NAV_CELL_FREE) {
+        // se il robot si trova in una cella non libera, vai alla prossima cella
+        // senza fare tagli
+    } 
 
 }
 
