@@ -15,6 +15,12 @@
 #define CRUISING_SPEED 0.35                  // velocità di crociera del robot, m/s
 #define MAX_ROTATION_SPEED  1.2             // massima velocità di rotazione, per stare sotto al soglia oltre il quale la mappatura scarta i giri (1,5) con un certo margine, rad/s
 #define UNLOCK_MAX_ATTEMPTS 10              // tentativi di sblocco prima di andare in guasto (ne mettiamo tanti, per essere sicuri che il robot tenti di uscire tante volte prima di fermarsi e arrendersi)
+#define UNKNOWN_SPEED_FACTOR 0.5            // fattore da moltiplicare alla velocità quando il robot si muove in territorio sconosciuto
+
+
+
+// array costante con i valori da sommare all'indice per ottenere i vicini
+static const int NEIGHBOR_SHIFT[4] = {1, -1, NAV_MAP_CELL_NUMBER, -NAV_MAP_CELL_NUMBER};
 
 // canale di scambio del doppio buffer
 static scambio_t double_buffer;
@@ -125,10 +131,9 @@ static bool cell_is_goal(const nav_search_goal_t goal, const uint16_t cell, cons
             if (nav_state.map[cell] == NAV_CELL_FREE) {     // se la cella in cui ci troviamo è libera
                 // controllo le 4 celle adiacenti alla cella corrente, se sono sconosciute,
                 // significa che cell è una cella di frontiera
-                if (nav_state.map[cell + 1] == NAV_CELL_UNKNOWN) return true;   // dx
-                if (nav_state.map[cell - 1] == NAV_CELL_UNKNOWN) return true;   // sx
-                if (nav_state.map[cell + NAV_MAP_CELL_NUMBER] == NAV_CELL_UNKNOWN) return true; // su
-                if (nav_state.map[cell - NAV_MAP_CELL_NUMBER] == NAV_CELL_UNKNOWN) return true; // giù
+                
+                for (int i = 0; i < 4; i++) if (nav_state.map[cell + NEIGHBOR_SHIFT[i]] == NAV_CELL_UNKNOWN) return true;
+
             }
             break;
         case GOAL_DIRTY:
@@ -190,6 +195,20 @@ static bool cell_can_enter(const uint16_t cur_cell, const uint16_t next_cell, co
     return false;
 }
 
+// Funzione helper per calcolare la velocità alla quale deve andare il robot
+// in base agli allarmi mandati dal task di sicurezza e la cella obiettivo
+static inline double calc_speed(const double max_v) {
+
+    // la velocità del robot si calcola come il minimo tra la CRUISING_SPEED e la
+    // massima velocità passata per parametro (calcolata dal task di sicurezza)
+    // se la cella obiettivo è una cella sconosciuta, si moltiplica la velocità
+    // per UNKNOWN_SPEED_FACTOR, ottenendo la velocità finale
+
+    return MIN(max_v, CRUISING_SPEED) * (nav_state.map[nav_state.path.cells[nav_state.path_idx]] != NAV_CELL_FREE ? UNKNOWN_SPEED_FACTOR : 1);
+
+}
+
+
 // Funzione helper che scrive il percorso completo nello stato della navigazione
 // riceve il punto di partenza e il punto di arrivo del percorso
 static uint32_t reconstruct_path(const uint16_t start_cell, const uint16_t end_cell) {
@@ -248,9 +267,6 @@ static uint32_t search_cell(const uint16_t start_cell, const nav_search_goal_t g
     // fai il push della cella di partenza nella search_queue
     search_queue_push(start_cell);
 
-    // array costante con i valori da sommare all'indice per ottenere i vicini
-    const int index_shift[4] = {1, -1, NAV_MAP_CELL_NUMBER, -NAV_MAP_CELL_NUMBER};
-
     // Ciclo di ricerca
     while (!is_search_queue_empty()) {
         
@@ -264,7 +280,7 @@ static uint32_t search_cell(const uint16_t start_cell, const nav_search_goal_t g
         for (int i = 0; i < 4; i++) {
 
             // calcola l'indice della cella vicina alla cella corrente
-            uint16_t neigh_cell = cur_cell + index_shift[i];
+            uint16_t neigh_cell = cur_cell + NEIGHBOR_SHIFT[i];
             
             // Verifica se la vicina attuale potrebbe essere una candidata come prossima cella
             if (nav_state.came_from[neigh_cell] == CELL_NOT_VISITED && cell_can_enter(cur_cell, neigh_cell, start_cell)) {
@@ -470,6 +486,34 @@ void send_objective(
 
 }
 
+// funzione helper che aggiunge la cella vicina sconosciuta al percorso da fare
+static bool append_unknown_neighbor(void) {
+
+    // Prendi l'ultima cella del percorso, quella è la frontiera trovata dalla ricerca
+    uint16_t cur_border = nav_state.path.cells[nav_state.path.length - 1];
+
+    // Scorri i quattro vicini di cur_border
+    for (int i = 0; i < 4; i++) {
+
+        int cur_neighbor_idx = cur_border + NEIGHBOR_SHIFT[i];
+        
+        // Controlla se il vicino i-esimo è sconosciuto
+        if (nav_state.map[cur_neighbor_idx] == NAV_CELL_UNKNOWN) {
+            
+            // Se sì, aggiungilo al percorso
+            nav_state.path.cells[nav_state.path.length++] = cur_neighbor_idx;
+
+            return true;
+
+        } 
+    }
+
+    // Se nessuno dei vicini è sconosciuto restituisci false, non dovremmo mai finire qui:
+    // se una cella è di frontiera, ha per definizione dei vicini sconosciuti
+    return false;
+
+}
+
 // job del task
 void job_navigation(void *arg) {
     
@@ -518,6 +562,12 @@ void job_navigation(void *arg) {
             // calcola la cella in cui si trova il robot
             uint16_t robot_index = coord_to_nav_index(cur_pos.x, cur_pos.y);
 
+            // se la cella della mappa sulla quale si trova il robot è sconosciuta segnala come libera.
+            // quest'operazione verrà fatta poi dal task di mappatura, ma siccome 
+            // è possibile che il task di navigazione parta prima e riceva una mappa
+            // non aggiornata, lo segnamo anche nella mappa privata di questo task
+            if (nav_state.map[robot_index] == NAV_CELL_UNKNOWN) nav_state.map[robot_index] = NAV_CELL_FREE;
+
             // cerca i confini della mappa
             uint32_t dist = search_cell(robot_index, GOAL_BORDER, 0);
 
@@ -526,15 +576,25 @@ void job_navigation(void *arg) {
                 // passa allo stato di pulizia
                 set_state(NAV_STATE_CLEAN); 
 
-            } else if (dist > 1) { // se il robot è sulla frontiera
+            } else { // Se esiste un percorso verso la frontiera
+
+                // aggiungi la cella sconosciuta oltre la frontiera alla zona da visitare
+                if (!append_unknown_neighbor()) {
+                    
+                    // Se entriamo qui dentro significa che una cella di frontiera non 
+                    // ha una cella vicina sconosciuta (impossibile)
+
+                    send_objective(OBJ_STOP, 0, 0, 0, 0, 0);
+
+                    set_state(NAV_STATE_FAILURE);
+
+                    break;
+                }
 
                 nav_state.path_idx = 0;
                 set_state(NAV_STATE_FOLLOW_PATH);
 
             }
-
-            // se dist == 1, il robot si trova sulla frontiera, in questo caso non fare niente 
-            // in modo che la frontiera si stabilizzi
 
             break;
         }
@@ -551,7 +611,7 @@ void job_navigation(void *arg) {
         case NAV_STATE_FOLLOW_PATH: {
 
             // aggiorna la velocità come la più piccola tra velocità di crociera e cur_alarm.max_v_forw
-            nav_state.cur_obj.v = MIN(CRUISING_SPEED, cur_alarm.max_v_forw);
+            nav_state.cur_obj.v = calc_speed(cur_alarm.max_v_forw);
 
             // pubblica la velocità aggiornata
             write_objective(&nav_state.cur_obj);
@@ -579,7 +639,7 @@ void job_navigation(void *arg) {
                     nav_index_to_coord(nav_state.path.cells[nav_state.path_idx], &next_x, &next_y);
 
                     // imposta come prossimo obiettivo di andare al prossimo punto di svolta
-                    send_objective(OBJ_MOVE, MAX_ROTATION_SPEED, 0, MIN(CRUISING_SPEED, cur_alarm.max_v_forw), next_x, next_y);
+                    send_objective(OBJ_MOVE, MAX_ROTATION_SPEED, 0, calc_speed(cur_alarm.max_v_forw), next_x, next_y);
                 }
             } else break;   // se l'obiettivo non è stati raggiunto, rimani in questo stato
 

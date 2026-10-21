@@ -144,8 +144,45 @@ I task dell'esame li scrive l'utente da solo, sopra un framework e un driver pre
     - come finisce il passo: arrivato (celle sotto il robot: la cella diventa libera), urto (bumper), gradino
       (anti-caduta), incastro senza bumper (segno dell'incastro), ostacolo visto (lidar): negli ultimi quattro casi la
       cella diventa bloccata, e servono il ricalcolo del percorso quando la mappa cambia e lo sblocco;
-    - **unica rete di sicurezza**: se la mappa non cambia (es. slittamento sul bordo di un tappeto), dopo 3 sblocchi
-      di fila senza finire un percorso il robot va nello stato di guasto e si ferma.
+    - **unica rete di sicurezza**: se la mappa non cambia (es. slittamento sul bordo di un tappeto), dopo 10 sblocchi
+      di fila senza finire un percorso il robot va nello stato di guasto e si ferma (`UNLOCK_MAX_ATTEMPTS`: tanti,
+      per dargli molte occasioni di uscire prima di arrendersi).
+  - **percorsi di striscio** (2026-10-21, visto nel simulatore: il robot fermo a 1,7 cm dalla pianta del soggiorno):
+    una cella di navigazione è libera se il suo **centro** è lontano dagli ostacoli, ma il robot passa anche fuori
+    dai centri. Spazio minimo fra corpo e ostacolo nel caso peggiore (ostacolo sull'angolo della sua cella fine,
+    ingrossamento di 20 cm fra i centri): +0,58 cm al centro e lungo un passo di centro in centro seguito alla
+    perfezione; −1,05 cm con il robot spostato di lato di 2 cm (tolleranza del moto, archi); −7,45 cm su una
+    scorciatoia che passa sul bordo di una cella, −12,45 cm sull'angolo. La sicurezza ferma il robot sotto il margine,
+    e di solito ha ragione: con pochi cm di spazio, ogni ostacolo entro ±45° è sulla traiettoria. Deciso:
+    - **margine della sicurezza a 1 cm** (`STOP_DISTANCE`, era 2): la frenata la fa già la legge proporzionale (con
+      ~0,3 s di ritardo della catena e guadagno 1/s non va oltre il margine); il margine copre il rumore del lidar
+      (7 mm fino a 3 m). Da tarare sul robot vero (forma del guscio, tocchi che danno segni permanenti del bumper);
+    - **riallineamento al centro**, meccanismo a parte (uno stato di servizio, come lo sblocco): quando la sicurezza
+      ferma il robot (velocità massima in avanti ~0 con l'obiettivo non raggiunto, per un tempo da stabilire) va al
+      centro della sua cella con un `OBJ_MOVE` (girare sul posto è sempre sicuro: il robot è rotondo), poi prosegue
+      **di centro in centro**, senza scorciatoie, nel tratto stretto. I punti di svolta sono già centri di cella;
+    - **cella chiusa** se il riallineamento fallisce (si riferma anche di centro in centro): la cella verso cui
+      andava diventa chiusa nella **mappatura** (la memoria degli ostacoli resta lì), così la ricerca trova
+      un'altra strada invece di riprovare fino al guasto:
+      - **canale** dalla navigazione (unico scrittore) alla mappatura: doppio buffer (`scambio`) con una piccola
+        lista circolare di celle chiuse e un numero progressivo, come il registro dei contatti; la mappatura applica
+        solo quelle con numero più alto dell'ultima vista, quindi non ne perde nessuna. Diretto e non dal driver
+        (come l'incastro) perché l'informazione nasce nella navigazione ed è già una cella;
+      - la navigazione chiude la cella **subito anche nella sua copia**; dato che la copia viene riscritta a ogni
+        cambio di versione, dopo ogni copia rimette le chiusure della sua lista che la mappa non mostra ancora;
+      - **un nuovo stato della griglia di navigazione**, `NAV_CELL_TOO_NARROW` (c'è posto: 4 stati usano 2 bit su
+        8), non un valore speciale nella griglia fine: quello passerebbe per l'ingrossamento di 20 cm e chiuderebbe
+        anche le 4 celle vicine (5 invece di 1, contro il requisito di passare ovunque si possa). Come per le celle
+        proibite, la mappatura lo salta quando ricalcola gli stati: dura **per tutta la sessione**, il lidar non lo
+        riapre. Per la navigazione non è libera (la ricerca non ci passa) ma resta attraversabile per l'uscita da
+        una zona bloccata, come le celle bloccate;
+      - la cella chiusa è quella verso cui il robot andava; il robot resta nella cella da cui è partito, libera, e
+        ricalcola il percorso da lì;
+    - errori che i conti non vedono: rumore del lidar e, **per ora**, mappa spostata dall'odometria. Con
+      l'allineamento delle scansioni (già nel piano, vedi la mappatura in cima) lo spostamento scende alla precisione
+      dell'allineamento; la posizione corretta dovrà arrivare anche al moto, che oggi guida con l'odometria;
+    - **resta aperto** il caso opposto: passaggi larghi fra ~36 e ~60 cm che la regola "libera" chiude se nessun
+      centro di cella cade nella striscia in cui ci sta il centro del robot.
 
 ## Ancora da decidere
 - **Mappa e navigazione, punti aperti** (2026-10-13): larghezza della striscia (dalla spazzola centrale), ingombro
