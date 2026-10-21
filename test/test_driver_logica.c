@@ -423,73 +423,73 @@ static void contatti(void)
 	int64_t t = MS(1000);
 
 	/* niente attivo: niente eventi */
-	CONTROLLA(contatti_frame(&c, &s, t, NULL) == 0 && c.pub.ultimo == 0);
+	CONTROLLA(contatti_frame(&c, &s, t, NULL, 0) == 0 && c.pub.ultimo == 0);
 
 	/* anti-caduta 1: 2 frame non bastano, al terzo l'evento, con l'istante del primo */
 	s.cliff[1] = 1;
-	CONTROLLA(contatti_frame(&c, &s, t += MS(20), NULL) == 0);
+	CONTROLLA(contatti_frame(&c, &s, t += MS(20), NULL, 0) == 0);
 	int64_t primo = t;
-	CONTROLLA(contatti_frame(&c, &s, t += MS(20), NULL) == 0);
-	CONTROLLA(contatti_frame(&c, &s, t += MS(20), NULL) == 1);
+	CONTROLLA(contatti_frame(&c, &s, t += MS(20), NULL, 0) == 0);
+	CONTROLLA(contatti_frame(&c, &s, t += MS(20), NULL, 0) == 1);
 	CONTROLLA(c.pub.ultimo == 1 && c.pub.ev[1].numero == 1 && c.pub.ev[1].sensore == CONTATTO_VUOTO_SX_ANT);
 	CONTROLLA(c.pub.ev[1].t_ns == primo);
 	/* resta attivo: nessun altro evento */
 	for (int i = 0; i < 10; i++)
-		CONTROLLA(contatti_frame(&c, &s, t += MS(20), NULL) == 0);
+		CONTROLLA(contatti_frame(&c, &s, t += MS(20), NULL, 0) == 0);
 	CONTROLLA(c.pub.ultimo == 1);
 
 	/* un lampo di 2 frame dopo essere tornato normale: niente (falso allarme filtrato) */
 	s.cliff[1] = 0;
-	contatti_frame(&c, &s, t += MS(20), NULL);
+	contatti_frame(&c, &s, t += MS(20), NULL, 0);
 	s.cliff[1] = 1;
-	contatti_frame(&c, &s, t += MS(20), NULL);
-	contatti_frame(&c, &s, t += MS(20), NULL);
+	contatti_frame(&c, &s, t += MS(20), NULL, 0);
+	contatti_frame(&c, &s, t += MS(20), NULL, 0);
 	s.cliff[1] = 0;
-	contatti_frame(&c, &s, t += MS(20), NULL);
+	contatti_frame(&c, &s, t += MS(20), NULL, 0);
 	CONTROLLA(c.pub.ultimo == 1);
 
 	/* bumper destro: basta un frame */
 	s.bumper_dx = 1;
-	CONTROLLA(contatti_frame(&c, &s, t += MS(20), NULL) == 1);
+	CONTROLLA(contatti_frame(&c, &s, t += MS(20), NULL, 0) == 1);
 	CONTROLLA(c.pub.ultimo == 2 && c.pub.ev[2].sensore == CONTATTO_BUMPER_DX && c.pub.ev[2].t_ns == t);
-	CONTROLLA(contatti_frame(&c, &s, t += MS(20), NULL) == 0);
+	CONTROLLA(contatti_frame(&c, &s, t += MS(20), NULL, 0) == 0);
 	s.bumper_dx = 0;
-	contatti_frame(&c, &s, t += MS(20), NULL);
+	contatti_frame(&c, &s, t += MS(20), NULL, 0);
 	s.bumper_dx = 1;
-	CONTROLLA(contatti_frame(&c, &s, t += MS(20), NULL) == 1 && c.pub.ultimo == 3);   /* nuovo scatto, nuovo evento */
+	CONTROLLA(contatti_frame(&c, &s, t += MS(20), NULL, 0) == 1 && c.pub.ultimo == 3);   /* nuovo scatto, nuovo evento */
 	s.bumper_dx = 0;
 
 	/* robot sollevato (tutti e 4 nel vuoto): niente eventi, e i conteggi ripartono */
 	s.cliff[0] = 1;
-	contatti_frame(&c, &s, t += MS(20), NULL);
-	contatti_frame(&c, &s, t += MS(20), NULL);
+	contatti_frame(&c, &s, t += MS(20), NULL, 0);
+	contatti_frame(&c, &s, t += MS(20), NULL, 0);
 	s.cliff[1] = s.cliff[2] = s.cliff[3] = 1;
 	for (int i = 0; i < 10; i++)
-		CONTROLLA(contatti_frame(&c, &s, t += MS(20), NULL) == 0);
+		CONTROLLA(contatti_frame(&c, &s, t += MS(20), NULL, 0) == 0);
 	s.cliff[1] = s.cliff[2] = s.cliff[3] = 0;          /* posato con un solo sensore sul vuoto: si riconta da 1 */
-	CONTROLLA(contatti_frame(&c, &s, t += MS(20), NULL) == 0);
+	CONTROLLA(contatti_frame(&c, &s, t += MS(20), NULL, 0) == 0);
 	CONTROLLA(c.pub.ultimo == 3);
 	s.cliff[0] = 0;
 
 	/* sensori spenti o robot sulla base: anti-caduta e bumper non significano niente */
 	s.bumper_sx = 1;
 	s.controllo = 0;
-	CONTROLLA(contatti_frame(&c, &s, t += MS(20), NULL) == 0);
+	CONTROLLA(contatti_frame(&c, &s, t += MS(20), NULL, 0) == 0);
 	s.controllo = GD32_CONTROLLO_SENSORI_ACCESI;
 	s.sulla_base = 1;
-	CONTROLLA(contatti_frame(&c, &s, t += MS(20), NULL) == 0);
+	CONTROLLA(contatti_frame(&c, &s, t += MS(20), NULL, 0) == 0);
 	CONTROLLA(c.pub.ultimo == 3);
 	s.sulla_base = 0;
-	CONTROLLA(contatti_frame(&c, &s, t += MS(20), NULL) == 1 && c.pub.ev[4].sensore == CONTATTO_BUMPER_SX);
+	CONTROLLA(contatti_frame(&c, &s, t += MS(20), NULL, 0) == 1 && c.pub.ev[4].sensore == CONTATTO_BUMPER_SX);
 	s.bumper_sx = 0;
-	contatti_frame(&c, &s, t += MS(20), NULL);
+	contatti_frame(&c, &s, t += MS(20), NULL, 0);
 
 	/* lista circolare: dopo 40 eventi restano gli ultimi CONTATTI_N, ognuno al suo posto */
 	for (int i = 0; i < 36; i++) {
 		s.bumper_sx = 1;
-		contatti_frame(&c, &s, t += MS(20), NULL);
+		contatti_frame(&c, &s, t += MS(20), NULL, 0);
 		s.bumper_sx = 0;
-		contatti_frame(&c, &s, t += MS(20), NULL);
+		contatti_frame(&c, &s, t += MS(20), NULL, 0);
 	}
 	CONTROLLA(c.pub.ultimo == 40);
 	int ok = 1;
@@ -501,19 +501,51 @@ static void contatti(void)
 	CONTROLLA(c.pub.ev[40 % CONTATTI_N].posa_valida == 0);
 	drv_posa_t posa = { .x = 1.25, .y = -0.5, .theta = 0.75, .t_ns = t };
 	s.bumper_sx = 1;
-	CONTROLLA(contatti_frame(&c, &s, t += MS(20), &posa) == 1);
+	CONTROLLA(contatti_frame(&c, &s, t += MS(20), &posa, 0) == 1);
 	drv_contatto_t e = c.pub.ev[c.pub.ultimo % CONTATTI_N];
 	CONTROLLA(e.posa_valida && e.posa.x == 1.25 && e.posa.y == -0.5 && e.posa.theta == 0.75 && e.posa.t_ns == posa.t_ns);
 	s.bumper_sx = 0;
-	contatti_frame(&c, &s, t += MS(20), &posa);
+	contatti_frame(&c, &s, t += MS(20), &posa, 0);
 	/* anti-caduta: la posizione è quella del PRIMO frame attivo, non di quello in cui l'evento viene confermato */
 	s.cliff[3] = 1;
 	drv_posa_t p1 = { .x = 2, .t_ns = t }, p2 = { .x = 3, .t_ns = t + MS(20) }, p3 = { .x = 4, .t_ns = t + MS(40) };
-	contatti_frame(&c, &s, t += MS(20), &p1);
-	contatti_frame(&c, &s, t += MS(20), &p2);
-	CONTROLLA(contatti_frame(&c, &s, t += MS(20), &p3) == 1);
+	contatti_frame(&c, &s, t += MS(20), &p1, 0);
+	contatti_frame(&c, &s, t += MS(20), &p2, 0);
+	CONTROLLA(contatti_frame(&c, &s, t += MS(20), &p3, 0) == 1);
 	e = c.pub.ev[c.pub.ultimo % CONTATTI_N];
 	CONTROLLA(e.sensore == CONTATTO_VUOTO_DX_LAT && e.posa_valida && e.posa.x == 2);
+	s.cliff[3] = 0;
+	contatti_frame(&c, &s, t += MS(20), &p3, 0);
+
+	/* incastro: evento al primo frame segnalato, con la posizione di quel frame, uno solo finché resta segnalato */
+	uint32_t prima = c.pub.ultimo;
+	drv_posa_t pi = { .x = 5, .y = 6, .theta = 1, .t_ns = t };
+	CONTROLLA(contatti_frame(&c, &s, t += MS(20), &pi, 1) == 1);
+	e = c.pub.ev[c.pub.ultimo % CONTATTI_N];
+	CONTROLLA(c.pub.ultimo == prima + 1 && e.sensore == CONTATTO_INCASTRO && e.t_ns == t);
+	CONTROLLA(e.posa_valida && e.posa.x == 5 && e.posa.y == 6 && e.posa.theta == 1);
+	for (int i = 0; i < 10; i++)
+		CONTROLLA(contatti_frame(&c, &s, t += MS(20), &p3, 1) == 0);
+	/* breve (la sicurezza lo spegne dopo 100 ms): un evento lo stesso; tolto e ridato: un evento nuovo */
+	contatti_frame(&c, &s, t += MS(20), &p3, 0);
+	CONTROLLA(contatti_frame(&c, &s, t += MS(20), &p3, 1) == 1 && c.pub.ultimo == prima + 2);
+	contatti_frame(&c, &s, t += MS(20), &p3, 0);
+	/* robot sollevato o sulla base: niente incastri */
+	s.cliff[0] = s.cliff[1] = s.cliff[2] = s.cliff[3] = 1;
+	CONTROLLA(contatti_frame(&c, &s, t += MS(20), &p3, 1) == 0);
+	s.cliff[0] = s.cliff[1] = s.cliff[2] = s.cliff[3] = 0;
+	contatti_frame(&c, &s, t += MS(20), &p3, 0);
+	s.sulla_base = 1;
+	CONTROLLA(contatti_frame(&c, &s, t += MS(20), &p3, 1) == 0);
+	s.sulla_base = 0;
+	CONTROLLA(c.pub.ultimo == prima + 2);
+	/* insieme al bumper: due eventi nello stesso frame */
+	contatti_frame(&c, &s, t += MS(20), &p3, 0);
+	s.bumper_dx = 1;
+	CONTROLLA(contatti_frame(&c, &s, t += MS(20), &p3, 1) == 1 && c.pub.ultimo == prima + 4);
+	CONTROLLA(c.pub.ev[(prima + 3) % CONTATTI_N].sensore == CONTATTO_BUMPER_DX);
+	CONTROLLA(c.pub.ev[(prima + 4) % CONTATTI_N].sensore == CONTATTO_INCASTRO);
+	s.bumper_dx = 0;
 }
 
 int main(void)

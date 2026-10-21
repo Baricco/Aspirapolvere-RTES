@@ -7,11 +7,6 @@
 #include "lidar.h"
 #include "mapping.h"
 
-// Macro Helper per calcolare il minimo tra due numeri
-#define MIN(a, b) ((a) < (b) ? (a) : (b))
-
-// Macro Helper per calcolare il massimo tra due numeri
-#define MAX(a, b) ((a) > (b) ? (a) : (b))
 
 // struttura dati interna che contiene lo stato interno del task
 typedef struct {
@@ -134,6 +129,9 @@ void job_safety(void *arg) {
         } else safe_state.stuck_frame_counter = 0;      // se il robot non risulta bloccato azzera il contatore
 
     }
+
+    // Controlla se il robot è incastrato ed eventualmente  segnala l'incastro
+    drv_incastro((cur_error_mask & SAFETY_ERROR_STUCK) && expected_v >= THRESHOLD_STUCK_MIN_V);
 
     // Controllo dello slittamento
     {       // Istanzio queste variabili in un blocco di codice separato perchè le devo usare solo qui

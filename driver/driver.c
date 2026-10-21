@@ -48,6 +48,7 @@ static struct {
 	_Atomic int64_t vw;                    /* v (tick/s, 32 bit alti) e omega (tick/s, 32 bit bassi) */
 	_Atomic int spazzola_lat, spazzola_cen, aspirazione, led, lidar_acceso, lidar_cgiri, uscita_base;
 	_Atomic int azzera_guasto;
+	_Atomic int incastro;                  /* incastro in avanti, dalla sicurezza (drv_incastro) */
 	_Atomic(const char *) suono;
 } cmd;
 
@@ -656,7 +657,8 @@ static void frame_gd32(const gd32_frame_t *f, void *ctx)
 		scambio_scrivi(&sc_sensori, &p);
 		drv_posa_t posa;
 		int ha_posa = scambio_leggi(&sc_posa, &posa) != 0;
-		if (contatti_frame(&d.contatti, &d.s, t, ha_posa ? &posa : NULL))   /* prima di svegliare i task: trovano già l'evento */
+		int incastro = atomic_load(&cmd.incastro);
+		if (contatti_frame(&d.contatti, &d.s, t, ha_posa ? &posa : NULL, incastro))   /* prima di svegliare i task: trovano già l'evento */
 			scambio_scrivi(&sc_contatti, &d.contatti.pub);
 		for (int i = 0; i < MAX_ISCRITTI; i++) {
 			rt_task_t *k = atomic_load(&iscritti[i]);
@@ -1190,6 +1192,11 @@ void drv_esci_dalla_base(int si)
 {
 	atomic_store(&cmd.uscita_base, si ? 1 : 0);
 	sveglia_driver();
+}
+
+void drv_incastro(int si)
+{
+	atomic_store(&cmd.incastro, si ? 1 : 0);   /* lo legge il prossimo frame: niente risveglio */
 }
 
 void drv_suono(const char *nome)

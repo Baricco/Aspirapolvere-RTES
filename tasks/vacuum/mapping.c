@@ -24,6 +24,8 @@
 #define VOID_OBSTACLE                -128       // punteggio speciale da assegnare ad una cella che viene rilevata come "dirupo" dai sensori anti-caduta, una volta che una cella viene messa a questo valore, non può essere modificata dal ciclo di aggiornamento lidar-based
 #define LOW_OBSTACLE                 127        // punteggio speciale da assegnare ad una cella che viene rilevata come ostacolo dal bumper, ma non rilevato dal lidar, una volta che una cella viene messa a questo valore, non può essere modificata dal ciclo di aggiornamento lidar-based
 
+#define CELL_COV_RADIUS (ROBOT_RADIUS / 1000.0 / FINE_MAP_CELL_SIZE - M_SQRT2)    // raggio delle celle coperte certamente dal robot al suo passaggio
+
 // Posizione dei sensori di contatto rispetto al centro del robot (x in avanti, y a sinistra, angoli positivi a sinistra).
 // Valori presi da sim/robot.h, dove sono segnati come stime: da verificare sul robot.
 #define CLIFF_SENSOR_DISTANCE        0.15       // distanza degli anti-caduta dal centro del robot, espressa in m
@@ -94,7 +96,6 @@ typedef struct {
 
 // stato del task di mappatura
 static mapping_state_t map_state;
-
 
 uint32_t read_nav_map(uint8_t *navigation_map) {
     
@@ -298,6 +299,10 @@ static bool apply_queued_events(void) {
             dist = CLIFF_SENSOR_DISTANCE;
             angle = CLIFF_SENSOR_ANGLE(cur_event.sensore);
             event_value = VOID_OBSTACLE;
+        } else if (cur_event.sensore == CONTATTO_INCASTRO) {                      // se il sensore è quello degli incastri
+            dist = BUMPER_DISTANCE;
+            angle = 0;
+            event_value = LOW_OBSTACLE;
         } else {                            // se il sensore è il bumper
             dist = BUMPER_DISTANCE;
             angle = cur_event.sensore == CONTATTO_BUMPER_DX ? BUMPER_DX_ANGLE : BUMPER_SX_ANGLE;
@@ -418,6 +423,33 @@ static void exec_bresenham_algorithm(const int x_coord_start, const int y_coord_
 
 }
 
+// funzione helper che data la posizione attuale del robot,
+// segna le celle sopra alle quali passa come libere
+static void mark_cells_under_robot(double pos_x, double pos_y) {
+
+    uint32_t idx = coord_to_fine_index(pos_x, pos_y);
+    
+    // calcola la cella che si trova al centro del robot
+    uint16_t robot_y = idx >> 10, robot_x = idx & 0x3FF;
+
+    int radius = CELL_COV_RADIUS;
+
+    // se il robot si trova sul bordo della mappa, non aggiornare le celle sotto di lui (esci)
+    if (robot_x < radius || robot_y < radius || robot_x > 1023 - radius || robot_y > 1023 - radius) return;
+
+    // scorri tutte le celle sotto al robot
+    for (int dy = -radius; dy <= radius; dy++) {
+        for (int dx = -radius; dx <= radius; dx++) {
+            // se la cella corrente si trova effettivamente sotto il robot
+            if (dx*dx + dy*dy <= CELL_COV_RADIUS*CELL_COV_RADIUS) {
+                // sottrai 100 dalla cella, in modo che sia segnata come libera
+                add_score_to_fine_cell(((robot_y + dy) << 10) | (robot_x + dx), FINE_GRID_MIN_SCORE);
+            }
+        }
+    }
+
+}
+
 // job del task
 void job_mapping(void *arg) {
     
@@ -439,8 +471,11 @@ void job_mapping(void *arg) {
     // Se la posizione attuale non è valida (il robot è sollevato), esci
     if (!cur_pos.valid) return;
 
-    // Applica gli eventi speciali (sensori di caduta e bumper anteriore) sulla mappa
+    // Applica gli eventi speciali (sensori di caduta, incastro e bumper anteriore) sulla mappa
     bool has_applied_events = apply_queued_events();
+
+    // Aggiorna i valori delle celle sotto al robot
+    mark_cells_under_robot(cur_pos.x, cur_pos.y);
 
     // se la velocità di rotazione del robot al momento della scansione del lidar
     // supera la soglia o la scansione è vecchia, la scansione non è valida

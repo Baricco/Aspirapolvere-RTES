@@ -1,4 +1,4 @@
-/* contatti.c - Registro degli scatti di anti-caduta e bumper (vedi contatti.h). */
+/* contatti.c - Registro degli scatti di anti-caduta e bumper, e degli incastri (vedi contatti.h). */
 #include <string.h>
 
 #include "contatti.h"
@@ -14,7 +14,7 @@ static void azzera(contatti_t *c)
 	memset(c->segnato, 0, sizeof c->segnato);
 }
 
-int contatti_frame(contatti_t *c, const gd32_sensori_t *s, int64_t t, const drv_posa_t *posa)
+int contatti_frame(contatti_t *c, const gd32_sensori_t *s, int64_t t, const drv_posa_t *posa, int incastro)
 {
 	int accesi = (s->controllo & GD32_CONTROLLO_SENSORI_ACCESI) != 0;
 	int tutti_vuoto = s->cliff[0] && s->cliff[1] && s->cliff[2] && s->cliff[3];
@@ -22,7 +22,8 @@ int contatti_frame(contatti_t *c, const gd32_sensori_t *s, int64_t t, const drv_
 		azzera(c);
 		return 0;
 	}
-	int attivo[CONTATTO_SENSORI] = { s->cliff[0], s->cliff[1], s->cliff[2], s->cliff[3], s->bumper_sx, s->bumper_dx };
+	int attivo[CONTATTO_SENSORI] = { s->cliff[0], s->cliff[1], s->cliff[2], s->cliff[3], s->bumper_sx, s->bumper_dx,
+	                                  incastro != 0 };
 	int nuovi = 0;
 	for (int k = 0; k < CONTATTO_SENSORI; k++) {
 		if (!attivo[k]) {
@@ -36,7 +37,8 @@ int contatti_frame(contatti_t *c, const gd32_sensori_t *s, int64_t t, const drv_
 			if (posa)
 				c->posa_inizio[k] = *posa;
 		}
-		int soglia = k < CONTATTO_BUMPER_SX ? CONTATTI_FRAME_VUOTO : CONTATTI_FRAME_BUMPER;
+		int soglia = k < CONTATTO_BUMPER_SX ? CONTATTI_FRAME_VUOTO
+		           : k == CONTATTO_INCASTRO ? CONTATTI_FRAME_INCASTRO : CONTATTI_FRAME_BUMPER;
 		if (!c->segnato[k] && c->conta[k] >= soglia) {
 			c->segnato[k] = 1;
 			uint32_t n = ++c->pub.ultimo;

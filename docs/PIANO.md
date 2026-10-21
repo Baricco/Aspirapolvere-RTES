@@ -119,6 +119,33 @@ I task dell'esame li scrive l'utente da solo, sopra un framework e un driver pre
     guidato dalla distanza del lidar, da aggiungere alla navigazione dopo BA*;
   - **rumore della mappa** (2026-10-18): la versione cresce anche con il robot fermo (celle di bordo che cambiano
     stato); si accetta per ora, da misurare e tarare dopo la correzione del giro.
+  - **frontiere che si chiudono sempre** (2026-10-21): l'esplorazione non tiene liste di frontiere scartate (sarebbe
+    memoria degli ostacoli nella navigazione). Ogni tentativo di entrare nello sconosciuto cambia comunque la mappa,
+    quindi i tentativi finiscono perché le celle sono finite:
+    - **mappatura, celle sotto il robot**: a ogni job con la posizione valida le celle fini sotto il corpo del robot
+      (raggio 17,45 cm) diventano libere e osservate con il punteggio **normale** più libero, che il lidar può ancora
+      cambiare (es. una sedia spostata dopo). Le celle speciali (vuoto dell'anti-caduta, ostacolo del bumper) non si
+      toccano. Serve perché i raggi senza ritorno vengono scartati: davanti a un oggetto nero o a un vetro le celle
+      possono restare sconosciute anche con il robot accanto;
+    - **incastro come contatto** (2026-10-21): l'allarme di incastro della sicurezza vale frame per frame e si spegne
+      appena la navigazione reagisce (~100 ms), quindi la mappatura (200 ms) lo perderebbe. Come per il bumper, passa
+      dal **registro dei contatti** del driver: la sicurezza chiama `drv_incastro(si)` a ogni frame (1 = allarme di
+      incastro con la velocità comandata in avanti), il driver ne fa un evento `CONTATTO_INCASTRO` con la posizione
+      del primo frame (niente eventi sulla base, a sensori spenti o sollevato), la mappatura lo applica come
+      `LOW_OBSTACLE` **davanti al robot**, alla distanza del bumper (es. la credenza rialzata del soggiorno, che
+      incastra la torretta senza bumper). Scartate: un contatore nella sicurezza (rifà il registro, posizione in
+      ritardo), l'allarme trattenuto (lega la sicurezza al periodo della mappatura), un canale dalla navigazione
+      alla mappatura. Da rivedere: la gestione degli incastri è la parte più difficile da prevedere;
+    - **navigazione, ultimo passo nello sconosciuto**: la ricerca trova la frontiera, poi in fondo al percorso si
+      aggiunge una cella sconosciuta vicina, che è la meta vera. Il passo verso una cella non libera si fa a velocità
+      ridotta: la velocità normale (crociera, limitata dalla sicurezza) moltiplicata per una costante fra 0 e 1
+      (0,5 per ora, da tarare sul robot vero). L'urto con un oggetto che il lidar non vede arriva senza la frenata
+      della sicurezza;
+    - come finisce il passo: arrivato (celle sotto il robot: la cella diventa libera), urto (bumper), gradino
+      (anti-caduta), incastro senza bumper (segno dell'incastro), ostacolo visto (lidar): negli ultimi quattro casi la
+      cella diventa bloccata, e servono il ricalcolo del percorso quando la mappa cambia e lo sblocco;
+    - **unica rete di sicurezza**: se la mappa non cambia (es. slittamento sul bordo di un tappeto), dopo 3 sblocchi
+      di fila senza finire un percorso il robot va nello stato di guasto e si ferma.
 
 ## Ancora da decidere
 - **Mappa e navigazione, punti aperti** (2026-10-13): larghezza della striscia (dalla spazzola centrale), ingombro

@@ -5,6 +5,12 @@
 #include <stdint.h>
 #include "driver/driver.h"
 
+// Macro Helper per calcolare il minimo tra due numeri
+#define MIN(a, b) ((a) < (b) ? (a) : (b))
+
+// Macro Helper per calcolare il massimo tra due numeri
+#define MAX(a, b) ((a) > (b) ? (a) : (b))
+
 // Simboli Mnemonici da usare nella error mask
 #define SAFETY_ERROR_STUCK      (1u << 0)       // XXXXXXX1 --> Robot Incastrato
 #define SAFETY_ERROR_SLIP       (1u << 1)       // XXXXXX1X --> Slittamento Ruote

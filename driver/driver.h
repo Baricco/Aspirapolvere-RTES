@@ -12,7 +12,8 @@
  *     GD32 toglie potenza ai motori dopo ~1,9 s); velocità 0x66 ogni 20 ms;
  *   - sensori: decodifica il frame 0x15 (50 Hz), lo pubblica e sveglia i task iscritti (drv_sveglia_ai_sensori);
  *   - lidar: alimentazione, regolazione della velocità (come AuxCtrl), giri completi pubblicati;
- *   - contatti: registro degli scatti di anti-caduta e bumper, per i task lenti (contatti.h, drv_contatti);
+ *   - contatti: registro degli scatti di anti-caduta e bumper, e degli incastri, per i task lenti (contatti.h,
+ *     drv_contatti);
  *   - batteria: tensione media, percentuale, soglie (batteria.h); alimentazione dei sensori secondo la base (0x9d);
  *   - sicurezza: ogni comando ai motori passa dai limiti "a terra" (sic_terra_limita in gd32/sicurezza.h), oppure
  *     dal blocco del banco di prova se il robot è sollevato apposta (drv_config_t.banco);
@@ -146,7 +147,7 @@ typedef struct {
 uint32_t drv_sensori(drv_sensori_t *out);
 uint32_t drv_giro(lidar_giro_t *out);       /* ultimo giro completo del lidar (struttura grande: ~4 KB) */
 uint32_t drv_stato(drv_stato_t *out);
-/* Registro dei contatti (driver/contatti.h): gli ultimi CONTATTI_N scatti di anti-caduta e bumper, ciascuno con il
+/* Registro dei contatti (driver/contatti.h): gli ultimi CONTATTI_N scatti di anti-caduta, bumper e incastri, ciascuno con il
  * suo numero progressivo, il sensore e l'istante. Il numero di versione cambia solo quando arriva un evento nuovo. */
 uint32_t drv_contatti(drv_contatti_t *out);
 
@@ -168,6 +169,10 @@ void drv_lidar(int acceso, double giri_s);          /* giri_s <= 0: la velocità
 void drv_posa(double x, double y, double theta);
 void drv_esci_dalla_base(int si);                   /* 1 = permette di muoversi piano anche sulla base (i contatti
                                                        sono dietro: si esce IN AVANTI) */
+/* Incastro in avanti (lo riconosce il task di sicurezza): 1 finché il robot è incastrato andando avanti, 0 altrimenti.
+ * Va chiamata a ogni frame, come un sensore: il driver ne fa un evento CONTATTO_INCASTRO nel registro dei contatti,
+ * con la posizione del primo frame. La deve chiamare UN SOLO task. */
+void drv_incastro(int si);
 void drv_suono(const char *nome);                   /* es. "sound_beep_beep" (file in /usr/share/audio/english) */
 
 /* Prova a uscire dallo stato di guasto (solo se la causa non c'è più). Ritorna 0 se ci riesce. */
