@@ -18,14 +18,24 @@
 #define UNKNOWN_SPEED_FACTOR 0.5            // fattore da moltiplicare alla velocità quando il robot si muove in territorio sconosciuto
 
 
+#define STALL_SPEED 0.02                // velocità massima in avanti sotto la quale la sicurezza sta trattenendo il robot, espressa in m/s
+#define STALL_OMEGA 0.1                 // velocità angolare sotto la quale il robot non sta ruotando, espressa in rad/s
+#define STALL_TIME RT_MS(1000)          // per quanto tempo deve durare lo stallo prima che venga considerato come tale
+
 
 // array costante con i valori da sommare all'indice per ottenere i vicini
 static const int NEIGHBOR_SHIFT[4] = {1, -1, NAV_MAP_CELL_NUMBER, -NAV_MAP_CELL_NUMBER};
 
+// Primo doppio buffer per comunicare con il task di movimento
 // canale di scambio del doppio buffer
 static scambio_t double_buffer;
 // i due buffer
 static navigation_objective_t buffer1, buffer2;
+
+// Secondo doppio buffer per comunicare con la mappatura
+static scambio_t double_buffer_2;
+// i due buffer
+static navigation_closed_cells_t buffer3, buffer4;  
 
 // caratteristiche del task
 rt_task_t navigation_task;
@@ -57,6 +67,7 @@ typedef enum {
     NAV_STATE_FOLLOW_PATH,      // segui il percorso calcolato, un punto di svolta alla volta
     NAV_STATE_UNLOCK,           // dopo un allarme, ferma il robot, indietreggia leggermente e riparti
     NAV_STATE_SLEEP,            // robot fermo, missione completata
+    NAV_STATE_ALIGN,            // robot in allineamento, dopo un arresto, porta il robot al centro della cella di navigazione
     NAV_STATE_FAILURE,          // robot fermo, qualcosa è andato storto
 } nav_state_t;
 
@@ -65,14 +76,17 @@ typedef struct {
     uint8_t map[NAV_MAP_CELL_NUMBER * NAV_MAP_CELL_NUMBER];            // copia della mappa di navigazione, passata dal task di mappatura
     uint16_t came_from[NAV_MAP_CELL_NUMBER * NAV_MAP_CELL_NUMBER];     // array delle provenienze: ogni cella contiene l'indice della cella da cui il robot è venuto
     uint32_t map_version;                       // numero di versione della mappa di navigazione
-    navigation_objective_t cur_obj;            // ultimo obiettivo mandato
+    navigation_objective_t cur_obj;             // ultimo obiettivo mandato
     nav_state_t state;                          // stato corrente del task di navigazione (macchina a stati)    
     nav_state_t mission;                        // fase della missione: lo stato di pianificazione a cui tornare (esplorazione, pulizia, seguimuro, ritorno alla base)
     nav_search_queue_t s_q;                     // search_queue, coda di ricerca, serve per la ricerca del percorso
     nav_path_t path;                            // percorso che deve fare il robot
     uint16_t path_idx;                          // indice del path dell'ultimo punto a cui è stato mandato mandato il robot
-    int64_t state_start;                    // istante di ingresso nello stato corrente, serve per gli stati temporizzati
+    int64_t state_start;                        // istante di ingresso nello stato corrente, serve per gli stati temporizzati
     uint8_t unlock_attempt;                     // numero di tentativi di sblocco fatti di fila
+    int64_t stall_start;                        // istante in cui è iniziato l'arresto, 0 se il robot non è in arresto
+    bool center_to_center;                      // è true se il percorso attuale va seguito senza prendere scorciatoie (le scorciatoie potrebbero far finire il robot in posizioni diverse dal centro delle celle, rendendo possibili situazioni di stallo dove il task di sicurezza ferma il robot per via di ostacoli che la navigazione non vede)
+    navigation_closed_cells_t closed_cells;     // lista di celle chiuse da segnalare al task di mappatura
 
 } navigation_state_t;
 
@@ -80,7 +94,7 @@ typedef struct {
 static navigation_state_t nav_state;
 
 // funzione helper per impostare lo stato
-static inline void set_state(nav_state_t next_state) {
+static void set_state(nav_state_t next_state) {
     
     if (next_state == NAV_STATE_EXPLORE ||
         next_state == NAV_STATE_CLEAN ||
@@ -91,6 +105,46 @@ static inline void set_state(nav_state_t next_state) {
     nav_state.state = next_state;       // imposta il prossimo stato
      
     nav_state.state_start = rt_adesso();    // imposta l'istante di inizio ad ora
+
+    nav_state.stall_start = 0;              // azzera il tempo di arresto del robot (il robot non è in arresto)
+
+}
+
+// Funzione helper per impostare una cella della mappa come troppo stretta (NAV_CELL_TOO_NARROW)
+// al task di mappatura, aggiornando anche la copia locale della mappa di navigazione
+static void close_cell(uint16_t cell) {
+    
+    // aggiungi la cella alla lista di celle da mandare al task di mappatura
+    nav_state.closed_cells.cells[nav_state.closed_cells.num % CLOSED_CELLS_MAX] = cell;
+
+    // aumenta il numero di celle nella lista
+    nav_state.closed_cells.num++;
+
+    // pubblica la nuova lista
+    scambio_scrivi(&double_buffer_2, &nav_state.closed_cells);
+
+    // aggiorna anche la copia locale della mappa
+    nav_state.map[cell] = NAV_CELL_TOO_NARROW;
+}
+
+
+
+// Funzione Helper che prende allarmi e posizione attuale ritorna true
+// se il robot è in stallo da almeno STALL_TIME
+static bool is_stalled(safety_alarm_t cur_alarm, movement_position_data_t cur_pos) {
+    // controlla se la velocità e velocità angolare sono sopra le soglie di stallo
+    if (cur_alarm.max_v_forw > STALL_SPEED || fabs(cur_pos.omega) > STALL_OMEGA) {
+        // se non c'è stallo, azzera l'istante di stallo e ritorna false
+        nav_state.stall_start = 0;
+        return false;
+    } else if (nav_state.stall_start == 0) {    // se è in stallo e stall_start è a 0
+        // metti stall_start all'istante corrente
+        nav_state.stall_start = rt_adesso();
+    }
+
+    // ritorna se è passato più di STALL_TIME dall'ultimo stallo
+    return (rt_adesso() - nav_state.stall_start >= STALL_TIME);
+
 
 }
 
@@ -119,6 +173,7 @@ typedef enum {
     GOAL_BORDER,    // l'obiettivo della ricerca è trovare una cella al confine delle celle esplorate
     GOAL_DIRTY,     // l'obiettivo della ricerca è trovare una cella non pulita
     GOAL_CELL,      // l'obiettivo della ricerca è trovare una cella precisa (indice della cella)
+    GOAL_FREE,      // l'obiettivo della ricerca è trovare una cella libera, partendo da una bloccata
 } nav_search_goal_t;
 
 // Funzione helper per stabilire se la cella fornita corrisponde all'obiettivo della ricerca
@@ -141,6 +196,9 @@ static bool cell_is_goal(const nav_search_goal_t goal, const uint16_t cell, cons
             break;          
         case GOAL_CELL:     // il terzo parametro serve solo qui
             return cell == goal_cell;
+            break;
+        case GOAL_FREE:
+            return nav_state.map[cell] == NAV_CELL_FREE;
             break;
         default:                // se entriamo in questo caso c'è un errore
             return false;       // ritorniamo false nel dubbio
@@ -176,7 +234,7 @@ static bool cell_can_enter(const uint16_t cur_cell, const uint16_t next_cell, co
     // 1. next_cell non è sconosciuta
     // 2. cur_cell è bloccata o proibita (da una cella libera non puoi passare per una bloccata)
     // 3. se next_cell si trova entro ESCAPE_MAX_CELLS da start_cell
-    if (nav_state.map[next_cell] != NAV_CELL_UNKNOWN &&  nav_state.map[cur_cell] != NAV_CELL_FREE) {
+    if (nav_state.map[next_cell] != NAV_CELL_UNKNOWN && nav_state.map[cur_cell] != NAV_CELL_FREE && nav_state.map[next_cell] != NAV_CELL_TOO_NARROW) {
         
         // ricava x e y di start_cell dall'indice
         uint16_t start_cell_y = start_cell >> 8;
@@ -383,8 +441,8 @@ static uint16_t next_turning_point(void) {
     // Se il percorso ha lunghezza 0, restituisce l'indice di partenza
     if (nav_state.path.length == 0 || cur_idx >= last_idx) return cur_idx;
 
-    // Controlla se la posizione attuale è in una cella non libera
-    if (nav_state.map[nav_state.path.cells[nav_state.path_idx]] != NAV_CELL_FREE) {
+    // Controlla se la posizione attuale è in una cella non libera o se non bisogna fare tagli al percorso (center_to_center)
+    if (nav_state.map[nav_state.path.cells[nav_state.path_idx]] != NAV_CELL_FREE || nav_state.center_to_center) {
         // se il robot si trova in una cella non libera, vai alla prossima cella
         // nel percorso, senza fare tagli
         return cur_idx + 1;
@@ -422,7 +480,7 @@ static uint16_t next_turning_point(void) {
 // funzione di inizializzazione del task
 void init_navigation(void) {
 
-    // inizializza il doppio buffer passando i due buffer da usare
+    // inizializza il primo doppio buffer passando i due buffer da usare
     // e la loro dimensione 
     scambio_init(
         &double_buffer,
@@ -431,13 +489,23 @@ void init_navigation(void) {
         sizeof(navigation_objective_t)
     );
 
+    // inizializza il secondo doppio buffer passando i due buffer da usare
+    // e la loro dimensione 
+    scambio_init(
+        &double_buffer_2,
+        &buffer3,
+        &buffer4, 
+        sizeof(navigation_closed_cells_t)
+    );
+
+
     nav_state.state_start = rt_adesso();
 
     nav_state.mission = NAV_STATE_EXPLORE;      // si parte in attesa (stato azzerato), poi l'attesa porta all'esplorazione
 
 }
 
-// funzione di lettura dei dati del task
+// funzione di lettura dei dati del task (la chiamerà il task di movimento)
 navigation_objective_t read_navigation(void) {
 
     // Crea e Inizializza a 0 la struttura dati navigation_data
@@ -449,6 +517,21 @@ navigation_objective_t read_navigation(void) {
     // ritorna navigation_data
     return navigation_data;
 }
+
+
+// funzione di lettura dei dati del task (la chiamerà il task di mappatura)
+navigation_closed_cells_t read_closed_cells(void) {
+
+    // Crea e Inizializza a 0 la struttura dati navigation_closed_cells
+    navigation_closed_cells_t navigation_closed_cells = {0};
+
+    // Copia il buffer pubblicato in navigation_closed_cells
+    scambio_leggi(&double_buffer_2, &navigation_closed_cells);
+
+    // ritorna navigation_closed_cells
+    return navigation_closed_cells;
+}
+
 
 
 // funzione di scrittura dei dati del task (l'obiettivo)
@@ -520,7 +603,16 @@ void job_navigation(void *arg) {
     (void)arg;
 
     // Se la mappa è cambiata, salva la versione aggiornata e il numero di versione aggiornato
-    if (read_nav_map_version_number() != nav_state.map_version) nav_state.map_version = read_nav_map(nav_state.map);
+    if (read_nav_map_version_number() != nav_state.map_version) {
+    
+        nav_state.map_version = read_nav_map(nav_state.map);
+
+        // rimetti nella copia le celle chiuse, che la mappatura potrebbe non aver ancora ricevuto
+        for (uint32_t i = 0; i < MIN(nav_state.closed_cells.num, CLOSED_CELLS_MAX); i++) {
+            nav_state.map[nav_state.closed_cells.cells[i]] = NAV_CELL_TOO_NARROW;
+        }
+
+    }
 
     // leggi la posizione corrente dal task di movimento
     movement_position_data_t cur_pos = read_movement();
@@ -567,7 +659,36 @@ void job_navigation(void *arg) {
             // è possibile che il task di navigazione parta prima e riceva una mappa
             // non aggiornata, lo segnamo anche nella mappa privata di questo task
             if (nav_state.map[robot_index] == NAV_CELL_UNKNOWN) nav_state.map[robot_index] = NAV_CELL_FREE;
+            
+            // se il robot si trova in una cella non libera
+            if (nav_state.map[robot_index] != NAV_CELL_FREE) {
 
+                // cerchiamo la cella libera più vicina
+                if (search_cell(robot_index, GOAL_FREE, 0) == 0) {
+
+                    // se la ricerca ritorna 0, non ci sono celle libere vicine
+                    // raggiungibili entro ESCAPE_MAX_CELLS, quindi stop e guasto
+
+                    send_objective(OBJ_STOP, 0, 0, 0, 0, 0);
+
+                    set_state(NAV_STATE_FAILURE);
+
+                } else {
+                    
+                    // passa allo stato segui percorso
+                    nav_state.path_idx = 0;
+
+                    set_state(NAV_STATE_FOLLOW_PATH);
+
+
+                }
+
+                break;
+
+            }
+            
+            
+            
             // cerca i confini della mappa
             uint32_t dist = search_cell(robot_index, GOAL_BORDER, 0);
 
@@ -626,6 +747,8 @@ void job_navigation(void *arg) {
                 if (next_turn_pt == nav_state.path_idx) {
                     // Azzera i tentativi di sblocco
                     nav_state.unlock_attempt = 0;
+                    // Azzera center_to_center, da adesso si può tagliare di nuovo il percorso
+                    nav_state.center_to_center = false;
                     // torna all'esplorazione
                     set_state(nav_state.mission);
                     break;
@@ -641,7 +764,49 @@ void job_navigation(void *arg) {
                     // imposta come prossimo obiettivo di andare al prossimo punto di svolta
                     send_objective(OBJ_MOVE, MAX_ROTATION_SPEED, 0, calc_speed(cur_alarm.max_v_forw), next_x, next_y);
                 }
-            } else break;   // se l'obiettivo non è stati raggiunto, rimani in questo stato
+            } else { // se l'obiettivo non è stato raggiunto, rimani in questo stato
+                if (is_stalled(cur_alarm, cur_pos)) {       // controlla se il robot è in stallo
+                    if (nav_state.center_to_center) {   // se non possiamo tagliare il percorso (quindi siamo già entrati in stallo prima)
+                        
+                        // chiudi la cella verso cui sta andando perchè è troppo stretta
+                        close_cell(nav_state.path.cells[nav_state.path_idx]);
+
+
+                    } 
+
+                    // calcola la cella di navigazione in cui si trova il robot
+                    uint16_t robot_index = coord_to_nav_index(cur_pos.x, cur_pos.y);
+
+                    // se la cella in cui si trova il robot non è libera
+                    if (nav_state.map[robot_index] != NAV_CELL_FREE) {
+
+                        // manda l'obiettivo di fermarsi al robot
+                        send_objective(OBJ_STOP, 0, 0, 0, 0, 0);
+
+                        // La mappa è cambiata sotto al robot
+                        // ricalcola il percorso
+                        set_state(nav_state.mission);
+
+                    } else {        // se il robot si trova in una cella libera
+                        
+                        // ricava le coordinate del centro della cella
+                        double x, y;
+                        nav_index_to_coord(robot_index, &x, &y);
+                    
+                        // manda al robot l'obiettivo di andare verso il centro della cella
+                        send_objective(OBJ_MOVE, MAX_ROTATION_SPEED, 0, MIN(cur_alarm.max_v_forw, CRUISING_SPEED), x, y);
+
+                        // passa allo stato di allineamento
+                        set_state(NAV_STATE_ALIGN);
+                    
+                    }
+
+                    
+
+                }
+
+                break;
+            }    
 
             
             break;
@@ -662,6 +827,37 @@ void job_navigation(void *arg) {
             /* code */
             break;
         }
+        case NAV_STATE_ALIGN: {
+            
+            // aggiorna la velocità come la più piccola tra velocità di crociera e cur_alarm.max_v_forw
+            nav_state.cur_obj.v = MIN(cur_alarm.max_v_forw, CRUISING_SPEED);
+
+            // pubblica la velocità aggiornata
+            write_objective(&nav_state.cur_obj);
+
+            // controlla se l'obiettivo corrente è stato raggiunto
+            if (cur_pos.num_obj == nav_state.cur_obj.num && cur_pos.obj_achieved) {
+
+                // dì al robot di non tagliare i percorsi, per evitare altri problemi di allineamento
+                nav_state.center_to_center = true;
+
+                // rimetti l'obiettivo originale prima dell'allineamento
+                set_state(nav_state.mission);
+
+            } else if (is_stalled(cur_alarm, cur_pos)) {  // se l'obiettivo non è stato ancora raggiunto e il robot è in stallo
+
+                // manda l'obiettivo di fermarsi al robot
+                send_objective(OBJ_STOP, 0, 0, 0, 0, 0);
+
+                // vai nello stato guasto
+                set_state(NAV_STATE_FAILURE);
+
+            }
+
+            
+            break;
+        }
+
         case NAV_STATE_FAILURE: {
             /* code */
             break;

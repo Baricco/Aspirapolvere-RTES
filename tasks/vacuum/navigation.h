@@ -5,6 +5,14 @@
 #include <stdint.h>
 #include "driver/driver.h"
 
+#define CLOSED_CELLS_MAX 16 
+
+typedef struct {
+    
+    uint32_t num;                                   // numero di celle chiuse
+    uint16_t cells[CLOSED_CELLS_MAX];               // lista circolare con gli indici delle celle chiuse
+} navigation_closed_cells_t;
+
 
 // in base al tipo di obiettivo, solo alcuni campi della struttura 
 // avranno un'effettiva utilità
@@ -36,9 +44,12 @@ extern rt_task_t navigation_task;
 
 void init_navigation(void);
 navigation_objective_t read_navigation(void);
+// funzione per leggere le celle che sono state chiuse dalla navigazione (lo leggerà il task mapping)
+navigation_closed_cells_t read_closed_cells(void);
 // funzione per pubblicare il prossimo obiettivo (lo leggerà task movement)
 void write_objective(const navigation_objective_t *next_objective);
 void job_navigation(void *arg);
+
 
 
 #endif

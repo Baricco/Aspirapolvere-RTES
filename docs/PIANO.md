@@ -174,10 +174,26 @@ I task dell'esame li scrive l'utente da solo, sopra un framework e un driver pre
         8), non un valore speciale nella griglia fine: quello passerebbe per l'ingrossamento di 20 cm e chiuderebbe
         anche le 4 celle vicine (5 invece di 1, contro il requisito di passare ovunque si possa). Come per le celle
         proibite, la mappatura lo salta quando ricalcola gli stati: dura **per tutta la sessione**, il lidar non lo
-        riapre. Per la navigazione non è libera (la ricerca non ci passa) ma resta attraversabile per l'uscita da
-        una zona bloccata, come le celle bloccate;
-      - la cella chiusa è quella verso cui il robot andava; il robot resta nella cella da cui è partito, libera, e
-        ricalcola il percorso da lì;
+        riapre. Per la navigazione non è libera e non si attraversa nemmeno uscendo da una zona bloccata (si
+        richiudeva più volte la stessa cella);
+      - la cella chiusa è quella verso cui il robot andava; dopo la chiusura il robot si riallinea al centro della
+        sua cella (o, se non è libera, ricalcola subito il percorso);
+    - **fatto** (2026-10-22, codice dell'utente): margine 1 cm, riallineamento (`NAV_STATE_ALIGN`: fermo per 1 s con
+      velocità massima in avanti < 2 cm/s e senza ruotare), cella chiusa (`NAV_CELL_TOO_NARROW` = 4, lista di 16
+      posti). Insieme:
+      - la sicurezza non usa più il cono di ±45° ma la **striscia** larga quanto il robot (strada percorribile dritto
+        prima di toccare un punto: `x − sqrt(R² − y²)`): un muro parallelo non frena più;
+      - `MOVE_GAIN` 1 → 3 (rallentava a 35 cm da ogni punto di svolta) e `ALIGNMENT_THRESHOLD` 30° → 10° (le curve
+        strette portavano gli ostacoli nella striscia di lato, troppo tardi per frenare);
+      - se ci si ferma in una cella che la mappa nel frattempo ha bloccato si **ricalcola il percorso** (versione
+        minima del "la mappa cambia sotto il percorso"); se l'esplorazione parte da una cella non libera va prima
+        alla **cella libera più vicina** (`GOAL_FREE`), poi cerca la frontiera: prima l'uscita dalle zone bloccate
+        faceva attraversare l'ostacolo al percorso (nella camera: fermo e riparto contro la cassettiera all'infinito);
+      - prove nel simulatore (17: soggiorno con 5 semi e 4 partenze, cucina, corridoio con porta da 60 cm, camera):
+        16 esplorazioni complete, 0 deadline mancate. Il guasto rimasto è un urto di lato contro una gamba sottile
+        del tavolo: serve lo **sblocco** (`NAV_STATE_UNLOCK`). La mappatura fatica con gli ostacoli sottili (≤ 5 cm:
+        i raggi diretti agli altri punti dello stesso oggetto tolgono punteggio); deciso di non cambiare
+        `LIDAR_PASS_SCORE` perché a casa gli ostacoli sono più grossi: da verificare sul robot;
     - errori che i conti non vedono: rumore del lidar e, **per ora**, mappa spostata dall'odometria. Con
       l'allineamento delle scansioni (già nel piano, vedi la mappatura in cima) lo spostamento scende alla precisione
       dell'allineamento; la posizione corretta dovrà arrivare anche al moto, che oggi guida con l'odometria;

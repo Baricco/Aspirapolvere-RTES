@@ -9,6 +9,7 @@
 #include "mapping.h"
 #include "lidar.h"
 #include "movement.h"
+#include "navigation.h"
 
 
 #define FINE_GRID_MAX_SCORE         100         // massimo punteggio di una cella della griglia fine
@@ -91,6 +92,9 @@ typedef struct {
 
     // numero dell'ultimo evento dei sensori applicato
     uint32_t last_event;
+
+    // numero dell'ultima cella chiusa aggiornata dal task di navigazione
+    uint32_t last_closed_num;
 
 } mapping_state_t;
 
@@ -585,10 +589,24 @@ void job_mapping(void *arg) {
         &nav_y_max
     );
 
+
+    // leggi se ci sono state modifiche fatte dal task di navigazione
+    navigation_closed_cells_t closed_cells = read_closed_cells();
+
     // Prendi il mutex
     pthread_mutex_lock(&navigation_map_data.mutex);
 
     bool hasChanged = false;
+
+    // scorri le modifiche proposte dal task di navigazione e applicale alla mappa
+    for (uint32_t i = map_state.last_closed_num; i < closed_cells.num; i++) {
+        navigation_map_data.navigation_grid[closed_cells.cells[i % CLOSED_CELLS_MAX]] = NAV_CELL_TOO_NARROW;
+        hasChanged = true;
+    }
+
+    // metti l'indice dell'ultima cella letta all'ultimo indice letto dopo il for, in questo
+    // modo last_closed_num si comporta come un buffer circolare
+    map_state.last_closed_num = closed_cells.num;
 
     // Scorri le celle all'interno dell'area aggiornata
     for (int cur_nav_y = nav_y_min; cur_nav_y <= nav_y_max; cur_nav_y++) {
@@ -598,7 +616,7 @@ void job_mapping(void *arg) {
             int cur_nav_index = cur_nav_y << 8 | cur_nav_x;
 
             // ignora le celle appartenenti a zone proibite
-            if (navigation_map_data.navigation_grid[cur_nav_index] == NAV_CELL_FORBIDDEN) continue;
+            if (navigation_map_data.navigation_grid[cur_nav_index] == NAV_CELL_FORBIDDEN || navigation_map_data.navigation_grid[cur_nav_index] == NAV_CELL_TOO_NARROW) continue;
 
             // prossimo stato da assegnare alla cella corrente
             mapping_nav_cell_state next_state;

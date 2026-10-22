@@ -1,0 +1,16 @@
+# camera da letto di 4 x 3,5 m (formato in sim/mondo.h): letto alto (il robot passa sotto, fra le 4 gambe),
+# armadio a 52 cm dal letto, comodino, cassettiera
+stanza nome=camera larghezza=4 profondita=3.5
+robot x=2 y=0.6 angolo=90
+muro da=0,0.05 a=4,0.05 spessore=0.1
+muro da=0,3.45 a=4,3.45 spessore=0.1
+muro da=0.05,0.1 a=0.05,3.4 spessore=0.1
+muro da=3.95,0.1 a=3.95,3.4 spessore=0.1
+rettangolo nome=rete x=2 y=2.45 larghezza=1.6 profondita=2 angolo=0 quota_da=0.25 quota_a=0.5 gruppo=letto
+cerchio nome=gamba x=1.25 y=1.5 raggio=0.03 quota_da=0 quota_a=0.25 gruppo=letto
+cerchio nome=gamba x=2.75 y=1.5 raggio=0.03 quota_da=0 quota_a=0.25 gruppo=letto
+cerchio nome=gamba x=1.25 y=3.38 raggio=0.03 quota_da=0 quota_a=0.25 gruppo=letto
+cerchio nome=gamba x=2.75 y=3.38 raggio=0.03 quota_da=0 quota_a=0.25 gruppo=letto
+rettangolo nome=armadio x=0.4 y=2.6 larghezza=0.6 profondita=1.6 angolo=0 quota_da=0 quota_a=2.2
+rettangolo nome=comodino x=3.25 y=3.2 larghezza=0.4 profondita=0.4 angolo=0 quota_da=0 quota_a=0.5
+rettangolo nome=cassettiera x=3.6 y=1 larghezza=0.5 profondita=1 angolo=0 quota_da=0 quota_a=0.9

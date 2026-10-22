@@ -187,10 +187,15 @@ void job_safety(void *arg) {
     if (scan_data.valid && scan_data.num != 0 && (cur_frame.t_ns - scan_data.scan_end_t) < LIDAR_SCAN_MAX_AGE) {
 
         // calcola la distanza minima davanti al robot (prendi i tre settori anteriori), convertiti in metri
-        obstacle_front_distance = (MIN(MIN(scan_data.sector_distance[11], scan_data.sector_distance[1]), scan_data.sector_distance[0]) / 1000.0);
+        obstacle_front_distance = scan_data.corridor_front_distance / 1000.0;
+        
+        // prima c'era questo in obstacle_front_distance:
+        // (MIN(MIN(scan_data.sector_distance[11], scan_data.sector_distance[1]), scan_data.sector_distance[0]) / 1000.0);
 
         // calcola la distanza minima dietro al robot (prendi i tre settori posteriori), convertiti in metri
-        obstacle_back_distance = (MIN(MIN(scan_data.sector_distance[5], scan_data.sector_distance[6]), scan_data.sector_distance[7])/ 1000.0);
+        obstacle_back_distance = scan_data.corridor_back_distance / 1000.0;
+        // prim c'era questo in obstacle_back_distance
+        // (MIN(MIN(scan_data.sector_distance[5], scan_data.sector_distance[6]), scan_data.sector_distance[7])/ 1000.0);
 
     }
 

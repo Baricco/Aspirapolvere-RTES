@@ -28,7 +28,8 @@ typedef enum {
     NAV_CELL_UNKNOWN,                    // Cella Sconosciuta: la cella non è ancora stata esplorata
     NAV_CELL_FREE,                       // Cella Libera: la cella è vuota e percorribile
     NAV_CELL_BLOCKED,                    // Cella Bloccata: la cella è coperta da un ostacolo
-    NAV_CELL_FORBIDDEN                   // Cella Proibita: la cella è in una Zona Proibita, non è percorribile
+    NAV_CELL_FORBIDDEN,                   // Cella Proibita: la cella è in una Zona Proibita, non è percorribile
+    NAV_CELL_TOO_NARROW,                 // Cella troppo Stretta: il passaggio è troppo stretto, nonostante questa cella sia libera, il robot non può comunque passare
 } mapping_nav_cell_state;
 
 // Funzione helper per calcolare l'indice della cella nella navigation map partendo dalle coordinate espresse in metri rispetto all'origine

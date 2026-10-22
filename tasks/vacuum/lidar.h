@@ -23,6 +23,11 @@ typedef struct {
     // si prende la circonferenza tracciata dal lidar e la si scompone in 12 distanze
     uint16_t sector_distance[SECTOR_NUMBER];    // distanze in mm divisa per settori
     
+    // la strada che il robot può fare dritto in avanti e all'indietro 
+    // prima di toccare un ostacolo, espressa in mm
+    uint16_t corridor_front_distance;
+    uint16_t corridor_back_distance;
+
 
 
 } lidar_scan_data_t;

@@ -1,0 +1,14 @@
+# due stanze unite da un corridoio di 1 m (formato in sim/mondo.h): porta larga 80 cm a sinistra,
+# porta stretta da 60 cm a destra (prova i passaggi stretti), una cassettiera e una poltrona
+stanza nome=corridoio larghezza=6 profondita=4
+robot x=1.2 y=2 angolo=0
+muro da=0,0.05 a=6,0.05 spessore=0.1
+muro da=0,3.95 a=6,3.95 spessore=0.1
+muro da=0.05,0.1 a=0.05,3.9 spessore=0.1
+muro da=5.95,0.1 a=5.95,3.9 spessore=0.1
+muro da=2.5,0.1 a=2.5,1.6 spessore=0.1
+muro da=2.5,2.4 a=2.5,3.9 spessore=0.1
+muro da=3.5,0.1 a=3.5,3 spessore=0.1
+muro da=3.5,3.6 a=3.5,3.9 spessore=0.1
+rettangolo nome=cassettiera x=0.4 y=3.6 larghezza=0.6 profondita=0.5 angolo=0 quota_da=0 quota_a=0.8
+rettangolo nome=poltrona x=5.2 y=0.8 larghezza=0.8 profondita=0.8 angolo=30 quota_da=0 quota_a=0.9

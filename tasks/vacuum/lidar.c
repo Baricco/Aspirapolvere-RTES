@@ -40,6 +40,10 @@ static void init_lidar_scan_data(lidar_scan_data_t *scan_data) {
     // Inizializza i settori a NO_READ
     for (int i = 0; i < SECTOR_NUMBER; i++) scan_data->sector_distance[i] = NO_READ;
 
+    // inizializza le distanze davanti e dietro a NO_READ
+    scan_data->corridor_front_distance = NO_READ;
+    scan_data->corridor_back_distance = NO_READ;
+    
 }
 
 // funzione di lettura dei dati del task
@@ -112,8 +116,29 @@ void job_lidar(void *arg) {
         // rimuovi le distanze negative per evitare problemi di underflow
         if (distance < 0) distance = 0;
 
+        // da qui in poi le coordinate servono in mm, quindi le moltiplico per 1000
+        x *= 1000.0;
+        y *= 1000.0;
+
         // se il punto misurato è il pù vicino in quel settore, aggiorna cur_scan_data
         if (cur_scan_data.sector_distance[sector_number] > distance) cur_scan_data.sector_distance[sector_number] = distance;
+    
+        // se la distanza dal punto misurato è 0 o il punto non si trova nella direzione di 
+        // movimento del robot, esci
+        if (distance == 0 || fabs(y) >= ROBOT_RADIUS) continue;
+
+        // calcola la distanza del punto rispetto al bordo del robot
+        double dist = fabs(x) - sqrt(ROBOT_RADIUS*ROBOT_RADIUS - y*y);
+
+        // se la distanza è < 0 (errore dovuto al rumore del lidar), normalizza a 0
+        if (dist < 0) dist = 0;
+
+        // aggiorna la distanza degli ostacoli davanti o dietro al robot (in base alla direzione)
+        if (x > 0) {
+            if (cur_scan_data.corridor_front_distance > dist) cur_scan_data.corridor_front_distance = dist;
+        } else if (cur_scan_data.corridor_back_distance > dist) cur_scan_data.corridor_back_distance = dist; 
+
+        
     }
 
     // controlla che il numero di punti validi sia >25% dei punti totali (RELIABILITY FACTOR)

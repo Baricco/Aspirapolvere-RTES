@@ -1,0 +1,35 @@
+# cucina di 4 x 3,5 m (formato in sim/mondo.h): piano di lavoro lungo il muro, frigo, tavolo con 4 sedie
+# (tante gambe sottili, che il lidar vede appena)
+stanza nome=cucina larghezza=4 profondita=3.5
+robot x=0.6 y=0.6 angolo=0
+muro da=0,0.05 a=4,0.05 spessore=0.1
+muro da=0,3.45 a=4,3.45 spessore=0.1
+muro da=0.05,0.1 a=0.05,3.4 spessore=0.1
+muro da=3.95,0.1 a=3.95,3.4 spessore=0.1
+rettangolo nome=piano_lavoro x=2.2 y=3.1 larghezza=3.4 profondita=0.6 angolo=0 quota_da=0 quota_a=0.9
+rettangolo nome=frigo x=3.55 y=0.5 larghezza=0.7 profondita=0.7 angolo=0 quota_da=0 quota_a=1.8
+rettangolo nome=piano x=2 y=1.6 larghezza=1.2 profondita=0.8 angolo=0 quota_da=0.72 quota_a=0.75 gruppo=tavolo
+cerchio nome=gamba x=1.45 y=1.25 raggio=0.02 quota_da=0 quota_a=0.72 gruppo=tavolo
+cerchio nome=gamba x=2.55 y=1.25 raggio=0.02 quota_da=0 quota_a=0.72 gruppo=tavolo
+cerchio nome=gamba x=1.45 y=1.95 raggio=0.02 quota_da=0 quota_a=0.72 gruppo=tavolo
+cerchio nome=gamba x=2.55 y=1.95 raggio=0.02 quota_da=0 quota_a=0.72 gruppo=tavolo
+rettangolo nome=seduta x=1 y=1.6 larghezza=0.4 profondita=0.4 angolo=0 quota_da=0.45 quota_a=0.48 gruppo=sedia1
+cerchio nome=gamba x=0.82 y=1.42 raggio=0.015 quota_da=0 quota_a=0.45 gruppo=sedia1
+cerchio nome=gamba x=1.18 y=1.42 raggio=0.015 quota_da=0 quota_a=0.45 gruppo=sedia1
+cerchio nome=gamba x=0.82 y=1.78 raggio=0.015 quota_da=0 quota_a=0.45 gruppo=sedia1
+cerchio nome=gamba x=1.18 y=1.78 raggio=0.015 quota_da=0 quota_a=0.45 gruppo=sedia1
+rettangolo nome=seduta x=3 y=1.6 larghezza=0.4 profondita=0.4 angolo=0 quota_da=0.45 quota_a=0.48 gruppo=sedia2
+cerchio nome=gamba x=2.82 y=1.42 raggio=0.015 quota_da=0 quota_a=0.45 gruppo=sedia2
+cerchio nome=gamba x=3.18 y=1.42 raggio=0.015 quota_da=0 quota_a=0.45 gruppo=sedia2
+cerchio nome=gamba x=2.82 y=1.78 raggio=0.015 quota_da=0 quota_a=0.45 gruppo=sedia2
+cerchio nome=gamba x=3.18 y=1.78 raggio=0.015 quota_da=0 quota_a=0.45 gruppo=sedia2
+rettangolo nome=seduta x=2 y=0.75 larghezza=0.4 profondita=0.4 angolo=0 quota_da=0.45 quota_a=0.48 gruppo=sedia3
+cerchio nome=gamba x=1.82 y=0.57 raggio=0.015 quota_da=0 quota_a=0.45 gruppo=sedia3
+cerchio nome=gamba x=2.18 y=0.57 raggio=0.015 quota_da=0 quota_a=0.45 gruppo=sedia3
+cerchio nome=gamba x=1.82 y=0.93 raggio=0.015 quota_da=0 quota_a=0.45 gruppo=sedia3
+cerchio nome=gamba x=2.18 y=0.93 raggio=0.015 quota_da=0 quota_a=0.45 gruppo=sedia3
+rettangolo nome=seduta x=2 y=2.4 larghezza=0.4 profondita=0.4 angolo=0 quota_da=0.45 quota_a=0.48 gruppo=sedia4
+cerchio nome=gamba x=1.82 y=2.22 raggio=0.015 quota_da=0 quota_a=0.45 gruppo=sedia4
+cerchio nome=gamba x=2.18 y=2.22 raggio=0.015 quota_da=0 quota_a=0.45 gruppo=sedia4
+cerchio nome=gamba x=1.82 y=2.58 raggio=0.015 quota_da=0 quota_a=0.45 gruppo=sedia4
+cerchio nome=gamba x=2.18 y=2.58 raggio=0.015 quota_da=0 quota_a=0.45 gruppo=sedia4

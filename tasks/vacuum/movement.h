@@ -10,14 +10,14 @@
 #define MOVE_TOLERANCE_M        0.02    // OBJ_MOVE: 2 cm;
 #define STOP_V_TOLERANCE        0.005   // OBJ_STOP: m/s misurati
 #define STOP_OMEGA_TOLERANCE    0.02    // OBJ_STOP: rad/s misurati
-#define ALIGNMENT_THRESHOLD     0.52    // soglia di allineamneto in OBJ_MOVE: 0,52 rad, circa 30°
+#define ALIGNMENT_THRESHOLD     0.17    // soglia di allineamneto in OBJ_MOVE: 0,17 rad, circa 10°
 
 // Taratura dell'IMU: (l'IMU conta circa il 3% in meno), questa costante compensa l'errore
 #define YAW_SCALE               1.0285
 
 // Guadagno da usare quando si corregge l'errore
 #define ROTATION_GAIN           2.5
-#define MOVE_GAIN               1.0
+#define MOVE_GAIN               3.0
 
 
 // struttura dati che verrà mandata al task di navigazione

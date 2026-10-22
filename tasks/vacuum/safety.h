@@ -31,7 +31,7 @@
 #define THRESHOLD_OVRLD_FRAME_COUNTER 25    // numero di frame consecutivi in cui il robot deve risultare in sovraccarico, prima che si attivi l'allarme reale. corrispondono a circa 0,50s
 
 #define THRESHOLD_DISTANCE  0.25              // soglia di distanza per considerare vicino un ostacolo/zona proibita, espresso in metri
-#define STOP_DISTANCE       0.02              // distanza percorsa dal robot durante la frenata, espressa in metri
+#define STOP_DISTANCE       0.01              // distanza dal bordo del robot alla quale la sicurezza porta la velocità in avanti a zero, espressa in metri
 #define MOVEMENT_SAFE_GAIN  1.0               // guadagno usato nella formula per calcolare la velocità massima del robot in base agli ostacoli/zone proibite rilevate, espresso in 1/secondi
 #define LIDAR_SCAN_MAX_AGE  RT_MS(500)        // età massima che può avere una scan del lidar prima di essere considerata invalida, espressa in nanosecondi
 
