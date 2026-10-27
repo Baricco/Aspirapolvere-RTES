@@ -217,7 +217,10 @@ static void close_cell(uint16_t cell) {
     nav_state.map[cell] = NAV_CELL_TOO_NARROW;
 }
 
-
+// funzione helper per calcolare il tempo passato da un certo istante ad adesso
+static inline int64_t elapsed_time(const int64_t start) {
+    return rt_adesso() - start;
+}
 
 // Funzione Helper che prende allarmi e posizione attuale ritorna true
 // se il robot è in stallo da almeno STALL_TIME
@@ -233,7 +236,7 @@ static bool is_stalled(safety_alarm_t cur_alarm, movement_position_data_t cur_po
     }
 
     // ritorna se è passato più di STALL_TIME dall'ultimo stallo
-    return (rt_adesso() - nav_state.stall_start >= STALL_TIME);
+    return (elapsed_time(nav_state.stall_start) >= STALL_TIME);
 
 
 }
@@ -659,6 +662,22 @@ void send_objective(
 
 }
 
+// funzione helper per fermare il robot e andare in stato di guasto
+static inline void stop_and_fail(void) {
+
+    send_objective(OBJ_STOP, 0, 0, 0, 0, 0);
+
+    set_state(NAV_STATE_FAILURE);
+
+} 
+
+// funzione helper per verificare se l'obiettivo corrente è stato raggiunto
+static inline bool is_objective_achieved(const movement_position_data_t cur_pos) {
+    return cur_pos.obj_achieved && cur_pos.num_obj == nav_state.cur_obj.num;
+}
+
+
+
 // funzione helper che aggiunge la cella vicina sconosciuta al percorso da fare
 static bool append_unknown_neighbor(void) {
 
@@ -772,9 +791,7 @@ static void start_unlock_attempt(safety_alarm_t cur_alarm, movement_position_dat
     // se i tentativi fatti raggiungono il numero massimo, vai in guasto ed esci
     if (nav_state.unlock_attempt >= UNLOCK_MAX_ATTEMPTS) {
 
-        send_objective(OBJ_STOP, 0, 0, 0, 0, 0);
-
-        set_state(NAV_STATE_FAILURE);
+        stop_and_fail();
 
         return;
     }
@@ -874,7 +891,7 @@ void job_navigation(void *arg) {
             }
 
             // se il robot è stato fermo per più di WAIT_TIME
-            if (rt_adesso() - nav_state.state_start >= WAIT_TIME) {
+            if (elapsed_time(nav_state.state_start)>= WAIT_TIME) {
                 // passa al prossimo stato
                 set_state(nav_state.mission);
             }
@@ -901,9 +918,7 @@ void job_navigation(void *arg) {
                     // se la ricerca ritorna 0, non ci sono celle libere vicine
                     // raggiungibili entro ESCAPE_MAX_CELLS, quindi stop e guasto
 
-                    send_objective(OBJ_STOP, 0, 0, 0, 0, 0);
-
-                    set_state(NAV_STATE_FAILURE);
+                    stop_and_fail();
 
                 } else {
                     
@@ -937,9 +952,7 @@ void job_navigation(void *arg) {
                     // Se entriamo qui dentro significa che una cella di frontiera non 
                     // ha una cella vicina sconosciuta (impossibile)
 
-                    send_objective(OBJ_STOP, 0, 0, 0, 0, 0);
-
-                    set_state(NAV_STATE_FAILURE);
+                    stop_and_fail();
 
                     break;
                 }
@@ -970,7 +983,7 @@ void job_navigation(void *arg) {
             write_objective(&nav_state.cur_obj);
 
             // Controlla se l'obiettivo è stato raggiunto
-            if (cur_pos.num_obj == nav_state.cur_obj.num && cur_pos.obj_achieved) {
+            if (is_objective_achieved(cur_pos)) {
 
                 // Salva il prossimo punto di svolta
                 int next_turn_pt = next_turning_point();
@@ -1045,10 +1058,10 @@ void job_navigation(void *arg) {
                     write_objective(&nav_state.cur_obj);
                     
                     // Controlla se l'obiettivo è stato raggiunto
-                    if (cur_pos.num_obj == nav_state.cur_obj.num && cur_pos.obj_achieved) {
+                    if (is_objective_achieved(cur_pos)) {
                         // se sì, passa al prossimo punto
                         unlock_next_back_point(cur_alarm, cur_pos);
-                    } else if (rt_adesso() - nav_state.phase_start >= UNLOCK_PHASE_TIMEOUT) {   // altrimenti se il tentativo è durato più di UNLOCK_PHASE_TIMEOUT
+                    } else if (elapsed_time(nav_state.phase_start) >= UNLOCK_PHASE_TIMEOUT) {   // altrimenti se il tentativo è durato più di UNLOCK_PHASE_TIMEOUT
                         // prova a far ruotare il robot
                         unlock_start_rotation(cur_alarm, cur_pos);
                     }
@@ -1058,10 +1071,10 @@ void job_navigation(void *arg) {
                 // fase di rotazione 
                 case UNLOCK_PHASE_ROTATE:
                     // Controlla se l'obiettivo è stato raggiunto
-                    if (cur_pos.num_obj == nav_state.cur_obj.num && cur_pos.obj_achieved) {
+                    if (is_objective_achieved(cur_pos)) {
                         // se sì, riparti
                        resume_after_stop(cur_alarm, cur_pos);
-                    } else if (rt_adesso() - nav_state.phase_start >= UNLOCK_PHASE_TIMEOUT) {   // altrimenti se il tentativo è durato più di UNLOCK_PHASE_TIMEOUT
+                    } else if (elapsed_time(nav_state.phase_start) >= UNLOCK_PHASE_TIMEOUT) {   // altrimenti se il tentativo è durato più di UNLOCK_PHASE_TIMEOUT
                         // il tentativo è fallito, riprova 
                         start_unlock_attempt(cur_alarm, cur_pos);
                     }
@@ -1071,11 +1084,7 @@ void job_navigation(void *arg) {
                 // se entriamo qui andiamo in guasto
                 default:
                     
-                    // manda l'obiettivo di fermarsi al robot
-                    send_objective(OBJ_STOP, 0, 0, 0, 0, 0);
-
-                    // vai nello stato guasto
-                    set_state(NAV_STATE_FAILURE);
+                    stop_and_fail();
                     
                     break;
 
@@ -1092,7 +1101,7 @@ void job_navigation(void *arg) {
             write_objective(&nav_state.cur_obj);
 
             // controlla se l'obiettivo corrente è stato raggiunto
-            if (cur_pos.num_obj == nav_state.cur_obj.num && cur_pos.obj_achieved) {
+            if (is_objective_achieved(cur_pos)) {
 
                 // dì al robot di non tagliare i percorsi, per evitare altri problemi di allineamento
                 nav_state.center_to_center = true;
@@ -1120,11 +1129,7 @@ void job_navigation(void *arg) {
         }
         default:   {         // se entra qui dentro siamo in uno stato inconsistente
             
-            // ferma il robot
-            send_objective(OBJ_STOP, 0, 0, 0, 0, 0);
-
-            // metti lo stato a guasto
-            set_state(NAV_STATE_FAILURE);
+            stop_and_fail();
 
             break;
         }

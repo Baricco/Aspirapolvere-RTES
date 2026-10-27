@@ -86,6 +86,10 @@ I task dell'esame li scrive l'utente da solo, sopra un framework e un driver pre
   - **segnale "mappa cambiata"**: numero di versione atomico (`stdatomic.h`) nella mappa condivisa; la mappatura lo
     incrementa (dentro il mutex) quando una cella di navigazione cambia stato, la navigazione lo legge a ogni job
     senza mutex e copia la griglia solo se è cambiato, salvando la versione letta dentro il mutex;
+  - **spazzola durante lo sblocco** (deciso 2026-10-27, per la pulizia): ferma la spazzola centrale (e
+    l'aspirazione) per tutto lo sblocco, così un cavo sotto il robot non si avvolge mentre indietreggia; se il motore
+    della spazzola va in sovraccarico, prima di tutto il suo sblocco (`drv_spazzole` con la centrale < 0: gira al
+    contrario per ~4 s e la ferma il GD32);
   - **trasferimenti e ritorno alla base** cercando il percorso sulle celle già pulite (terreno già percorso), con
     ripiego su tutte le celle libere: A* quando la meta è nota (la base), ricerca in ampiezza quando la meta è "la
     cella non pulita più vicina".
@@ -200,11 +204,17 @@ I task dell'esame li scrive l'utente da solo, sopra un framework e un driver pre
       (indietro di quanto, rotazione sul posto di quanto e da che parte, velocità), diversa a ogni riga e ripetibile
       nelle prove. Si indietreggia **sulla scia** (8 posizioni a 5 cm, dove il robot è già passato: la mappa a 20 cm
       con l'ingrossamento non dice niente da così vicino), con `OBJ_MOVE` a `v` negativa (il moto punta il retro).
-      Prima dei tentativi normali, la **spinta** per cavi e bordi dei tappeti: incastro andando avanti, striscia del
-      lidar libera per 25 cm, bumper libero, anti-caduta sul pavimento → avanti a 0,3 m/s per al massimo 10 cm /
-      0,6 s, con tutti i limiti di sicurezza attivi. L'ostacolo che la mappatura segna con l'incastro resta anche se
-      la spinta riesce; per toglierlo in futuro si può allargare la lista delle celle chiuse a celle con segno
-      (aggiungi / togli): servono `int32_t`, perché gli indici della griglia arrivano a 65.535;
+      **Spinta** per cavi e bordi dei tappeti (avanti a 0,3 m/s per 10 cm al posto dei tentativi): progettata e poi
+      **scartata** (2026-10-27). Un cavo tirato si avvolge nella spazzola o nelle ruote o trascina quello a cui è
+      attaccato; per i sensori un cavo, il bordo di un tappeto e la torretta incastrata sotto un mobile basso (la
+      credenza: il lidar a 8,7 cm non la vede, la torretta non ha interruttori) sono la stessa cosa, e l'unico indizio,
+      l'inclinazione dall'IMU, non è misurato; il robot supera già da solo soglie fino a ~2 cm; nel simulatore non si
+      potrebbe provare davvero. Senza spinta il robot indietreggia e la mappatura segna il punto, così i percorsi dopo
+      lo evitano (prezzo: una zona chiusa da un tappeto alto non viene pulita). Da riprendere solo se sul robot vero si
+      incastra spesso sui tappeti, misurando prima l'inclinazione su cavo, tappeto e sotto un mobile. Se un giorno
+      servisse togliere dalla mappa un ostacolo segnato per sbaglio: lista delle celle chiuse con segno (aggiungi /
+      togli), con `int32_t` perché gli indici della griglia arrivano a 65.535, e il valore speciale va tolto dalla
+      griglia fine;
       **fatto** (2026-10-27, codice dell'utente) senza la spinta: scia, tabella, `OBJ_MOVE` a `v` negativa (`signbit`,
       così anche −0 vuol dire indietro), fasi indietro / rotazione con timeout di 5 s (una rotazione di 180° ne dura
       ~3,5). Dalle prove: l'incastro della sicurezza non scattava mai negli urti, perché confronta la velocità che il
