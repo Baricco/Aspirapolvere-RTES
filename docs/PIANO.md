@@ -194,6 +194,26 @@ I task dell'esame li scrive l'utente da solo, sopra un framework e un driver pre
         del tavolo: serve lo **sblocco** (`NAV_STATE_UNLOCK`). La mappatura fatica con gli ostacoli sottili (≤ 5 cm:
         i raggi diretti agli altri punti dello stesso oggetto tolgono punteggio); deciso di non cambiare
         `LIDAR_PASS_SCORE` perché a casa gli ostacoli sono più grossi: da verificare sul robot;
+    - **sblocco** (deciso 2026-10-23, `NAV_STATE_UNLOCK`): si entra con incastro, slittamento o motore sotto sforzo,
+      controllati una volta prima dello `switch` (non in attesa, guasto, riposo e sblocco: lo slittamento scatta anche
+      da fermo se qualcuno gira il robot). Ogni tentativo (10, `UNLOCK_MAX_ATTEMPTS`) viene da una **tabella fissa**
+      (indietro di quanto, rotazione sul posto di quanto e da che parte, velocità), diversa a ogni riga e ripetibile
+      nelle prove. Si indietreggia **sulla scia** (8 posizioni a 5 cm, dove il robot è già passato: la mappa a 20 cm
+      con l'ingrossamento non dice niente da così vicino), con `OBJ_MOVE` a `v` negativa (il moto punta il retro).
+      Prima dei tentativi normali, la **spinta** per cavi e bordi dei tappeti: incastro andando avanti, striscia del
+      lidar libera per 25 cm, bumper libero, anti-caduta sul pavimento → avanti a 0,3 m/s per al massimo 10 cm /
+      0,6 s, con tutti i limiti di sicurezza attivi. L'ostacolo che la mappatura segna con l'incastro resta anche se
+      la spinta riesce; per toglierlo in futuro si può allargare la lista delle celle chiuse a celle con segno
+      (aggiungi / togli): servono `int32_t`, perché gli indici della griglia arrivano a 65.535;
+      **fatto** (2026-10-27, codice dell'utente) senza la spinta: scia, tabella, `OBJ_MOVE` a `v` negativa (`signbit`,
+      così anche −0 vuol dire indietro), fasi indietro / rotazione con timeout di 5 s (una rotazione di 180° ne dura
+      ~3,5). Dalle prove: l'incastro della sicurezza non scattava mai negli urti, perché confronta la velocità che il
+      driver manda **dopo** i suoi limiti (con il bumper premuto il driver la azzera); aggiunto l'allarme di
+      **contatto** (`SAFETY_ERROR_CONTACT`: `limiti` del driver con `SIC_LIM_BUMPER` o `SIC_LIM_CLIFF`), che porta allo
+      sblocco. Anche lo stallo nel riallineamento porta allo sblocco invece che al guasto (la garanzia del centro della
+      cella libera vale solo per gli ostacoli che la mappa conosce). Serie di prove (`tools/prove-nav/serie.sh`):
+      17 esplorazioni complete su 17, 0 deadline mancate; il robot che urtava 60 volte la fine del muro accanto alla
+      porta da 60 cm ora fa un solo sblocco;
     - errori che i conti non vedono: rumore del lidar e, **per ora**, mappa spostata dall'odometria. Con
       l'allineamento delle scansioni (già nel piano, vedi la mappatura in cima) lo spostamento scende alla precisione
       dell'allineamento; la posizione corretta dovrà arrivare anche al moto, che oggi guida con l'odometria;

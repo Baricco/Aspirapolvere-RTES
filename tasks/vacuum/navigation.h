@@ -19,7 +19,7 @@ typedef struct {
 typedef enum {
     OBJ_STOP,           // nessun campo, questo dev'essere il primo valore dell'enum, così se la struttura è azzerata l'obiettivo è OBJ_STOP
     OBJ_ROTATE,         // solo i campi theta (fino a che angolo ruotare) e omega (velocità massima di rotazione espressa in rad/s)
-    OBJ_MOVE,           // omega (velocità massima di rotazione, la rotazione la calcola da x e y); x e y (coordinate dell'obiettivo) e v (velocità massima del movimento espressa in m/s)
+    OBJ_MOVE,           // omega (velocità massima di rotazione, la rotazione la calcola da x e y); x e y (coordinate dell'obiettivo) e v (velocità massima del movimento, se negativa significa andare all'indietro, espressa in m/s)
     OBJ_CONST_SPEED,    // v (velocità da mantenere) e omega (velocità di rotazione da mantenere)
 } objective_type_t;
 

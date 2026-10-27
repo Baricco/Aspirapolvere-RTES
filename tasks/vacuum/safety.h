@@ -17,6 +17,7 @@
 #define SAFETY_ERROR_MOT_OVRLD  (1u << 2)       // XXXXX1XX --> Motore Sotto Sforzo
 #define SAFETY_ERROR_OBSTACLE   (1u << 3)       // XXXX1XXX --> Ostacolo Vicino
 #define SAFETY_ERROR_FORB_ZONE  (1u << 4)       // XXX1XXXX --> Zona Proibita Vicina
+#define SAFETY_ERROR_CONTACT    (1u << 5)       // XX1XXXXX --> Contatto: Bumper premuto o sensori anti-caduta
 
 
 #define MAX_ABSOLUTE_SPEED      0.5         // velocità massima che il robot può raggiungere espressa in m/s

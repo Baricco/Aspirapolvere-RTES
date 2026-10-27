@@ -1,6 +1,8 @@
 #include "driver/driver.h"
 #include "driver/scambio.h"
+#include "gd32/sicurezza.h"
 #include <math.h>
+
 
 #include "safety.h"
 #include "movement.h"
@@ -91,8 +93,8 @@ void job_safety(void *arg) {
     drv_stato(&cur_state);
 
     // Ricava i dati sulle velocità di movimento e rotazione
-    double expected_v = cur_state.v;     // Velocità impostata dal task movement
-    double expected_w = cur_state.w;    // Velocità angolare impostata dal task movement
+    double expected_v = cur_state.v;     // Velocità mandata dal driver
+    double expected_w = cur_state.w;    // Velocità angolare mandata dal driver
 
     // Velocità reali delle ruote misurate dal driver
     double encoder_v = cur_frame.s.vel_sx / GD32_SCALA_V;
@@ -283,6 +285,9 @@ void job_safety(void *arg) {
     
     // inizializza a 0 la struttura allarme corrente
     safety_alarm_t cur_alarm = {0};
+
+    // se il driver blocca il moto in avanti per un bumper premuto o un anti-caduta nel vuoto, segnala il contatto
+    if (cur_state.limiti & (SIC_LIM_BUMPER | SIC_LIM_CLIFF)) cur_error_mask |= SAFETY_ERROR_CONTACT;
 
     // riempi l'allarme corrente con i dati appena ricavati
     cur_alarm.frame_num = cur_frame.numero;

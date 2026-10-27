@@ -9,18 +9,54 @@
 #include "movement.h"
 #include "safety.h"
 
+#define DEG_TO_RAD(a) ((a) * M_PI / 180)
+
 #define CELL_NOT_VISITED 0xFFFF
 #define ESCAPE_MAX_CELLS 3
 #define WAIT_TIME RT_MS(3000)
 #define CRUISING_SPEED 0.35                  // velocità di crociera del robot, m/s
 #define MAX_ROTATION_SPEED  1.2             // massima velocità di rotazione, per stare sotto al soglia oltre il quale la mappatura scarta i giri (1,5) con un certo margine, rad/s
-#define UNLOCK_MAX_ATTEMPTS 10              // tentativi di sblocco prima di andare in guasto (ne mettiamo tanti, per essere sicuri che il robot tenti di uscire tante volte prima di fermarsi e arrendersi)
 #define UNKNOWN_SPEED_FACTOR 0.5            // fattore da moltiplicare alla velocità quando il robot si muove in territorio sconosciuto
 
 
 #define STALL_SPEED 0.02                // velocità massima in avanti sotto la quale la sicurezza sta trattenendo il robot, espressa in m/s
 #define STALL_OMEGA 0.1                 // velocità angolare sotto la quale il robot non sta ruotando, espressa in rad/s
 #define STALL_TIME RT_MS(1000)          // per quanto tempo deve durare lo stallo prima che venga considerato come tale
+
+
+#define TRAIL_SIZE 8            // lunghezza del buffer delle ultime posizioni percorse, serve per permettere al robot di indietreggiare, nel caso di problemi
+#define TRAIL_STEP 0.05         // distanza minima in metri tra le ultime posizioni salvate nel buffer        
+#define UNLOCK_MAX_ATTEMPTS 10  // tentativi di sblocco prima di andare in guasto (ne mettiamo tanti, per essere sicuri che il robot tenti di uscire tante volte prima di fermarsi e arrendersi)
+
+#define UNLOCK_PHASE_TIMEOUT RT_MS(5000)    // durata massima di ogni fase
+
+typedef enum {
+    UNLOCK_PHASE_BACK,
+    UNLOCK_PHASE_ROTATE,    
+} unlock_phase_t;
+
+// Un tentativo di sblocco: quanto indietreggiare sulla scia, di quanto ruotare 
+// sul posto e a che velocità indietreggiare
+typedef struct {
+    double back_dist;       // distanza da percorrere all'indietro sulla scia, espressa in m
+    double rot_angle;       // rotazione sul posto dopo l'indietreggiamento, positiva a sinistra (senso antiorario), espressa in rad
+    double back_speed;      // velocità massima all'indietro, espressa in m/s
+} unlock_step_t;
+
+// Tabella dei tentativi di sblocco, ogni tentativo è diverso dagli altri
+// così il robot non riprova sempre la stessa manovra
+static const unlock_step_t UNLOCK_TABLE[UNLOCK_MAX_ATTEMPTS] = {
+    { 0.05, DEG_TO_RAD(0),    0.10 },  
+    { 0.05, DEG_TO_RAD(30),   0.10 },   
+    { 0.10, DEG_TO_RAD(-45),  0.15 },   
+    { 0.05, DEG_TO_RAD(90),   0.08 },   
+    { 0.10, DEG_TO_RAD(-120), 0.15 },   
+    { 0.15, DEG_TO_RAD(60),   0.10 },   
+    { 0.05, DEG_TO_RAD(-90),  0.20 },   
+    { 0.15, DEG_TO_RAD(150),  0.10 },   
+    { 0.10, DEG_TO_RAD(180),  0.15 },   
+    { 0.20, DEG_TO_RAD(120),  0.10 },   
+};
 
 
 // array costante con i valori da sommare all'indice per ottenere i vicini
@@ -73,25 +109,79 @@ typedef enum {
 
 // definizione dello stato interno del task di navigazione
 typedef struct {
+    
     uint8_t map[NAV_MAP_CELL_NUMBER * NAV_MAP_CELL_NUMBER];            // copia della mappa di navigazione, passata dal task di mappatura
     uint16_t came_from[NAV_MAP_CELL_NUMBER * NAV_MAP_CELL_NUMBER];     // array delle provenienze: ogni cella contiene l'indice della cella da cui il robot è venuto
     uint32_t map_version;                       // numero di versione della mappa di navigazione
+    
     navigation_objective_t cur_obj;             // ultimo obiettivo mandato
     nav_state_t state;                          // stato corrente del task di navigazione (macchina a stati)    
     nav_state_t mission;                        // fase della missione: lo stato di pianificazione a cui tornare (esplorazione, pulizia, seguimuro, ritorno alla base)
+    
     nav_search_queue_t s_q;                     // search_queue, coda di ricerca, serve per la ricerca del percorso
+    
     nav_path_t path;                            // percorso che deve fare il robot
     uint16_t path_idx;                          // indice del path dell'ultimo punto a cui è stato mandato mandato il robot
+    
     int64_t state_start;                        // istante di ingresso nello stato corrente, serve per gli stati temporizzati
     uint8_t unlock_attempt;                     // numero di tentativi di sblocco fatti di fila
     int64_t stall_start;                        // istante in cui è iniziato l'arresto, 0 se il robot non è in arresto
     bool center_to_center;                      // è true se il percorso attuale va seguito senza prendere scorciatoie (le scorciatoie potrebbero far finire il robot in posizioni diverse dal centro delle celle, rendendo possibili situazioni di stallo dove il task di sicurezza ferma il robot per via di ostacoli che la navigazione non vede)
     navigation_closed_cells_t closed_cells;     // lista di celle chiuse da segnalare al task di mappatura
+    
+    struct {                                    // struct con le ultime TRAIL_SIZE posizioni del robot
+        double x[TRAIL_SIZE];                   // buffer delle x delle posizioni
+        double y[TRAIL_SIZE];                   // buffer delle y delle posizioni
+        uint8_t head;                     // testa del buffer circolare
+        uint8_t len;                      // dimensione impegnata del buffer circolare
+    } trail;
+
+    unlock_phase_t unlock_phase;            // la fase corrente di sblocco
+    int64_t phase_start;                    // istante di inizio della fase corrente di sblocco
+    double back_left;                       // distanza da percorrere all'indietro per completare lo sblocco, espressa in metri
 
 } navigation_state_t;
 
 // stato interno della navigazione
 static navigation_state_t nav_state;
+
+// funzione helper per pushare una nuova posizione nella trail
+static void trail_push(double x, double y) {
+       
+    // Inserisci la x e la y nella rispettiva cella del buffer circolare
+    nav_state.trail.x[nav_state.trail.head] = x;
+    nav_state.trail.y[nav_state.trail.head] = y;
+
+    // avanza la testa del buffer circolare
+    nav_state.trail.head = (nav_state.trail.head + 1) % TRAIL_SIZE; 
+
+    // aumenta la lunghezza del buffer
+    if(nav_state.trail.len < TRAIL_SIZE) nav_state.trail.len++;
+
+}
+
+// funzione helper per poppare una posizione dal trail
+static bool trail_pop(double *x, double *y) {
+    
+    // verifica se il buffer è vuoto
+    if (nav_state.trail.len <= 0) return false;
+
+    // indietreggia la testa del buffer circolare
+    nav_state.trail.head = (nav_state.trail.head + TRAIL_SIZE - 1) % TRAIL_SIZE; 
+    
+    // Inserisci la rispettiva cella del buffer circolare in x e y
+    *x = nav_state.trail.x[nav_state.trail.head];
+    *y = nav_state.trail.y[nav_state.trail.head];
+
+
+    // diminuisci la lunghezza del buffer
+    nav_state.trail.len--;
+
+    return true;
+
+}
+
+
 
 // funzione helper per impostare lo stato
 static void set_state(nav_state_t next_state) {
@@ -597,6 +687,115 @@ static bool append_unknown_neighbor(void) {
 
 }
 
+// Dopo un arresto o uno sblocco, riporta il robot al centro della sua cella se è 
+// libera, altrimenti ricalcola il percorso
+static void resume_after_stop(safety_alarm_t cur_alarm, movement_position_data_t cur_pos) {
+    // calcola la cella di navigazione in cui si trova il robot
+    uint16_t robot_index = coord_to_nav_index(cur_pos.x, cur_pos.y);
+
+    // se la cella in cui si trova il robot non è libera
+    if (nav_state.map[robot_index] != NAV_CELL_FREE) {
+
+        // manda l'obiettivo di fermarsi al robot
+        send_objective(OBJ_STOP, 0, 0, 0, 0, 0);
+
+        // La mappa è cambiata sotto al robot
+        // ricalcola il percorso
+        set_state(nav_state.mission);
+
+    } else {        // se il robot si trova in una cella libera
+        
+        // ricava le coordinate del centro della cella
+        double x, y;
+        nav_index_to_coord(robot_index, &x, &y);
+    
+        // manda al robot l'obiettivo di andare verso il centro della cella
+        send_objective(OBJ_MOVE, MAX_ROTATION_SPEED, 0, MIN(cur_alarm.max_v_forw, CRUISING_SPEED), x, y);
+
+        // passa allo stato di allineamento
+        set_state(NAV_STATE_ALIGN);
+    
+    }
+}
+
+// Funzione Helper per lo sblocco del robot, fa partire la rotazione del tentativo corrente
+static void unlock_start_rotation(safety_alarm_t cur_alarm, movement_position_data_t cur_pos) {
+
+    // salva la riga della tabella del tentativo in corso 
+    const unlock_step_t cur_try = UNLOCK_TABLE[nav_state.unlock_attempt - 1];
+
+    // se questo tentativo non prevede rotazione, riprendi subito
+    if (cur_try.rot_angle == 0) {
+        resume_after_stop(cur_alarm, cur_pos);
+        return;
+    }
+
+    // ruota sul posto
+    send_objective(OBJ_ROTATE, MAX_ROTATION_SPEED, cur_pos.theta + cur_try.rot_angle, 0, 0, 0);
+
+    // passa alla fase di rotazione e segna quando è iniziata (per il timeout)
+    nav_state.unlock_phase = UNLOCK_PHASE_ROTATE;
+    nav_state.phase_start = rt_adesso();
+}
+
+// Funzione Helper per lo sblocco del robot, fa andare il robot al prossimo punto della scia
+static void unlock_next_back_point(safety_alarm_t cur_alarm, movement_position_data_t cur_pos) {
+
+
+    // Definizione delle coordinate del prossimo punto della scia
+    double x_next, y_next;
+
+    // se il robot non deve più indietreggiare o se non ci sono altri punti nella scia, ruota il robot per questo tentativo di sblocco
+    if (nav_state.back_left <= 0 || !trail_pop(&x_next, &y_next)) unlock_start_rotation(cur_alarm, cur_pos);
+    else {          // altrimenti 
+
+        // togli dalla distanza da percorrere all'indietro la distanza tra il punto poppato e la posizione del robot
+        nav_state.back_left -= hypot(x_next - cur_pos.x, y_next - cur_pos.y);
+
+        // manda al robot l'obiettivo di andare nel punto poppato
+        send_objective(
+            OBJ_MOVE, 
+            MAX_ROTATION_SPEED, 
+            0, 
+            -MIN(UNLOCK_TABLE[nav_state.unlock_attempt - 1].back_speed, cur_alarm.max_v_backw), 
+            x_next, 
+            y_next
+        );
+
+    }
+
+}
+
+// Funzione Helper per lo sblocco del robot, inizia il tentativo di sblocco
+static void start_unlock_attempt(safety_alarm_t cur_alarm, movement_position_data_t cur_pos) {
+
+    // se i tentativi fatti raggiungono il numero massimo, vai in guasto ed esci
+    if (nav_state.unlock_attempt >= UNLOCK_MAX_ATTEMPTS) {
+
+        send_objective(OBJ_STOP, 0, 0, 0, 0, 0);
+
+        set_state(NAV_STATE_FAILURE);
+
+        return;
+    }
+
+    // altrimenti, imposta la distanza da indietreggiare pari alla distanza del tentativo corrente
+    nav_state.back_left = UNLOCK_TABLE[nav_state.unlock_attempt].back_dist;
+
+    // incrementa il numero di tentativi fatti
+    nav_state.unlock_attempt++;
+
+    // imposta la fase di sblocco all'indietreggiamento
+    nav_state.unlock_phase = UNLOCK_PHASE_BACK;
+
+    // imposta l'istante di inizio del tentativo corrente ad adesso
+    nav_state.phase_start = rt_adesso();
+
+    // inizia ad indietreggiare
+    unlock_next_back_point(cur_alarm, cur_pos);
+
+}
+
 // job del task
 void job_navigation(void *arg) {
     
@@ -619,16 +818,49 @@ void job_navigation(void *arg) {
 
     // se la posizione corrente non è valida
     if (!cur_pos.valid) {
+        
         // se l'obiettivo corrente non è già OBJ_STOP, aggiungi l'obiettivo OBJ_STOP
         if (nav_state.cur_obj.obj_type != OBJ_STOP) send_objective(OBJ_STOP, 0, 0, 0, 0, 0);
+        
         // metti il robot in attesa
         set_state(NAV_STATE_WAIT);
+
+        // azzera la scia delle posizioni
+        nav_state.trail.len = 0;
+
         // esci
         return;
     }
 
+    // calcola la distanza tra la posizione attuale del robot e l'ultima posizione
+    // salvata nel buffer della scia delle posizioni.
+    // se il buffer della scia delle posizioni è vuoto o la distanza dall'ultima
+    // posizione è almeno TRAIL_STEP, aggiungi la posizione corrente al buffer
+    if ((nav_state.trail.len <= 0 || hypot(nav_state.trail.x[(nav_state.trail.head + TRAIL_SIZE - 1) % TRAIL_SIZE] - cur_pos.x, nav_state.trail.y[(nav_state.trail.head + TRAIL_SIZE - 1) % TRAIL_SIZE] - cur_pos.y) >= TRAIL_STEP) && nav_state.state != NAV_STATE_UNLOCK) {       // btw spero che nessuno legga mai questo schifo di if
+        trail_push(cur_pos.x, cur_pos.y);
+    }
+
+
     // leggi gli allarmi mandati dal task safety, serve per la velocità massima degli obiettivi
     safety_alarm_t cur_alarm = read_safety();
+
+    // se ci sono degli allarmi (stuck, slip o motor overload) e lo stato non è 
+    // attesa, sblocco, riposo o guasto, vai in sblocco
+    // il primo controllo dentro l'if verifica se uno o più dei 3 bit meno significativi siano a 1
+    if ((cur_alarm.error_mask & (SAFETY_ERROR_STUCK | SAFETY_ERROR_SLIP | SAFETY_ERROR_MOT_OVRLD | SAFETY_ERROR_CONTACT)) && 
+        nav_state.state != NAV_STATE_SLEEP &&
+        nav_state.state != NAV_STATE_UNLOCK &&
+        nav_state.state != NAV_STATE_WAIT &&
+        nav_state.state != NAV_STATE_FAILURE) {
+        
+        // imposta lo stato corrente a sblocco
+        set_state(NAV_STATE_UNLOCK);
+
+        // comincia a fare il primo sblocco
+        start_unlock_attempt(cur_alarm, cur_pos);
+
+        return;
+    }
 
     // Switch della macchina a stati
     switch (nav_state.state) {
@@ -774,32 +1006,7 @@ void job_navigation(void *arg) {
 
                     } 
 
-                    // calcola la cella di navigazione in cui si trova il robot
-                    uint16_t robot_index = coord_to_nav_index(cur_pos.x, cur_pos.y);
-
-                    // se la cella in cui si trova il robot non è libera
-                    if (nav_state.map[robot_index] != NAV_CELL_FREE) {
-
-                        // manda l'obiettivo di fermarsi al robot
-                        send_objective(OBJ_STOP, 0, 0, 0, 0, 0);
-
-                        // La mappa è cambiata sotto al robot
-                        // ricalcola il percorso
-                        set_state(nav_state.mission);
-
-                    } else {        // se il robot si trova in una cella libera
-                        
-                        // ricava le coordinate del centro della cella
-                        double x, y;
-                        nav_index_to_coord(robot_index, &x, &y);
-                    
-                        // manda al robot l'obiettivo di andare verso il centro della cella
-                        send_objective(OBJ_MOVE, MAX_ROTATION_SPEED, 0, MIN(cur_alarm.max_v_forw, CRUISING_SPEED), x, y);
-
-                        // passa allo stato di allineamento
-                        set_state(NAV_STATE_ALIGN);
-                    
-                    }
+                    resume_after_stop(cur_alarm, cur_pos);
 
                     
 
@@ -824,7 +1031,56 @@ void job_navigation(void *arg) {
             break;
         }
         case NAV_STATE_UNLOCK: {
-            /* code */
+            
+            // Gestione delle fasi di sblocco
+            switch(nav_state.unlock_phase) {
+
+                // fase di indietreggiamento
+                case UNLOCK_PHASE_BACK:
+
+                    // aggiorna la velocità
+                    nav_state.cur_obj.v = -MIN(UNLOCK_TABLE[nav_state.unlock_attempt - 1].back_speed, cur_alarm.max_v_backw);
+
+                    // pubblica la velocità aggiornata
+                    write_objective(&nav_state.cur_obj);
+                    
+                    // Controlla se l'obiettivo è stato raggiunto
+                    if (cur_pos.num_obj == nav_state.cur_obj.num && cur_pos.obj_achieved) {
+                        // se sì, passa al prossimo punto
+                        unlock_next_back_point(cur_alarm, cur_pos);
+                    } else if (rt_adesso() - nav_state.phase_start >= UNLOCK_PHASE_TIMEOUT) {   // altrimenti se il tentativo è durato più di UNLOCK_PHASE_TIMEOUT
+                        // prova a far ruotare il robot
+                        unlock_start_rotation(cur_alarm, cur_pos);
+                    }
+                    
+                    break;
+
+                // fase di rotazione 
+                case UNLOCK_PHASE_ROTATE:
+                    // Controlla se l'obiettivo è stato raggiunto
+                    if (cur_pos.num_obj == nav_state.cur_obj.num && cur_pos.obj_achieved) {
+                        // se sì, riparti
+                       resume_after_stop(cur_alarm, cur_pos);
+                    } else if (rt_adesso() - nav_state.phase_start >= UNLOCK_PHASE_TIMEOUT) {   // altrimenti se il tentativo è durato più di UNLOCK_PHASE_TIMEOUT
+                        // il tentativo è fallito, riprova 
+                        start_unlock_attempt(cur_alarm, cur_pos);
+                    }
+
+                    break;
+                
+                // se entriamo qui andiamo in guasto
+                default:
+                    
+                    // manda l'obiettivo di fermarsi al robot
+                    send_objective(OBJ_STOP, 0, 0, 0, 0, 0);
+
+                    // vai nello stato guasto
+                    set_state(NAV_STATE_FAILURE);
+                    
+                    break;
+
+            }
+
             break;
         }
         case NAV_STATE_ALIGN: {
@@ -846,11 +1102,11 @@ void job_navigation(void *arg) {
 
             } else if (is_stalled(cur_alarm, cur_pos)) {  // se l'obiettivo non è stato ancora raggiunto e il robot è in stallo
 
-                // manda l'obiettivo di fermarsi al robot
-                send_objective(OBJ_STOP, 0, 0, 0, 0, 0);
-
-                // vai nello stato guasto
-                set_state(NAV_STATE_FAILURE);
+                // imposta lo stato attuale di sblocco
+                set_state(NAV_STATE_UNLOCK);
+                
+                // inizia la routine di sblocco
+                start_unlock_attempt(cur_alarm, cur_pos);
 
             }
 

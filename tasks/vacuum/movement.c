@@ -337,8 +337,11 @@ void job_movement(void *arg) {
                         break;
                     }
 
-                    // Calcola la direzione dell'obiettivo rispetto a quella del robot
-                    double dir_error = atan2(dy, dx) - mov_state.theta;
+
+                    // Calcola la direzione dell'obiettivo rispetto a quella del robot,
+                    // se il robot ha velocità negativa, significa che deve andare indietro 
+                    // quindi sommiamo PI alla dir_error
+                    double dir_error = atan2(dy, dx) - mov_state.theta + (signbit(cur_obj.v) ? M_PI : 0);
                     normalize_angle(M_PI, &dir_error);
 
                     
@@ -359,13 +362,15 @@ void job_movement(void *arg) {
                     next_v = dist_error * MOVE_GAIN;
 
                     // satura next_v alla velocità massima di spostamento
-                    next_v = saturate_value(cur_obj.v, next_v);
+                    next_v = saturate_value(fabs(cur_obj.v), next_v);
 
                     // moltiplica la velocità per il coseno della direzione
                     // in questo modo, la velocità sarà al massimo quando 
                     // la direzione è corretta, e sarà modulata dal coseno
                     // quando è sbagliata
                     next_v *= cos(dir_error);
+
+                    if (signbit(cur_obj.v)) next_v *= -1;
 
                     break;
                 }
