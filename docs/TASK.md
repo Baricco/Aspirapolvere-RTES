@@ -337,7 +337,7 @@ meno di 1 ms) e il GD32 ~29 ms dopo.
 | Funzione | Argomenti | Note |
 |---|---|---|
 | `drv_velocita(v, w)` | v in m/s (±0,5), w in rad/s (±2π, + = sinistra) | a terra il GD32 risponde con una costante di tempo di ~110 ms (v) e ~73 ms (ω), dopo ~29 ms; **non va oltre ~0,39 m/s** |
-| `drv_spazzole(lat, cen)` | -100..100 | la laterale non è montata sul nostro robot; centrale < 0 = sblocco (~4 s alla massima velocità all'indietro, poi la ferma il GD32) |
+| `drv_spazzole(lat, cen)` | -100..100 | la laterale oggi non è montata, ma verrà montata: il software la comanda come se ci fosse; centrale < 0 = sblocco (~4 s alla massima velocità all'indietro, poi la ferma il GD32) |
 | `drv_aspirazione(giri)` | 0..30000 giri/min | serve `c.aspirazione = 1` prima di `drv_avvia`; il driver la ferma senza cassetto della polvere, con il robot sollevato o sulla base (`st.aspirazione_limiti` dice perché). Livelli dell'originale: eco 12 800, normale 15 500, massimo 19 500 |
 | `drv_led(modo)` | 0..18 | tabella sotto |
 | `drv_lidar(acceso, giri_s)` | 0/1, giri al secondo (0 = default 6) | il driver regola da solo la velocità |

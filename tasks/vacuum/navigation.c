@@ -30,6 +30,11 @@
 
 #define UNLOCK_PHASE_TIMEOUT RT_MS(5000)    // durata massima di ogni fase
 
+// il task di navigazione ha celle 20x20cm l'idea è che per non avere strisce non pulite, ogni cella viene divisa in 
+// due "corsie" durante la fase di pulizia, questo significa che ogni cella verrà divisa in due parti 10x20 
+#define LANE_DEVIATION 0.05                 // scostamento di una corsia dal centro della cella, espresso in metri
+#define LANE_CLEAN_DISTANCE_THRESHOLD 0.025 // la distanza entro cui una metà si segna come pulita, espresso in metri
+
 typedef enum {
     UNLOCK_PHASE_BACK,
     UNLOCK_PHASE_ROTATE,    
@@ -140,6 +145,9 @@ typedef struct {
     int64_t phase_start;                    // istante di inizio della fase corrente di sblocco
     double back_left;                       // distanza da percorrere all'indietro per completare lo sblocco, espressa in metri
 
+    uint8_t clean_cell_mask[NAV_MAP_CELL_NUMBER * NAV_MAP_CELL_NUMBER / 4];     // la maschera che indica quali celle sono state pulite: ogni coppia di bit della maschera corrisponde ad una cella della mappa, per inidirizzare si usa una funzione helper che prende due indici (uno che indica quale cella, l'altro indica quale metà della cella), per convenzione, nel resto del codice diremo: sx = metà 0 = verso la coordinata più bassa dell'asse laterale; dx = metà 1 = verso la più alta
+    bool strip_axis_x;            // l'asse secondo il quale si sviluppano le strisce della pulizia (true -> x, false -> y), viene calcolato dinamicamente all'inzio della fase di pulizia, in modo tale da minimizzare il numero di strisce (riducendo i tempi di pulizia)
+
 } navigation_state_t;
 
 // stato interno della navigazione
@@ -181,7 +189,124 @@ static bool trail_pop(double *x, double *y) {
 
 }
 
+// funzione helper per ottenere l'indice della maschera di pulizia
+// prende l'indice della cella e la metà (0 o 1)
+static inline uint32_t clean_mask_bit_index(const uint16_t cell_index, const bool cell_half) {
+    return 2 * cell_index + cell_half; 
+} 
 
+// funzione helper per ottenere byte e bit shift da usare per lavorare sulla clean mask
+static inline void calc_byte_bit_shift(const uint16_t cell_index, const bool cell_half, uint16_t *byte_idx, uint8_t *bit_shift) {
+    
+    // calcola l'indice della clean mask
+    uint32_t idx = clean_mask_bit_index(cell_index, cell_half);
+
+    // dall'indice ricava il byte della clean mask in cui si trova la mezza cella...
+    *byte_idx = idx / 8;
+    
+    // ...e l'indice del bit cercato all'interno del byte
+    *bit_shift = idx % 8;
+}
+
+// funzione helper per verificare se una certa mezza cella sia pulita
+static inline bool is_half_cell_clean(const uint16_t cell_index, const bool cell_half) {
+    
+    uint16_t byte_idx = 0;
+    uint8_t bit_shift = 0;
+
+    // calcola byte della clean mask e indice del bit all'interno del byte
+    calc_byte_bit_shift(cell_index, cell_half, &byte_idx, &bit_shift);
+
+    // ritorna il bit della maschera
+    return nav_state.clean_cell_mask[byte_idx] & (1u << bit_shift);
+
+}
+
+// funzione helper per segnare una mezza cella nella clean mask come pulita
+static inline void set_half_cell_clean(const uint16_t cell_index, const bool cell_half) {
+
+    uint16_t byte_idx = 0;
+    uint8_t bit_shift = 0;
+
+    // calcola byte della clean mask e indice del bit all'interno del byte
+    calc_byte_bit_shift(cell_index, cell_half, &byte_idx, &bit_shift);
+
+    // metti il bit corrispondente a 1
+    nav_state.clean_cell_mask[byte_idx] |= (1u << bit_shift);
+
+}
+
+// funzione helper che restituisce lo spostamento laterale, cioè di quanto cambia l'indice di una cella passando alla cella accanto
+// dipende solo dal campo strip_axis nello stato di navigazione, espresso in numero di celle
+static inline int calc_clean_lateral_shift(void) {
+    return nav_state.strip_axis_x ? NAV_MAP_CELL_NUMBER : 1;
+}
+
+// funzione helper per calcolare quanto la corsia in cui passa il robot si scosti dal centro della cella
+// prende cell_index e cell_half e restituisce un valore in metri
+static inline double calc_clean_lane_shift(const uint16_t cell_index, const bool cell_half) {
+
+    // strumentopolo misterioso che ci servirà più tardi
+    // serve per la logica di: metà dx -> vicino a dx, metà sx -> vicino sulla sx
+    int8_t sign_shift = (cell_half ? 1 : -1);
+
+
+    // calcola la cella vicina alla metà della cella passata, 
+    // quindi se viene passata la metà sx, controlliamo la cella alla sua sx
+    // se viene passata la metà dx, guardiamo la cella alla sua dx
+    uint16_t neigh_cell = cell_index + (calc_clean_lateral_shift() * sign_shift);
+
+    // se la cella vicina è libera, restituisci LANE_DEVIATION (+ o - in base al sign_shift)
+    // altrimenti restituisci 0 (nessuno shift, per evitare di sbattere contro ostacoli vicini)
+    return nav_state.map[neigh_cell] == NAV_CELL_FREE ? LANE_DEVIATION * sign_shift : 0;
+
+}
+
+
+// funzione helper per verificare se la pulizia sia attiva o meno, serve per decidere se attivare le spazzole
+static inline bool is_active_cleaning(void) {
+    return (
+        (nav_state.mission == NAV_STATE_CLEAN) &&
+        (
+            nav_state.state != NAV_STATE_UNLOCK &&
+            nav_state.state != NAV_STATE_FAILURE &&
+            nav_state.state != NAV_STATE_WAIT &&
+            nav_state.state != NAV_STATE_SLEEP
+        )
+    );
+}
+
+// funzione helper che segna le due mezze celle che si trovano sotto il robot come pulite se lo scostamento 
+// laterale del robot dal centro è inferiore a LANE_CLEAN_DISTANCE_THRESHOLD
+static void set_robot_cell_clean(const movement_position_data_t robot_pos) {
+
+    // calcola la cella in cui si trova il robot
+    uint16_t robot_cell = coord_to_nav_index(robot_pos.x, robot_pos.y);
+
+    // calcola il centro della cella
+    double robot_cell_x, robot_cell_y;
+    nav_index_to_coord(robot_cell, &robot_cell_x, &robot_cell_y);
+
+    // calcola lo scostamento laterale del robot dal centro
+    // nelle y se l'asse di riferimento sono le x e viceversa
+    double dist;
+    if (nav_state.strip_axis_x) {
+        dist = robot_pos.y - robot_cell_y;
+    } else {
+        dist = robot_pos.x - robot_cell_x;
+    }
+
+    // controlla se la mezza cella sx sia sotto al robot, se sì, segnala come pulita
+    if (fabs(dist - calc_clean_lane_shift(robot_cell, 0)) < LANE_CLEAN_DISTANCE_THRESHOLD) {
+        set_half_cell_clean(robot_cell, 0);
+    }
+    
+    // controlla se la mezza cella dx sia sotto al robot, se sì, segnala come pulita
+    if (fabs(dist - calc_clean_lane_shift(robot_cell, 1)) < LANE_CLEAN_DISTANCE_THRESHOLD) {
+        
+        set_half_cell_clean(robot_cell, 1);
+    }
+}
 
 // funzione helper per impostare lo stato
 static void set_state(nav_state_t next_state) {
@@ -856,6 +981,9 @@ void job_navigation(void *arg) {
     if ((nav_state.trail.len <= 0 || hypot(nav_state.trail.x[(nav_state.trail.head + TRAIL_SIZE - 1) % TRAIL_SIZE] - cur_pos.x, nav_state.trail.y[(nav_state.trail.head + TRAIL_SIZE - 1) % TRAIL_SIZE] - cur_pos.y) >= TRAIL_STEP) && nav_state.state != NAV_STATE_UNLOCK) {       // btw spero che nessuno legga mai questo schifo di if
         trail_push(cur_pos.x, cur_pos.y);
     }
+
+    // se la pulizia è in corso, segna come pulite le mezze celle su cui si trova il robot
+    if (is_active_cleaning()) set_robot_cell_clean(cur_pos);
 
 
     // leggi gli allarmi mandati dal task safety, serve per la velocità massima degli obiettivi

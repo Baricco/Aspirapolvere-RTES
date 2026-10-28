@@ -73,16 +73,18 @@ I task dell'esame li scrive l'utente da solo, sopra un framework e un driver pre
     sulla copia; la mappatura solo per scrivere le celle della griglia di navigazione;
   - **due fasi**: senza una mappa salvata il robot prima la costruisce con un giro di esplorazione (verso le
     frontiere fra libero e sconosciuto), poi pulisce con **BA\*** (strisce + ritorno alla cella non pulita più vicina)
-    sulla mappa. La pulizia parte sempre dalla base, la cui posizione è salvata nella mappa;
+    sulla mappa. Con una mappa salvata la pulizia parte dalla base, la cui posizione è l'origine della mappa; dopo
+    un'esplorazione parte da dove l'esplorazione finisce (vedi la mappa salvata, 2026-10-28);
   - **la base è una zona proibita permanente** (nella lista delle zone, non come celle occupate, così la mappatura
     non la cancella quando il lidar vede libero): il robot non deve urtarla né trascinarla. Si parte uscendo in
     avanti fino a un punto davanti alla base. **L'aggancio non lo fanno i task RT** (niente eccezioni nella
     sicurezza): la navigazione porta il robot al bordo della zona, poi chiede al driver (o a un altro componente
     fuori dai task) di fare la messa in carica con l'infrarosso della base; durante l'aggancio il driver ignora le
     velocità mandate dai task e tiene attive le sue protezioni (bumper, anti-caduta). Da progettare con il driver;
-  - **dimensioni**: griglia fine 1024 × 1024 celle da 5 cm, griglia di navigazione 256 × 256 celle da 20 cm
-    (segnaposto, dipende dalla striscia): 51,2 m di lato, ±25,6 m dalla base. Le potenze di due fanno stare le
-    coordinate di una cella di navigazione in un `uint8_t` e il suo indice in un `uint16_t`;
+  - **dimensioni**: griglia fine 1024 × 1024 celle da 5 cm, griglia di navigazione 256 × 256 celle da 20 cm:
+    51,2 m di lato, ±25,6 m dalla base. Le potenze di due fanno stare le coordinate di una cella di navigazione in un
+    `uint8_t` e il suo indice in un `uint16_t`. Le celle restano da 20 cm anche per la pulizia (2026-10-28): le
+    strisce da 10 cm si fanno con le mezze celle, senza cambiare la mappa (vedi la pulizia con BA\*);
   - **segnale "mappa cambiata"**: numero di versione atomico (`stdatomic.h`) nella mappa condivisa; la mappatura lo
     incrementa (dentro il mutex) quando una cella di navigazione cambia stato, la navigazione lo legge a ogni job
     senza mutex e copia la griglia solo se è cambiato, salvando la versione letta dentro il mutex;
@@ -92,7 +94,67 @@ I task dell'esame li scrive l'utente da solo, sopra un framework e un driver pre
     contrario per ~4 s e la ferma il GD32);
   - **trasferimenti e ritorno alla base** cercando il percorso sulle celle già pulite (terreno già percorso), con
     ripiego su tutte le celle libere: A* quando la meta è nota (la base), ricerca in ampiezza quando la meta è "la
-    cella non pulita più vicina".
+    cella non pulita più vicina". Per la cella non pulita il ripiego non serve: la ricerca in ampiezza si ferma alla
+    prima cella sporca, quindi tutte quelle attraversate prima erano già pulite.
+  - **pulizia con BA\*** (progettata 2026-10-28, codice in `navigation.c`):
+    - **strisce da 10 cm con le mezze celle**: per BA\* ogni cella di navigazione conta come due mezze celle
+      affiancate, di traverso rispetto alle strisce, ognuna con la sua **corsia**. La corsia sta a ±5 cm dal centro
+      della cella solo se la cella vicina da quel lato è libera, altrimenti al centro. Con le celle della striscia e
+      le vicine da quel lato libere, fra le due colonne non ci possono essere ostacoli (i cerchi da 20 cm attorno ai
+      centri coprono la fascia), e dall'altra parte stanno ad almeno 17,3 cm dalla linea dei centri: lungo la corsia
+      il corpo ha almeno 4,9 cm di margine (lungo un muro, al centro, 2,5 cm). Punto peggiore: in fondo alla striscia
+      con un oggetto piccolo di sbieco, 0,6 cm; la sicurezza ferma il robot 1 cm prima, dentro la tolleranza di 2 cm
+      del moto. Con lo scostamento della corsia a 0 le due corsie coincidono e si torna alle strisce da 20 cm (una
+      costante sola). Scartata l'"andata e ritorno" con 1 bit per cella: la navigazione dovrebbe ricordarsi quale
+      passata sta facendo, e un'interruzione durante il ritorno lascerebbe corsie mancanti su celle segnate pulite.
+      Le strisce raddoppiano rispetto ai 20 cm (l'originale usa 0,15 m e 0,10 m: `Set bow shape coverage distance`
+      in `everest-server`);
+    - **asse delle strisce** (deciso 2026-10-28): x o y della mappa, **calcolato all'inizio di ogni pulizia**, in un
+      job da solo: per ogni cella libera si guarda se la precedente lungo x (e lungo y) è libera, e se non lo è lì
+      comincia una striscia; vince la direzione con meno strisce, cioè meno curve. Costa sempre lo stesso: misurato
+      sul PC 63–96 µs, sul robot ~1–1,5 ms (circa 14 volte), 3–4 volte meno di una ricerca completa (96 contro 335 µs
+      su tutta la mappa), quindi in un job da solo non cambia il caso peggiore della navigazione. Non si salva nel
+      file: segue sempre la mappa del momento. Con un asse qualsiasi la superficie pulita sarebbe la stessa, ma con più
+      curve (stanza 5 × 3 m a strisce da 10 cm: 30 contro 50, circa un minuto in più su nove);
+    - **copertura**: maschera privata con 2 bit per cella di navigazione (16 KB), uno per metà, in un array piatto di
+      bit con le due metà di una cella affiancate (bit numero 2 × cella + metà, quindi le due metà stanno nello stesso
+      byte; l'indice arriva a 131.071 e va in un `uint32_t`). Metà 0 = verso la coordinata più bassa dell'asse
+      laterale (corsia a −5 cm), metà 1 = verso la più alta (+5 cm). A ogni job, con
+      spazzole e aspirazione accese, si segna pulita ogni metà la cui corsia dista meno di 2,5 cm (di lato) dal centro
+      del robot: più della tolleranza del moto, così il robot fermo sulla corsia la segna sempre;
+    - **lo stato di pulizia**, a ogni ingresso: se la cella del robot non è libera va alla cella libera più vicina
+      (come l'esplorazione); altrimenti la prossima striscia parte dalla metà del robot se è sporca, se no dalla prima
+      mezza cella vicina libera e sporca nell'ordine nord, sud, est, ovest (nord/sud = lungo le strisce, nella stessa
+      metà; est/ovest = l'altra metà della stessa cella o la metà più vicina della cella accanto), e si allunga lungo
+      le strisce finché la metà successiva è libera, sporca e con la corsia allo stesso scostamento. Vicolo cieco:
+      ricerca della cella con almeno una metà sporca (`GOAL_DIRTY`). Niente da pulire: riposo (poi seguimuro e
+      ritorno alla base);
+    - **"segui percorso"** riceve uno scostamento laterale sommato a ogni punto (zero fuori dalle strisce, che sono
+      dritte) e, se il robot è a più di 2 cm dal primo punto del percorso, ci va prima: così si entrano le corsie e si
+      fanno i passi laterali di 10 cm. Cambia di poco anche l'esplorazione (da verificare con la serie delle 17 prove);
+    - **spazzole e aspirazione** (deciso 2026-10-28): le comanda la navigazione direttamente (`drv_spazzole`,
+      `drv_aspirazione`), accese nella pulizia e spente in sblocco, attesa, guasto e riposo; il driver si chiama solo
+      quando lo stato cambia. Anche la **spazzola laterale** è da considerare montata (la monterà l'utente);
+    - **terminazione**: ogni passaggio dallo stato di pulizia pulisce almeno una metà nuova, oppure cambia la mappa
+      (cella chiusa, contatto), oppure consuma un tentativo di sblocco (10 di fila → guasto). Buco noto: l'incastro
+      senza contatto (cavo) non lo segna nessuno, e il robot si incastra di nuovo fino al guasto; rimedio previsto,
+      dopo la prima versione e se le prove lo mostrano: la mappatura legge l'incastro della sicurezza e segna un
+      ostacolo basso davanti al robot, come per il bumper;
+    - **tempi**: una striscia legge al massimo 255 celle; la ricerca della cella sporca nel caso peggiore visita tutte
+      le celle raggiungibili come quella della frontiera, e parte solo nei vicoli ciechi;
+    - **dopo la prima versione**: striscia accorciata quando la mappa cambia, incastro senza contatto, sblocco delle
+      spazzole in sovraccarico.
+  - **mappa salvata** (deciso 2026-10-28, da fare dopo BA\* insieme al server aperiodico): all'**avvio**, prima che
+    partano i task, se il robot è sulla base e il file è valido (numero magico, versione, dimensioni, controllo) la
+    mappa si carica e la missione iniziale è la pulizia (dopo l'uscita dalla base); altrimenti mappa vuota ed
+    esplorazione, e la pulizia parte da dove finisce l'esplorazione. **Salvataggio** dopo l'esplorazione e alla fine
+    della pulizia, in due metà: la mappatura copia nel suo job la sua parte (griglia fine, griglia di navigazione,
+    contatori, zone proibite: ~1,2 MB, tempo limitato, una volta sola) e sveglia il **server aperiodico**, che scrive
+    la copia su un file temporaneo e lo rinomina sopra il vecchio. Nessun task aspetta la scrittura (la flash può
+    bloccare per secondi: il budget del server limita la CPU, non la durata, e il salvataggio non ha scadenze). Una
+    mappa ha l'origine nella base: **si salva solo se la sessione è partita dalla base**. Precisione: due agganci non
+    mettono il robot nella stessa posa (3° a 5 m sono 26 cm), quindi la mappa caricata è affidabile solo con
+    l'allineamento delle scansioni.
   - **mappatura, prima versione scritta** (2026-10-17, `tasks/vacuum/mapping.c`, senza allineamento delle scansioni):
     periodo 200 ms sul core 2 (ci andrà anche la navigazione), watchdog non critico. Punteggio per cella fine in
     `int8_t` (colpo +30, raggio che attraversa −10, limiti ±100), **niente isteresi**: occupata se > 50. Raggi con
@@ -231,8 +293,9 @@ I task dell'esame li scrive l'utente da solo, sopra un framework e un driver pre
       centro di cella cade nella striscia in cui ci sta il centro del robot.
 
 ## Ancora da decidere
-- **Mappa e navigazione, punti aperti** (2026-10-13): larghezza della striscia (dalla spazzola centrale), ingombro
-  della base, aggancio alla base nel driver (passaggio di consegne dai task al driver e ritorno).
+- **Mappa e navigazione, punti aperti** (2026-10-13): ingombro della base, aggancio alla base nel driver (passaggio
+  di consegne dai task al driver e ritorno). La larghezza della striscia è decisa (10 cm con le mezze celle,
+  2026-10-28), e anche l'asse delle strisce (calcolato a ogni pulizia, vedi la pulizia con BA\*).
 - **Tipo di server aperiodico** (polling, deferrable, sporadic) e **tipo di app** (con l'home server, più avanti:
   zone proibite, preferenze, programmazione della pulizia).
 - **Assegnazione dei task ai core**: rimandata (2026-10-06) a quando ci saranno i WCET misurati sul robot; il criterio
