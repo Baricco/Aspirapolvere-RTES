@@ -149,14 +149,32 @@ I task dell'esame li scrive l'utente da solo, sopra un framework e un driver pre
       `drv_aspirazione`), accese nella pulizia e spente in sblocco, attesa, guasto e riposo; il driver si chiama solo
       quando lo stato cambia. Anche la **spazzola laterale** è da considerare montata (la monterà l'utente);
     - **terminazione**: ogni passaggio dallo stato di pulizia pulisce almeno una metà nuova, oppure cambia la mappa
-      (cella chiusa, contatto), oppure consuma un tentativo di sblocco (10 di fila → guasto). Buco noto: l'incastro
-      senza contatto (cavo) non lo segna nessuno, e il robot si incastra di nuovo fino al guasto; rimedio previsto,
-      dopo la prima versione e se le prove lo mostrano: la mappatura legge l'incastro della sicurezza e segna un
-      ostacolo basso davanti al robot, come per il bumper;
+      (cella chiusa, contatto), oppure consuma un tentativo di sblocco (10 di fila → guasto). Buco trovato nelle
+      prove (2026-10-29): l'incastro **senza contatto** non lo segnava nessuno, e i tentativi di sblocco si azzerano a
+      ogni percorso finito, quindi il robot ci riprovava all'infinito (83 sblocchi sotto la credenza del soggiorno).
+      **Fatto** (codice dell'utente): entrando nello sblocco per incastro, slittamento o sforzo **senza** contatto la
+      navigazione chiude con `close_cell` la cella del robot (il contatto lo segna già la mappatura). Scartata la
+      variante "la mappatura segna un ostacolo davanti al robot": la torretta sta 11 cm dietro il centro, quindi lo
+      spigolo della credenza è sotto il robot, non davanti. Funziona **solo con la posizione giusta** (vedi le prove
+      sotto);
+    - **prove nel simulatore** (2026-10-29, `prova.py --pulizia`, `tools/prove-nav/disegna.py`): BA\* funziona.
+      Strisce lungo il lato lungo, a coppie a 10 cm, attorno a pianta, muretto e gambe del tavolo; per 450 s
+      posizione creduta e vera coincidono entro 2 cm; nessuna scadenza mancata. Sotto la **credenza** (rialzata da
+      9 cm: il lidar a 8,7 cm la vede libera, la torretta a 9,5 cm ci sbatte) il robot si incastra, e mentre è fermo
+      le ruote slittano (nel simulatore gli encoder contano al 30% della velocità comandata, `slitta = 0.3` in
+      `sim/gd32sim.c`, come le ruote vere): l'odometria avanza, ogni sblocco aggiunge ~10 cm di errore, la cella
+      chiusa è quella sbagliata e il robot ci riprova. Dopo 36 sblocchi crede di essere 2,85 m più in là, fuori dalla
+      stanza; la mappa (lidar inserito con la posa sbagliata) e la maschera della copertura si spostano, e il robot
+      ripulisce zone già pulite. Cucina e camera non hanno mobili a quell'altezza;
+    - **PROSSIMO PASSO (deciso 2026-10-29): l'allineamento delle scansioni** nella mappatura, che corregge la
+      posizione dell'odometria con il lidar (e dà un rilevatore di incastro: encoder che dicono "mi muovo" e scena
+      ferma). Con la posizione giusta le celle chiuse dopo gli incastri sono quelle giuste e il bordo della credenza
+      si chiude dopo pochi tentativi. Va progettato prima di scrivere il codice, come BA\*;
     - **tempi**: una striscia legge al massimo 255 celle; la ricerca della cella sporca nel caso peggiore visita tutte
       le celle raggiungibili come quella della frontiera, e parte solo nei vicoli ciechi;
-    - **dopo la prima versione**: striscia accorciata quando la mappa cambia, incastro senza contatto, sblocco delle
-      spazzole in sovraccarico.
+    - **ancora da fare nella pulizia**: spazzole e aspirazione (passo 4), striscia accorciata quando la mappa
+      cambia, sblocco delle spazzole in sovraccarico, ritorno alla base a fine pulizia (oggi lo stato
+      `NAV_STATE_RETURN_HOME` è vuoto e il robot si ferma lì).
   - **mappa salvata** (deciso 2026-10-28, da fare dopo BA\* insieme al server aperiodico): all'**avvio**, prima che
     partano i task, se il robot è sulla base e il file è valido (numero magico, versione, dimensioni, controllo) la
     mappa si carica e la missione iniziale è la pulizia (dopo l'uscita dalla base); altrimenti mappa vuota ed

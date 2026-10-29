@@ -1,17 +1,19 @@
 # Una prova della navigazione: simulatore (stanza, seme del rumore, partenza) + build/prove-nav/vacdbg.
 # Uso (dalla cartella del progetto): python3 tools/prove-nav/prova.py [--pulizia] stanza.txt seme durata_s [x y angolo]
 # Si ferma quando la navigazione arriva alla pulizia o al guasto, o alla durata. Con --pulizia va avanti fino al
-# riposo (fine della pulizia) o al guasto, e stampa anche strisce, trasferimenti e metà pulite (righe PERCORSO e
-# PULIZIA di costruisci.sh). Stampa un riassunto; i registri restano in build/prove-nav/.
+# riposo o al ritorno alla base (fine della pulizia) o al guasto, e stampa anche strisce, trasferimenti e metà pulite (righe PERCORSO e
+# PULIZIA di costruisci.sh). Stampa un riassunto; i registri restano in build/prove-nav/, compreso il percorso vero
+# del robot nel simulatore (vero_<prova>.csv: orologio monotono, t del simulatore, x, y, dir, contatti), che
+# tools/prove-nav/disegna.py mette a confronto con quello che crede il robot (righe POSA).
 import json, os, re, signal, subprocess, sys, time, urllib.request
 REPO = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..'))
 D = os.path.join(REPO, 'build', 'prove-nav')
 NOMI = ['WAIT', 'EXPLORE', 'CLEAN', 'BORDERS', 'HOME', 'HOOK', 'FOLLOW', 'UNLOCK', 'SLEEP', 'ALIGN', 'FAILURE']
-CLEAN, FAILURE, SLEEP = NOMI.index('CLEAN'), NOMI.index('FAILURE'), NOMI.index('SLEEP')
+CLEAN, FAILURE, SLEEP, HOME = NOMI.index('CLEAN'), NOMI.index('FAILURE'), NOMI.index('SLEEP'), NOMI.index('HOME')
 a = sys.argv[1:]
 PULIZIA = '--pulizia' in a
 a = [x for x in a if x != '--pulizia']
-FINE = (SLEEP, FAILURE) if PULIZIA else (CLEAN, FAILURE)
+FINE = (SLEEP, HOME, FAILURE) if PULIZIA else (CLEAN, FAILURE)
 stanza, seme, durata = a[0], a[1], float(a[2])
 testo = open(os.path.join(REPO, stanza)).read()
 if len(a) >= 6:
@@ -36,6 +38,7 @@ prog = subprocess.Popen(['build/host/osserva', '--uscita', 'build/sim/mappa_robo
 def righe_nav():
     return [l.split() for l in open(fout, errors='replace') if l.startswith('NAV ')]
 eventi, prec, t0, fine, ultimo = [], {}, time.time(), None, None
+vero = open(os.path.join(D, f'vero_{tag}.csv'), 'w'); vero.write('mono,t,x,y,dir,bumper,bloccato,incastrato\n')
 while time.time() - t0 < durata:
     d = stato()
     if d:
@@ -45,6 +48,9 @@ while time.time() - t0 < durata:
                 eventi.append(f"{k} t={d['t']:.1f} x={d['robot']['x']:.2f} y={d['robot']['y']:.2f} dir={d['robot']['dir']:.0f}")
             prec[k] = on
         ultimo = d
+        r = d['robot']
+        vero.write(f"{time.monotonic():.3f},{d['t']:.3f},{r['x']:.4f},{r['y']:.4f},{r['dir']:.1f},"
+                   f"{int(any(d['bumper']))},{int(bool(d['bloccato']))},{int(bool(d['incastrato']))}\n")
     nav = righe_nav()
     if nav and int(nav[-1][3]) in FINE and fine is None: fine = time.time()
     if fine and time.time() - fine > 1.5: break
@@ -53,12 +59,17 @@ for l in subprocess.run(['pgrep', '-f', '^' + os.path.join(D, 'vacdbg')], captur
     os.kill(int(l), signal.SIGINT)
 try: prog.wait(10)
 except Exception: prog.kill()
-os.killpg(sim.pid, signal.SIGTERM); sim.wait()
+os.killpg(sim.pid, signal.SIGTERM); sim.wait(); vero.close()
 nav = righe_nav()
 t_start = next((float(n[1]) for n in nav if n[2] == '0' and n[3] == '1'), None)
 esito = 'TIMEOUT'
-if nav: esito = ({SLEEP: 'PULIZIA FINITA', FAILURE: 'GUASTO'} if PULIZIA else
-                 {CLEAN: 'ESPLORAZIONE FINITA', FAILURE: 'GUASTO'}).get(int(nav[-1][3]), 'TIMEOUT')
+fine_espl = next((i for i, n in enumerate(nav) if n[2] == '1' and n[3] == str(CLEAN)), None)
+if PULIZIA:
+    if nav: esito = {SLEEP: 'PULIZIA FINITA', HOME: 'PULIZIA FINITA', FAILURE: 'GUASTO'}.get(int(nav[-1][3]), 'TIMEOUT')
+else:
+    guasto = next((i for i, n in enumerate(nav) if n[3] == str(FAILURE)), None)
+    if guasto is not None and (fine_espl is None or guasto < fine_espl): esito, nav = 'GUASTO', nav[:guasto + 1]
+    elif fine_espl is not None: esito, nav = 'ESPLORAZIONE FINITA', nav[:fine_espl + 1]
 cont = ''
 if os.path.exists('build/sim/mappa_robot'):
     g = open('build/sim/mappa_robot', 'rb').read()
@@ -78,7 +89,7 @@ if PULIZIA:
         dopo = [r for r in righe if float(r[1]) >= t_pul]
         strisce = [r for r in dopo if r[0] == 'PERCORSO' and r[4] == '1']
         trasf = [r for r in dopo if r[0] == 'PERCORSO' and r[4] == '0']
-        fine_t = float(fin[1]) if fin and int(fin[3]) in (SLEEP, FAILURE) else None
+        fine_t = float(fin[1]) if fin and int(fin[3]) in (SLEEP, HOME, FAILURE) else None
         print(f"   esplorazione {t_pul - (t_start or t_pul):.1f}s" + (f", pulizia {fine_t - t_pul:.1f}s" if fine_t else ", pulizia non finita"))
         print(f"   strisce: {len(strisce)} ({sum(int(r[2]) for r in strisce)} celle, di una cella sola: "
               f"{sum(1 for r in strisce if r[2] == '1')}), trasferimenti e uscite: {len(trasf)}")
@@ -93,6 +104,6 @@ for e in eventi: print('   EVENTO', e)
 for n in nav:
     if n[2] == n[3] == '0': continue
     da, verso = NOMI[int(n[2])], NOMI[int(n[3])]
-    if verso in (('ALIGN', 'UNLOCK', 'FAILURE', 'SLEEP') if PULIZIA else ('ALIGN', 'UNLOCK', 'FAILURE', 'CLEAN')) or \
+    if verso in (('ALIGN', 'UNLOCK', 'FAILURE', 'SLEEP', 'HOME') if PULIZIA else ('ALIGN', 'UNLOCK', 'FAILURE', 'CLEAN')) or \
        (PULIZIA and da == 'EXPLORE' and verso == 'CLEAN'):
         print(f"   {float(n[1]) - (t_start or 0):6.1f}s {da}->{verso} pos=({n[4]},{n[5]}) th={n[6]} maxv={n[7]} c2c={n[8]} chiuse={n[10]}")

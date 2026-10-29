@@ -1087,6 +1087,79 @@ static void start_following_path(const safety_alarm_t cur_alarm, const movement_
 
 }
 
+
+// funzione helper, autoesplicativa
+static void go_to_nearest_free_cell(const safety_alarm_t cur_alarm, const movement_position_data_t cur_pos, const uint16_t robot_index) {
+
+    // cerchiamo la cella libera più vicina
+    if (search_cell(robot_index, GOAL_FREE, 0) == 0) {
+
+        // se la ricerca ritorna 0, non ci sono celle libere vicine
+        // raggiungibili entro ESCAPE_MAX_CELLS, quindi stop e guasto
+
+        stop_and_fail();
+
+    } else {
+        
+        // inizia a seguire il percorso (passa allo stato segui percorso)
+        start_following_path(cur_alarm, cur_pos, 0, false);
+    }
+}
+
+// funzione helper che restituisce true se è possibile estendere la striscia attuale
+static inline bool can_extend_strip(const uint16_t cell, const bool cell_half, const double lat_shift) {
+    return is_half_cell_free_dirty(cell, cell_half) && calc_clean_lane_shift(cell, cell_half) == lat_shift;
+}
+
+// funzione che prende la mezza cella di partenza e scrive la striscia da percorrere dentro nav_state.path, restituendo la lunghezza
+static uint32_t plan_strip(const uint16_t start_cell, const bool start_half) {
+
+    double lat_shift = calc_clean_lane_shift(start_cell, start_half);
+
+    nav_state.path.cells[0] = start_cell;
+    
+    uint32_t length = 1;
+
+    uint16_t next_cell;
+    bool next_half;
+    clean_dir_t dir;
+
+    get_half_cell_neighbor(start_cell, start_half, CLEAN_DIR_NORTH, &next_cell, &next_half);
+
+    if (can_extend_strip(next_cell, next_half, lat_shift)) {
+        dir = CLEAN_DIR_NORTH;
+    } else {
+
+        // Se nord non va bene, prova a sud
+        get_half_cell_neighbor(start_cell, start_half, CLEAN_DIR_SOUTH, &next_cell, &next_half);
+
+        if (can_extend_strip(next_cell, next_half, lat_shift)) {
+            dir = CLEAN_DIR_SOUTH;
+        } else {
+
+            // se non va bene nemmeno sud, la striscia è di una cella sola
+            nav_state.path.length = length;
+
+            return length;
+        }
+    }
+
+    // allunga la striscia nella direzione scelta finché si può
+    while (can_extend_strip(next_cell, next_half, lat_shift)) {
+
+        // aggiungi la cella alla striscia
+        nav_state.path.cells[length++] = next_cell;
+
+        // passa alla vicina successiva nella stessa direzione
+        get_half_cell_neighbor(next_cell, next_half, dir, &next_cell, &next_half);
+    }
+
+    // salva la lunghezza della striscia nel percorso
+    nav_state.path.length = length;
+
+    return length;
+}
+
 // job del task
 void job_navigation(void *arg) {
     
@@ -1147,6 +1220,12 @@ void job_navigation(void *arg) {
         nav_state.state != NAV_STATE_WAIT &&
         nav_state.state != NAV_STATE_FAILURE) {
         
+        // se non c'è l'errore SAFETY_ERROR_CONTACT segna la cella del robot come ostacolo,
+        //  per non incappare nello stesso allarme successivamente 
+        if (!(cur_alarm.error_mask & SAFETY_ERROR_CONTACT)) {
+            close_cell(coord_to_nav_index(cur_pos.x, cur_pos.y));
+        }
+
         // imposta lo stato corrente a sblocco
         set_state(NAV_STATE_UNLOCK);
 
@@ -1189,19 +1268,7 @@ void job_navigation(void *arg) {
             // se il robot si trova in una cella non libera
             if (nav_state.map[robot_index] != NAV_CELL_FREE) {
 
-                // cerchiamo la cella libera più vicina
-                if (search_cell(robot_index, GOAL_FREE, 0) == 0) {
-
-                    // se la ricerca ritorna 0, non ci sono celle libere vicine
-                    // raggiungibili entro ESCAPE_MAX_CELLS, quindi stop e guasto
-
-                    stop_and_fail();
-
-                } else {
-                    
-                    // inizia a seguire il percorso (passa allo stato segui percorso)
-                    start_following_path(cur_alarm, cur_pos, 0, false);
-                }
+                go_to_nearest_free_cell(cur_alarm, cur_pos, robot_index);
 
                 break;
 
@@ -1244,8 +1311,62 @@ void job_navigation(void *arg) {
                 break;
             }
 
-            
-            
+            // calcola la cella del robot
+            uint16_t robot_cell = coord_to_nav_index(cur_pos.x, cur_pos.y);
+
+            // se la cella del robot non è libera, vai alla cella libera più vicina ed esci
+            if (nav_state.map[robot_cell] != NAV_CELL_FREE) {
+                go_to_nearest_free_cell(cur_alarm, cur_pos, robot_cell);
+                break;
+            }
+
+            // calcola la metà della cella in cui si trova il robot
+            bool robot_half_cell = get_robot_half_cell(cur_pos, robot_cell);
+
+            // la mezza cella di partenza è quella del robot se è libera e sporta
+            if (is_half_cell_free_dirty(robot_cell, robot_half_cell)) {
+                
+                plan_strip(robot_cell, robot_half_cell);
+
+                start_following_path(cur_alarm, cur_pos, calc_clean_lane_shift(robot_cell, robot_half_cell), true);
+
+            } else {
+
+                // scorri le 4 direzioni in cui bisogna controllare (N, S, E, W)
+                for (clean_dir_t dir = 0; dir < 4; dir++) {
+
+                    uint16_t start_cell;
+                    bool start_half_cell;
+
+                    // trova la mezza cella da cui il robot deve partire
+                    get_half_cell_neighbor(robot_cell, robot_half_cell, dir, &start_cell, &start_half_cell);
+
+                    // controlla se questo vicino è libero e sporco
+                    if (is_half_cell_free_dirty(start_cell, start_half_cell)) {
+                        
+                        // se sì, pulisci lui
+                        plan_strip(start_cell, start_half_cell);
+                        start_following_path(cur_alarm, cur_pos, calc_clean_lane_shift(start_cell, start_half_cell), true);
+                        return;
+                    } 
+
+                }
+
+                // Se arriviamo qui significa che non abbiamo trovato una cella vicina da pulire, quindi
+                // siamo in un vicolo cieco e dobbiamo cercare una cella nel resto della mappa
+                if (search_cell(robot_cell, GOAL_DIRTY, 0) == 0) {  // la funzione restituisce 0 se non trova niente
+                    // quindi se entriamo qui dentro significa che la pulizia è terminata,
+                    // facciamo tornare il robot alla base di ricarica
+                    set_state(NAV_STATE_RETURN_HOME);
+                    break;
+                }
+
+                // Se invece siamo qui significa che search_cell ha trovato una cella da pulire, quindi
+                // andiamo a pulirla
+                start_following_path(cur_alarm, cur_pos, 0, false); 
+
+            }
+
             break;
         }
         case NAV_STATE_FOLLOW_BORDERS: {
