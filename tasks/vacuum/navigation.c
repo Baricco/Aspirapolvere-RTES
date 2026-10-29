@@ -95,6 +95,14 @@ typedef struct {
 
 } nav_path_t;
 
+// enum per le direzioni da usare in BA*
+typedef enum {
+    CLEAN_DIR_NORTH,
+    CLEAN_DIR_SOUTH,
+    CLEAN_DIR_EAST,
+    CLEAN_DIR_WEST,
+} clean_dir_t;
+
 
 // Enum degli stati del task di navigazione
 // Il task di navigazione è una macchina a stati 
@@ -146,7 +154,9 @@ typedef struct {
     double back_left;                       // distanza da percorrere all'indietro per completare lo sblocco, espressa in metri
 
     uint8_t clean_cell_mask[NAV_MAP_CELL_NUMBER * NAV_MAP_CELL_NUMBER / 4];     // la maschera che indica quali celle sono state pulite: ogni coppia di bit della maschera corrisponde ad una cella della mappa, per inidirizzare si usa una funzione helper che prende due indici (uno che indica quale cella, l'altro indica quale metà della cella), per convenzione, nel resto del codice diremo: sx = metà 0 = verso la coordinata più bassa dell'asse laterale; dx = metà 1 = verso la più alta
-    bool strip_axis_x;            // l'asse secondo il quale si sviluppano le strisce della pulizia (true -> x, false -> y), viene calcolato dinamicamente all'inzio della fase di pulizia, in modo tale da minimizzare il numero di strisce (riducendo i tempi di pulizia)
+    bool strip_axis_x;              // l'asse secondo il quale si sviluppano le strisce della pulizia (true -> x, false -> y), viene calcolato dinamicamente all'inzio della fase di pulizia, in modo tale da minimizzare il numero di strisce (riducendo i tempi di pulizia)
+    double cur_lat_shift;           // scostamento laterale del percorso attuale, espresso in metri      
+    bool is_axis;                   // true se strip_axis_x è già stato calcolato, false altrimenti
 
 } navigation_state_t;
 
@@ -242,6 +252,15 @@ static inline int calc_clean_lateral_shift(void) {
     return nav_state.strip_axis_x ? NAV_MAP_CELL_NUMBER : 1;
 }
 
+// funzione helper opposta a calc_clean_lateral_shift
+static inline int calc_clean_along_shift(void) {
+    return nav_state.strip_axis_x ? 1 : NAV_MAP_CELL_NUMBER;
+}
+
+
+static inline bool is_half_cell_free_dirty(const uint16_t cell, const bool cell_half) {
+    return (nav_state.map[cell] == NAV_CELL_FREE && !is_half_cell_clean(cell, cell_half));
+}
 // funzione helper per calcolare quanto la corsia in cui passa il robot si scosti dal centro della cella
 // prende cell_index e cell_half e restituisce un valore in metri
 static inline double calc_clean_lane_shift(const uint16_t cell_index, const bool cell_half) {
@@ -267,6 +286,7 @@ static inline double calc_clean_lane_shift(const uint16_t cell_index, const bool
 static inline bool is_active_cleaning(void) {
     return (
         (nav_state.mission == NAV_STATE_CLEAN) &&
+        (nav_state.is_axis) &&
         (
             nav_state.state != NAV_STATE_UNLOCK &&
             nav_state.state != NAV_STATE_FAILURE &&
@@ -276,13 +296,9 @@ static inline bool is_active_cleaning(void) {
     );
 }
 
-// funzione helper che segna le due mezze celle che si trovano sotto il robot come pulite se lo scostamento 
-// laterale del robot dal centro è inferiore a LANE_CLEAN_DISTANCE_THRESHOLD
-static void set_robot_cell_clean(const movement_position_data_t robot_pos) {
-
-    // calcola la cella in cui si trova il robot
-    uint16_t robot_cell = coord_to_nav_index(robot_pos.x, robot_pos.y);
-
+// funzione helper che prende cancola la distanza tra il centro della cella e il robot
+static double calc_robot_lateral_offset(const movement_position_data_t robot_pos, uint16_t robot_cell) {
+    
     // calcola il centro della cella
     double robot_cell_x, robot_cell_y;
     nav_index_to_coord(robot_cell, &robot_cell_x, &robot_cell_y);
@@ -296,6 +312,29 @@ static void set_robot_cell_clean(const movement_position_data_t robot_pos) {
         dist = robot_pos.x - robot_cell_x;
     }
 
+    return dist;
+}
+
+// funzione helper che prende la posizione e la cella del robot e restituisce la metà della cella in cui si trova
+static bool get_robot_half_cell(const movement_position_data_t robot_pos, uint16_t cell) {
+
+    double dist = calc_robot_lateral_offset(robot_pos, cell);
+
+    double dist_half_sx = fabs(dist - calc_clean_lane_shift(cell, 0));
+    double dist_half_dx = fabs(dist - calc_clean_lane_shift(cell, 1));
+
+    return dist_half_sx > dist_half_dx;
+}
+
+// funzione helper che segna le due mezze celle che si trovano sotto il robot come pulite se lo scostamento 
+// laterale del robot dal centro è inferiore a LANE_CLEAN_DISTANCE_THRESHOLD
+static void set_robot_cell_clean(const movement_position_data_t robot_pos) {
+
+    // calcola la cella in cui si trova il robot
+    uint16_t robot_cell = coord_to_nav_index(robot_pos.x, robot_pos.y);
+
+    double dist = calc_robot_lateral_offset(robot_pos, robot_cell);
+
     // controlla se la mezza cella sx sia sotto al robot, se sì, segnala come pulita
     if (fabs(dist - calc_clean_lane_shift(robot_cell, 0)) < LANE_CLEAN_DISTANCE_THRESHOLD) {
         set_half_cell_clean(robot_cell, 0);
@@ -306,6 +345,48 @@ static void set_robot_cell_clean(const movement_position_data_t robot_pos) {
         
         set_half_cell_clean(robot_cell, 1);
     }
+}
+
+// funzione che prende una mezza cella e la direzione e retituisce la mezza cella vicina in quella direzione
+static void get_half_cell_neighbor(const uint16_t cell, const bool cell_half, const clean_dir_t dir, uint16_t *neigh_cell, bool *neigh_half) {
+
+    // la cella vicina parte dalla cella attuale
+    *neigh_cell = cell;
+    *neigh_half = cell_half;
+
+    switch (dir) {
+    case CLEAN_DIR_NORTH:
+        
+        *neigh_cell += calc_clean_along_shift();
+
+        break;
+    case CLEAN_DIR_SOUTH:
+        
+        *neigh_cell -= calc_clean_along_shift();
+
+        break;
+    case CLEAN_DIR_EAST:
+        
+        if (cell_half) {
+            *neigh_cell += calc_clean_lateral_shift();
+        }
+
+        *neigh_half = !cell_half;
+
+        break;
+    case CLEAN_DIR_WEST:
+        
+        if (!cell_half) {
+            *neigh_cell -= calc_clean_lateral_shift();
+        }
+
+        *neigh_half = !cell_half;
+
+        break;    
+    default:        // se siamo qui c'è un errore, non facciamo niente
+        break;
+    }
+
 }
 
 // funzione helper per impostare lo stato
@@ -389,7 +470,7 @@ static inline void search_queue_flush(void) {
 // definizione dell'enum dei possibili obiettivi della funzione di ricerca
 typedef enum {
     GOAL_BORDER,    // l'obiettivo della ricerca è trovare una cella al confine delle celle esplorate
-    GOAL_DIRTY,     // l'obiettivo della ricerca è trovare una cella non pulita
+    GOAL_DIRTY,     // l'obiettivo della ricerca è trovare una cella con almeno una metà non pulita
     GOAL_CELL,      // l'obiettivo della ricerca è trovare una cella precisa (indice della cella)
     GOAL_FREE,      // l'obiettivo della ricerca è trovare una cella libera, partendo da una bloccata
 } nav_search_goal_t;
@@ -404,13 +485,12 @@ static bool cell_is_goal(const nav_search_goal_t goal, const uint16_t cell, cons
             if (nav_state.map[cell] == NAV_CELL_FREE) {     // se la cella in cui ci troviamo è libera
                 // controllo le 4 celle adiacenti alla cella corrente, se sono sconosciute,
                 // significa che cell è una cella di frontiera
-                
                 for (int i = 0; i < 4; i++) if (nav_state.map[cell + NEIGHBOR_SHIFT[i]] == NAV_CELL_UNKNOWN) return true;
-
             }
             break;
         case GOAL_DIRTY:
-            /* code */
+            // restituisce true se la cella è libera e almeno una delle sue due metà è sporca
+            return (nav_state.map[cell] == NAV_CELL_FREE && (!is_half_cell_clean(cell, 0) || !is_half_cell_clean(cell, 1)));
             break;          
         case GOAL_CELL:     // il terzo parametro serve solo qui
             return cell == goal_cell;
@@ -481,6 +561,37 @@ static inline double calc_speed(const double max_v) {
     // per UNKNOWN_SPEED_FACTOR, ottenendo la velocità finale
 
     return MIN(max_v, CRUISING_SPEED) * (nav_state.map[nav_state.path.cells[nav_state.path_idx]] != NAV_CELL_FREE ? UNKNOWN_SPEED_FACTOR : 1);
+
+}
+
+// Funzione che calcola il campo strip_axis_x dello stato. serve per calcolare l'asse di riferimento per cui
+// disporre le strisce della pulizia. viene chiamata SOLO dopo la fine dell'esplorazione, visto che il suo 
+// funzionamento si basa sul fatto che quando l'esplorazione termina, la nav_state_s_q è piena con le celle della mappa
+static void calc_strip_axis() {
+
+    // contatori del numero di strisce che salterebbero fuori sia con il primo, che con il secondo asse
+    uint32_t num_strip_x = 0, num_strip_y = 0;
+    
+    // scorri tutte le celle all'interno della coda usata nell'esplorazione:
+    // la coda DEVE contenere tutte le celle della mappa raggiungibili dal robot, affinchè l'algoritmo funzioni
+    for (uint32_t i = 0; i < nav_state.s_q.tail; i++) {
+        
+        
+        // Se la cella corrente non è libera, passa alla prossima
+        if (nav_state.map[nav_state.s_q.values[i]] != NAV_CELL_FREE) continue;
+
+        // Se la cella precedente lungo l'asse X non è libera, da questa cella parte una striscia
+        if (nav_state.map[nav_state.s_q.values[i] - 1] != NAV_CELL_FREE) num_strip_x++;
+
+        // Se la cella precedente lungo l'asse y non è libear, da questa cella parte una striscia
+        if (nav_state.map[nav_state.s_q.values[i] - NAV_MAP_CELL_NUMBER] != NAV_CELL_FREE) num_strip_y++;
+    }
+
+    // strip_axis_x è vero se num_strip_x < num_strip_y
+    nav_state.strip_axis_x = num_strip_x < num_strip_y;
+
+    // segna come calcolato l'asse
+    nav_state.is_axis = true;
 
 }
 
@@ -721,6 +832,8 @@ void init_navigation(void) {
 
     nav_state.mission = NAV_STATE_EXPLORE;      // si parte in attesa (stato azzerato), poi l'attesa porta all'esplorazione
 
+    nav_state.is_axis = false;
+
 }
 
 // funzione di lettura dei dati del task (la chiamerà il task di movimento)
@@ -938,6 +1051,42 @@ static void start_unlock_attempt(safety_alarm_t cur_alarm, movement_position_dat
 
 }
 
+// Funzione che calcola il punto di una corsia (prende il centro della cella e applica lo scostamento laterale)
+static void get_lane_coord(const uint16_t cell, const double lat_shift, double *x, double *y) {
+
+    // calcola le coordinate del centro della cella
+    nav_index_to_coord(cell, x, y);
+
+    // applica lo scostamento laterale alle x o alle y in base all'asse di riferimento per lo scostamento
+    if (nav_state.strip_axis_x) *y += lat_shift; else *x += lat_shift;
+        
+}
+
+// Funzione per far partire il robot seguendo il percorso che ha nello stato
+static void start_following_path(const safety_alarm_t cur_alarm, const movement_position_data_t cur_pos, const double lat_shift, const bool is_first_point) {
+
+    nav_state.path_idx = 0;
+
+    nav_state.cur_lat_shift = lat_shift;
+
+    set_state(NAV_STATE_FOLLOW_PATH);
+
+    if (is_first_point) {
+
+        double lane_x, lane_y;
+        
+        get_lane_coord(nav_state.path.cells[0], lat_shift, &lane_x, &lane_y);
+
+        // calcola la distanza tra il robot e la corsia
+        double dist = hypot(cur_pos.x - lane_x, cur_pos.y - lane_y);
+
+        // se il robot è troppo lontano dalla corsia, mandalo lì
+        if (dist > MOVE_TOLERANCE_M) send_objective(OBJ_MOVE, MAX_ROTATION_SPEED, 0, calc_speed(cur_alarm.max_v_forw), lane_x, lane_y);
+
+    }
+
+}
+
 // job del task
 void job_navigation(void *arg) {
     
@@ -1050,12 +1199,8 @@ void job_navigation(void *arg) {
 
                 } else {
                     
-                    // passa allo stato segui percorso
-                    nav_state.path_idx = 0;
-
-                    set_state(NAV_STATE_FOLLOW_PATH);
-
-
+                    // inizia a seguire il percorso (passa allo stato segui percorso)
+                    start_following_path(cur_alarm, cur_pos, 0, false);
                 }
 
                 break;
@@ -1085,8 +1230,7 @@ void job_navigation(void *arg) {
                     break;
                 }
 
-                nav_state.path_idx = 0;
-                set_state(NAV_STATE_FOLLOW_PATH);
+                start_following_path(cur_alarm, cur_pos, 0, false);
 
             }
 
@@ -1094,8 +1238,14 @@ void job_navigation(void *arg) {
         }
         case NAV_STATE_CLEAN: {
 
+            // per prima cosa calcoliamo l'asse se non è già stato calcolato
+            if (!nav_state.is_axis) { 
+                calc_strip_axis();
+                break;
+            }
+
             
-            /* code */
+            
             break;
         }
         case NAV_STATE_FOLLOW_BORDERS: {
@@ -1130,9 +1280,9 @@ void job_navigation(void *arg) {
                     // imposta il prossimo punto di svolta come obiettivo
                     nav_state.path_idx = next_turn_pt;
                     
-                    // Calcola le coordinate del centro della cella
+                    // Calcola le coordinate del centro della corsia
                     double next_x, next_y;
-                    nav_index_to_coord(nav_state.path.cells[nav_state.path_idx], &next_x, &next_y);
+                    get_lane_coord(nav_state.path.cells[nav_state.path_idx], nav_state.cur_lat_shift, &next_x, &next_y);
 
                     // imposta come prossimo obiettivo di andare al prossimo punto di svolta
                     send_objective(OBJ_MOVE, MAX_ROTATION_SPEED, 0, calc_speed(cur_alarm.max_v_forw), next_x, next_y);

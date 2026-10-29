@@ -109,13 +109,21 @@ I task dell'esame li scrive l'utente da solo, sopra un framework e un driver pre
       passata sta facendo, e un'interruzione durante il ritorno lascerebbe corsie mancanti su celle segnate pulite.
       Le strisce raddoppiano rispetto ai 20 cm (l'originale usa 0,15 m e 0,10 m: `Set bow shape coverage distance`
       in `everest-server`);
-    - **asse delle strisce** (deciso 2026-10-28): x o y della mappa, **calcolato all'inizio di ogni pulizia**, in un
-      job da solo: per ogni cella libera si guarda se la precedente lungo x (e lungo y) è libera, e se non lo è lì
-      comincia una striscia; vince la direzione con meno strisce, cioè meno curve. Costa sempre lo stesso: misurato
-      sul PC 63–96 µs, sul robot ~1–1,5 ms (circa 14 volte), 3–4 volte meno di una ricerca completa (96 contro 335 µs
-      su tutta la mappa), quindi in un job da solo non cambia il caso peggiore della navigazione. Non si salva nel
-      file: segue sempre la mappa del momento. Con un asse qualsiasi la superficie pulita sarebbe la stessa, ma con più
-      curve (stanza 5 × 3 m a strisce da 10 cm: 30 contro 50, circa un minuto in più su nove);
+    - **asse delle strisce** (deciso 2026-10-28/29): x o y della mappa, **calcolato all'inizio della pulizia dopo
+      un'esplorazione**, nel primo job della pulizia, da solo: per ogni cella libera si guarda se la precedente lungo x
+      (e lungo y) è libera, e se non lo è lì comincia una striscia; vince la direzione con meno strisce, cioè meno
+      curve (a pari numero lungo y). Il conteggio **non gira su tutta la mappa ma sulla lista delle celle raggiungibili
+      lasciata nella coda di ricerca dall'ultima ricerca dell'esplorazione** (quella che non trova frontiere e quindi le
+      visita tutte; fra lei e il primo job della pulizia nessuno fa altre ricerche): costa in proporzione alla casa
+      (soggiorno del simulatore: 337 celle) invece che alle 65.536 della mappa (giro completo misurato: 63–96 µs sul
+      PC, ~1–1,5 ms sul robot), e ignora le celle libere che il robot non può raggiungere. Con una mappa caricata dal
+      file la lista non c'è, ma lì l'asse arriverà dal file. Con un asse qualsiasi la superficie pulita sarebbe la
+      stessa, ma con più curve (stanza 5 × 3 m a strisce da 10 cm: 30 contro 50, circa un minuto in più su nove);
+    - **asse per stanza** (più avanti, con il file della mappa): divisione in stanze (porte) e asse per stanza
+      calcolati fuori dai task, nel server aperiodico al salvataggio, e salvati nel file; a tempo di esecuzione l'asse
+      di una cella si legge a costo costante. Compatibile con le mezze celle: dentro una stanza tutte le celle hanno lo
+      stesso asse. Lo fanno anche i robot commerciali (stanza per stanza) e il firmware originale (`CCandidateDoorExtraction`,
+      `room_id`, `split_line_num`, zig-zag per `CLocalSection`);
     - **copertura**: maschera privata con 2 bit per cella di navigazione (16 KB), uno per metà, in un array piatto di
       bit con le due metà di una cella affiancate (bit numero 2 × cella + metà, quindi le due metà stanno nello stesso
       byte; l'indice arriva a 131.071 e va in un `uint32_t`). Metà 0 = verso la coordinata più bassa dell'asse
@@ -130,8 +138,13 @@ I task dell'esame li scrive l'utente da solo, sopra un framework e un driver pre
       ricerca della cella con almeno una metà sporca (`GOAL_DIRTY`). Niente da pulire: riposo (poi seguimuro e
       ritorno alla base);
     - **"segui percorso"** riceve uno scostamento laterale sommato a ogni punto (zero fuori dalle strisce, che sono
-      dritte) e, se il robot è a più di 2 cm dal primo punto del percorso, ci va prima: così si entrano le corsie e si
-      fanno i passi laterali di 10 cm. Cambia di poco anche l'esplorazione (da verificare con la serie delle 17 prove);
+      dritte) e, **solo per le strisce**, se il robot è a più di 2 cm dal primo punto ci va prima: così si entrano le
+      corsie e si fanno i passi laterali di 10 cm. Negli altri percorsi il primo punto è la cella del robot, e se è
+      bloccata andarne al centro vorrebbe dire avvicinarsi all'ostacolo: l'esplorazione quindi non cambia (da
+      verificare con la serie delle 17 prove). Tutti i percorsi partono da una funzione sola, che riceve scostamento e
+      "dal primo punto";
+    - **asse e segno**: l'asse si calcola nel primo job della pulizia; finché non c'è, "pulizia attiva" è falsa, così
+      il segno delle metà non usa l'asse provvisorio;
     - **spazzole e aspirazione** (deciso 2026-10-28): le comanda la navigazione direttamente (`drv_spazzole`,
       `drv_aspirazione`), accese nella pulizia e spente in sblocco, attesa, guasto e riposo; il driver si chiama solo
       quando lo stato cambia. Anche la **spazzola laterale** è da considerare montata (la monterà l'utente);
