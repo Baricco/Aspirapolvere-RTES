@@ -78,8 +78,9 @@ typedef struct {
     // a FINE_GRID_MAX_SCORE che ne indica la probabilità che sia occupata
     int8_t fine_grid[FINE_MAP_CELL_NUMBER * FINE_MAP_CELL_NUMBER];
 
-    // numero di celle fini occupate entro il raggio di ingrossamento per ogni cella della griglia di navigazione
-    uint8_t num_occupied_fine_cells[NAV_MAP_CELL_NUMBER * NAV_MAP_CELL_NUMBER];
+    // numero di celle fini occupate entro il raggio di ingrossamento per ogni quadrante di una cella della griglia di navigazione
+    // 1 contatore per ogni cella fine all'interno del quadrante della cella di navigazione
+    uint8_t num_occupied_fine_cells[4][NAV_MAP_CELL_NUMBER * NAV_MAP_CELL_NUMBER];
 
     // numero di celle fini già viste per ogni cella della griglia di navigazione
     uint8_t num_observed_fine_cells[NAV_MAP_CELL_NUMBER * NAV_MAP_CELL_NUMBER];
@@ -100,6 +101,41 @@ typedef struct {
 
 // stato del task di mappatura
 static mapping_state_t map_state;
+
+
+
+// funzione helper che prende l'indice di una cella della mappa di navigazione
+// e restituisce la bit mask con i quadranti bloccati e lo stato a 0
+static uint8_t calc_nav_cell_bitmask(uint16_t index) {
+    
+    // Inizializza la bitmask a 0
+    uint8_t bitmask = 0;
+    
+    // scorri tutti i quadranti
+    for (int q = 0; q < 4; q++) {
+        // se un quadrante ha una delle celle fini bloccate al suo interno
+        if (map_state.num_occupied_fine_cells[q][index] != 0) {
+            // metti a 1 il bit corrispondente nella bitmask
+            bitmask |= NAV_CELL_QUAD[q];
+        }
+    }
+
+    // shift di 4 a dx per fare il trick qui sotto
+    bitmask >>= 4;
+
+    // Questo è un modo assolutamente intuitivo e facile da leggere per indicare
+    // che sono bloccate due celle in diagonale (9 = 1001; 6 = 0110)
+    if (bitmask == 9 || bitmask == 6) {
+        // Se sono bloccate solo due celle in diagonale, blocca anche una terza cella
+        // in questo modo il robot non vede come libera la strada che connette i due quadranti passando per il centro
+        bitmask |= 3;       // altro metodo simpatico sempre sulla stessa linea per bloccare le due celle in alto (quindi forzando il blocco di una terza cella)   
+    }
+
+    // rimettiamo a posto la bitmask
+    bitmask <<= 4;
+
+    return bitmask;
+}
 
 uint32_t read_nav_map(uint8_t *navigation_map) {
     
@@ -147,10 +183,10 @@ int init_mapping(void) {
     // in questo modo nel calcolo del percorso del task di navigazione
     // non ci sono problemi ai bordi della mappa
     for (int i = 0; i < NAV_MAP_CELL_NUMBER; i++) {
-        navigation_map_data.navigation_grid[i] = NAV_CELL_BLOCKED;
-        navigation_map_data.navigation_grid[((NAV_MAP_CELL_NUMBER - 1) << 8) | i] = NAV_CELL_BLOCKED;
-        navigation_map_data.navigation_grid[i << 8] = NAV_CELL_BLOCKED;
-        navigation_map_data.navigation_grid[(i << 8) | (NAV_MAP_CELL_NUMBER - 1)] = NAV_CELL_BLOCKED;
+        navigation_map_data.navigation_grid[i] = NAV_CELL_BLOCKED | NAV_CELL_QUAD_MASK;
+        navigation_map_data.navigation_grid[((NAV_MAP_CELL_NUMBER - 1) << 8) | i] = NAV_CELL_BLOCKED | NAV_CELL_QUAD_MASK;
+        navigation_map_data.navigation_grid[i << 8] = NAV_CELL_BLOCKED | NAV_CELL_QUAD_MASK;
+        navigation_map_data.navigation_grid[(i << 8) | (NAV_MAP_CELL_NUMBER - 1)] = NAV_CELL_BLOCKED | NAV_CELL_QUAD_MASK;
     }
 
     // aumenta il numero di versione, per segnalare che sono state fatte delle modifiche
@@ -227,17 +263,21 @@ static void update_occupied_cells(const int fine_x, const int fine_y, const int 
             // calcola il navigation index, una sola volta
             uint16_t nav_index = (nav_y << 8) | nav_x;
 
-            // calcola il centro della cella corrente in metri
-            double cur_x_mt, cur_y_mt;
-            nav_index_to_coord(nav_index, &cur_x_mt, &cur_y_mt);
+            // scorri i 4 quadranti della cella corrente, nell'ordine di NAV_CELL_QUAD
+            for (int quad = 0; quad < 4; quad++) {
 
-            // calcola la distanza tra la cella di riferimento e quella corrente
-            double dist = hypot(fine_x_mt - cur_x_mt, fine_y_mt - cur_y_mt);
+                // calcola il centro del quadrante corrente in metri
+                double quad_x_mt, quad_y_mt;
+                quad_to_coord(nav_index, NAV_CELL_QUAD[quad], &quad_x_mt, &quad_y_mt);
 
-            // se la distanza è <= FINE_CELL_INFLATION_RADIUS * FINE_MAP_CELL_SIZE
-            //  aumenta il numero di celle occupate della cella corrente
-            if (dist <= FINE_CELL_INFLATION_RADIUS * FINE_MAP_CELL_SIZE) 
-                map_state.num_occupied_fine_cells[nav_index] += value;
+                // calcola la distanza tra la cella di riferimento e il centro del quadrante
+                double dist = hypot(fine_x_mt - quad_x_mt, fine_y_mt - quad_y_mt);
+
+                // se la distanza è <= FINE_CELL_INFLATION_RADIUS * FINE_MAP_CELL_SIZE
+                //  aumenta il numero di celle occupate del quadrante corrente
+                if (dist <= FINE_CELL_INFLATION_RADIUS * FINE_MAP_CELL_SIZE)
+                    map_state.num_occupied_fine_cells[quad][nav_index] += value;
+            }
         }
     }
 }
@@ -600,7 +640,8 @@ void job_mapping(void *arg) {
 
     // scorri le modifiche proposte dal task di navigazione e applicale alla mappa
     for (uint32_t i = map_state.last_closed_num; i < closed_cells.num; i++) {
-        navigation_map_data.navigation_grid[closed_cells.cells[i % CLOSED_CELLS_MAX]] = NAV_CELL_TOO_NARROW;
+        uint16_t cur_idx = closed_cells.cells[i % CLOSED_CELLS_MAX];
+        navigation_map_data.navigation_grid[cur_idx] = set_nav_cell_state(navigation_map_data.navigation_grid[cur_idx], NAV_CELL_TOO_NARROW);
         hasChanged = true;
     }
 
@@ -615,25 +656,30 @@ void job_mapping(void *arg) {
             // ricava l'indice della cella attuale
             int cur_nav_index = cur_nav_y << 8 | cur_nav_x;
 
-            // ignora le celle appartenenti a zone proibite
-            if (navigation_map_data.navigation_grid[cur_nav_index] == NAV_CELL_FORBIDDEN || navigation_map_data.navigation_grid[cur_nav_index] == NAV_CELL_TOO_NARROW) continue;
+            // Salva lo stato della cella corrente
+            uint8_t cur_cell_state = get_nav_cell_state(navigation_map_data.navigation_grid[cur_nav_index]);
+
+            // Salva la bitmask della cella corrente
+            uint8_t cur_cell_mask = calc_nav_cell_bitmask(cur_nav_index);
 
             // prossimo stato da assegnare alla cella corrente
             mapping_nav_cell_state next_state;
 
-            // se c'è anche solo una cella fine occupata, imposta tutta la cella di navigazione 
-            // che la contiene come occupata
-            if (map_state.num_occupied_fine_cells[cur_nav_index] > 0) next_state = NAV_CELL_BLOCKED;
+            // Se la cella è proibita o troppo stretta, next_state è lo stato attuale
+            if (cur_cell_state == NAV_CELL_FORBIDDEN || cur_cell_state == NAV_CELL_TOO_NARROW) next_state = cur_cell_state;
+            // Se la cella ha la bitmask tutta a 1, allora next_state è NAV_CELL_BLOCKED
+            else if (cur_cell_mask == NAV_CELL_QUAD_MASK) next_state = NAV_CELL_BLOCKED;
             // altrimenti, se almeno UNKNOWN_CELL_THRESHOLD sono state osservate, segnala come libera
             else if (map_state.num_observed_fine_cells[cur_nav_index] >= UNKNOWN_CELL_THRESHOLD) next_state = NAV_CELL_FREE;
             // altrimenti segnala come sconosciuta
             else next_state = NAV_CELL_UNKNOWN;
             
 
-            // Se il prossimo stato è diverso da quello attuale, imposta hasChanged a true
+            // Se il prossimo stato è diverso da quello attuale, o se la bitmask
+            // è cambiata, allora imposta hasChanged a true
             // e assegna il nuovo stato alla cella della griglia di navigazione
-            if (next_state != navigation_map_data.navigation_grid[cur_nav_index]) {
-                navigation_map_data.navigation_grid[cur_nav_index] = next_state;
+            if ((next_state | cur_cell_mask) != navigation_map_data.navigation_grid[cur_nav_index]) {
+                navigation_map_data.navigation_grid[cur_nav_index] = next_state | cur_cell_mask;
                 hasChanged = true;
             }
             

@@ -328,13 +328,24 @@ I task dell'esame li scrive l'utente da solo, sopra un framework e un driver pre
     guarda solo il centro della cella, cioè controlla le posizioni del robot ogni 20 cm. Cucina del simulatore
     (modello con la geometria vera, 2,5 cm di margine): il robot raggiunge il **19%** del pavimento che potrebbe
     toccare; la mappa vera dell'esplorazione coincide con il modello, quindi è la regola, non la mappatura.
-    - **byte della cella**: 4 bit bassi = stato (i 5 valori di oggi; un bit resta libero), 4 bit alti = **4 punti a
-      ±5 cm dal centro** lungo x e y (bit 4 + k, k = 2 × "y alta" + "x alta"), cioè un reticolo di punti a 10 cm.
-      La maschera vale solo nelle celle libere (0 nelle altre). Stessa memoria (64 KB), stessa copia, stesso file;
-    - **punto libero** = nessuna cella fine occupata entro 20 cm (la regola di oggi, applicata al punto invece che al
-      centro); **cella libera** = almeno un punto libero e almeno 8 celle fini osservate; **bloccata** = nessun punto
-      libero; altrimenti sconosciuta. Se restano liberi solo due punti in diagonale (non collegati fra loro) la
-      mappatura tiene solo quello col bit più basso. La mappatura tiene 4 contatori per cella (256 KB) al posto di uno;
+    - **byte della cella** (convenzione dell'utente, commenti in `mapping.h`): 4 bit bassi = stato (i 5 valori di
+      oggi; un bit resta libero), 4 bit alti = **le 4 sottocelle da 10 cm, bit a 1 = sottocella bloccata** (simboli
+      `NAV_CELL_TOP_LEFT` bit 4, `NAV_CELL_TOP_RIGHT` 5, `NAV_CELL_BOTTOM_LEFT` 6, `NAV_CELL_BOTTOM_RIGHT` 7; alto =
+      y più alta, destra = x più alta). "Bloccata" ha il significato di oggi per la cella intera: il centro del
+      robot non può stare nel centro della sottocella (c'è una cella fine occupata entro 20 cm), non "dentro c'è un
+      ostacolo". I centri delle sottocelle, a ±5 cm dal centro della cella, fanno un reticolo di punti a 10 cm. I bit
+      si scrivono **in tutte le celle** (in una bloccata sono tutti a 1); una cella **tutta libera vale 1 come oggi**,
+      quindi i confronti di oggi con `NAV_CELL_FREE` restano giusti e vogliono dire "tutta libera", mentre i confronti
+      con gli altri stati passano dalla funzione che legge lo stato. Chiudere una cella (troppo stretta) cambia solo
+      lo stato. Stessa memoria (64 KB), stessa copia, stesso file;
+    - **sottocella libera** = nessuna cella fine occupata entro 20 cm dal suo centro (la regola di oggi, applicata
+      ai 4 centri invece che al centro della cella); **cella libera** = almeno una sottocella libera e almeno 8 celle
+      fini osservate; **bloccata** = tutte e 4 bloccate; altrimenti sconosciuta. Se restano libere solo due
+      sottocelle in diagonale (non collegate fra loro) la mappatura blocca anche una delle due. La mappatura
+      tiene 4 contatori per cella (256 KB) al posto di uno, e ricalcola i bit anche nelle celle proibite e troppo
+      strette, senza toccarne lo stato. Scartato il bit "dentro c'è un ostacolo": la navigazione dovrebbe calcolare
+      le distanze da sola a ogni ricerca, e dai quadrati da 10 cm invece che dalle celle fini da 5 cm, quindi con
+      4–8 cm di margine in più (modello della cucina, `tools/prove-nav/modello.py`: 23% / 13% contro 66% / 28%);
     - **ricerca**: una sola, sulle celle da 20 cm come oggi. Passo da A a B: se tutte e due hanno i 4 punti liberi si
       passa (caso grossolano, quasi tutta la stanza), altrimenti serve una **porta**: una coppia di punti affacciati
       liberi (B a est: un punto "x alta" di A con il punto "x bassa" di B alla stessa y). Scartate le due ricerche
@@ -354,6 +365,20 @@ I task dell'esame li scrive l'utente da solo, sopra un framework e un driver pre
       quinto punto non aggiunge niente; i punti da 5 cm in una cella possono fare 9113 figure diverse, che in un byte
       non stanno. La parte sinistra della cucina resta dietro passaggi da ~45 cm: 5 cm di gioco per il centro del
       robot, quanto una cella fine, quindi si apre o no col rumore (il margine va discusso a parte).
+  - **gambe sottili che lampeggiano** (misurato 2026-10-30, da correggere dopo la mappa a due livelli): con il
+    registratore della copia di prova (`tools/prove-nav/sonda_mappa.c`, `analizza_mappa.py`), cucina, 4 minuti.
+    Misure e posizione vanno bene: 800 celle fini occupate su 804 toccano un ostacolo vero, 1 fantasma; nessuna
+    delle 182 celle di navigazione bloccate è senza un ostacolo vero entro 20 cm (più l'arrotondamento). Ma le celle
+    delle gambe (3 cm in una cella da 5) passano la soglia fino a ~3 volte al secondo: un colpo a giro (+30) contro i
+    raggi che passano accanto nella stessa cella (−10 ciascuno), punteggi fra 20 e 80 attorno alla soglia 50. Alla
+    fine 8 gambe su 20 sparite (una nona mai vista), 314 celle di navigazione su 340 cambiate almeno una volta, e
+    **28 celle libere con il centro a meno di 17,45 cm da una gamba** (il robot la urta, lo salva il bumper).
+    Correzioni da provare sulla copia di prova: isteresi (occupata finché non scende molto sotto la soglia, per
+    esempio sotto 0) e/o raggi che passano più leggeri (−3/−5 invece di −10, costo: un oggetto spostato sparisce
+    più lentamente). Va fatta prima di giudicare i passaggi da 45 cm.
+  - **memoria bloccata sul PC** (2026-10-30): il programma blocca in RAM 7,97 MB e il limite per i normali utenti è
+    8 MB; con MCL_FUTURE i thread creati dopo non partivano più (il `main` esce senza messaggio). `rt_init` ora,
+    se non è root e il limite c'è, blocca solo la memoria di adesso (sul robot, root, tutto come prima).
 
 ## Ancora da decidere
 - **Mappa e navigazione, punti aperti** (2026-10-13): ingombro della base, aggancio alla base nel driver (passaggio

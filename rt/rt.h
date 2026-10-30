@@ -126,6 +126,11 @@ typedef struct {
  * (mlockall): un task RT non deve mai fermarsi per un page fault, che
  * costerebbe da microsecondi a millisecondi. In un RTOS la memoria è
  * sempre in RAM. Ritorna 0 oppure un codice errno.
+ * Eccezione per il PC: se il processo non è root e la memoria bloccabile ha
+ * un limite (sul PC 8 MB per i normali utenti), blocca solo la memoria di
+ * adesso. Con anche quella futura gli stack dei thread creati dopo si
+ * sommerebbero fino a passare il limite, e pthread_create fallirebbe. Sul
+ * PC senza root manca anche SCHED_FIFO, quindi i tempi non valgono comunque.
  */
 int rt_init(void);
 

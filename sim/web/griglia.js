@@ -3,9 +3,9 @@
 // dell'odometria del programma (la posizione vera del robot quando è partito). Griglia: 256 x 256 celle da 0,20 m,
 // cella 128 = origine, indice = y * 256 + x (tasks/vacuum/mapping.h). Byte della cella: 4 bit bassi = stato (0 sconosciuta,
 // 1 libera, 2 bloccata, 3 proibita, 4 troppo stretta, chiusa dalla navigazione dopo un passaggio fallito), 4 bit alti =
-// i 4 punti a +-5 cm dal centro (bit 4 + k, k = 2 * "y alta" + "x alta"), solo nelle celle libere. Ogni cella si
-// disegna come 2 x 2 pixel, uno per punto: in una cella libera i punti non liberi sono rossi. Una cella libera con la
-// maschera a zero (mappa di prima) si disegna tutta libera.
+// le 4 sottocelle da 10 cm, a 1 se bloccate (bit 4 in alto a sinistra, 5 in alto a destra, 6 in basso a sinistra,
+// 7 in basso a destra; alto = y più alta), in tutte le celle: una cella tutta libera vale 1. Ogni cella si
+// disegna come 2 x 2 pixel, uno per sottocella: in una cella libera le sottocelle bloccate sono rosse.
 "use strict";
 const Griglia = (() => {
   const N = 256, CELLA = 0.2, TESTA = 128;
@@ -31,12 +31,12 @@ const Griglia = (() => {
                 libere: 0, parziali: 0, bloccate: 0, proibite: 0, strette: 0 };
     const px = img.data;
     for (let i = 0; i < N * N; i++) {
-      const v = b[TESTA + i] & 15, punti = b[TESTA + i] >> 4, x = i % N, y = (i / N) | 0;
-      if (v === 1) { d.libere++; if (punti && punti !== 15) d.parziali++; }
+      const v = b[TESTA + i] & 15, bloccate = b[TESTA + i] >> 4, x = i % N, y = (i / N) | 0;
+      if (v === 1) { d.libere++; if (bloccate) d.parziali++; }
       else if (v === 2) d.bloccate++; else if (v === 3) d.proibite++; else if (v === 4) d.strette++;
-      for (let k = 0; k < 4; k++) {        // riga dell'immagine = y della griglia (la si capovolge disegnando)
-        const p = ((2 * y + (k >> 1)) * 2 * N + 2 * x + (k & 1)) * 4;
-        const c = v === 1 && punti && !(punti >> k & 1) ? COLORI[2] : COLORI[v];
+      for (let k = 0; k < 4; k++) {        // k = bit - 4; riga dell'immagine = y della griglia (la si capovolge disegnando)
+        const p = ((2 * y + (k < 2 ? 1 : 0)) * 2 * N + 2 * x + (k & 1)) * 4;
+        const c = v === 1 && (bloccate >> k & 1) ? COLORI[2] : COLORI[v];
         if (c) { px[p] = c[0]; px[p + 1] = c[1]; px[p + 2] = c[2]; px[p + 3] = c[3]; } else px[p + 3] = 0;
       }
     }

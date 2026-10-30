@@ -9,9 +9,17 @@
 #include <stdio.h>
 #include <string.h>
 #include <sys/mman.h>
+#include <sys/resource.h>
+#include <unistd.h>
 
 int rt_init(void)
 {
+	struct rlimit l;
+	if (geteuid() != 0 && getrlimit(RLIMIT_MEMLOCK, &l) == 0 && l.rlim_cur != RLIM_INFINITY) {
+		fprintf(stderr, "rt: non root e memoria bloccabile limitata a %llu KB: blocco solo la memoria di adesso, "
+		        "non quella futura (va bene solo sul PC)\n", (unsigned long long)l.rlim_cur / 1024);
+		return mlockall(MCL_CURRENT) != 0 ? errno : 0;
+	}
 	if (mlockall(MCL_CURRENT | MCL_FUTURE) != 0)
 		return errno;
 	return 0;

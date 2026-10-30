@@ -420,7 +420,7 @@ static void close_cell(uint16_t cell) {
     scambio_scrivi(&double_buffer_2, &nav_state.closed_cells);
 
     // aggiorna anche la copia locale della mappa
-    nav_state.map[cell] = NAV_CELL_TOO_NARROW;
+    nav_state.map[cell] = set_nav_cell_state(nav_state.map[cell], NAV_CELL_TOO_NARROW);
 }
 
 // funzione helper per calcolare il tempo passato da un certo istante ad adesso
@@ -466,6 +466,73 @@ static inline void search_queue_flush(void) {
     nav_state.s_q.tail = 0;
 }
 
+// funzione helper che prende l'indice di una cella e restituisce true se è totalmente libera
+// quindi se lo stato è libero e la bitmask è tutta a 0
+static inline bool is_nav_cell_completely_free(const uint16_t cell) {
+    return nav_state.map[cell] == NAV_CELL_FREE;
+}
+
+// funzione helper che prende l'indice di una cella e restituisce true se ha stato NAV_CELL_FREE
+// questa funzione potrebbe restituire true anche se la cella è solo parzialmente libera guardando la bitmask
+static inline bool is_nav_cell_free(const uint16_t cell) {
+    return get_nav_cell_state(nav_state.map[cell]) == NAV_CELL_FREE;
+}
+
+// funzione helper che verifica se due celle vicine hanno due quadranti "di contatto" liberi
+// riempiendo i due quadranti passati per puntatore con i quadranti liberi in contatto
+static inline bool get_contact_quads(const uint16_t cellA, const uint16_t cellB, uint8_t *quadA, uint8_t *quadB) {
+
+    // calcola la differenza tra l'indice della cella B e l'indice della cella A
+    int diff = cellB - cellA;
+
+    // le due coppie di quadranti affacciati, una per ogni metà del lato in comune fra A e B:
+    // in ogni coppia il primo quadrante è di A e il secondo è di B
+    uint8_t pairs[2][2];
+
+    // se le celle sono adiacenti (se non è così chi ha chiamato la funzione non ha capito cosa fa)
+    // le differenze possono essere solo +-1 o +-NAV_MAP_CELL_NUMBER, da cui si ricavano le 4 direzioni dell'una rispetto all'altra
+    switch (diff) {
+        case 1:                         // la cella B è alla destra di A
+            // i quadranti di destra di A toccano quelli di sinistra di B alla stessa altezza
+            pairs[0][0] = NAV_CELL_TOP_RIGHT;       pairs[0][1] = NAV_CELL_TOP_LEFT;
+            pairs[1][0] = NAV_CELL_BOTTOM_RIGHT;    pairs[1][1] = NAV_CELL_BOTTOM_LEFT;
+        break;
+
+        case -1:                        // la cella B è alla sinistra di A
+            // i quadranti di sinistra di A toccano quelli di destra di B alla stessa altezza
+            pairs[0][0] = NAV_CELL_TOP_LEFT;        pairs[0][1] = NAV_CELL_TOP_RIGHT;
+            pairs[1][0] = NAV_CELL_BOTTOM_LEFT;     pairs[1][1] = NAV_CELL_BOTTOM_RIGHT;
+        break;
+
+        case NAV_MAP_CELL_NUMBER:       // la cella B è sopra A
+            // i quadranti in alto di A toccano quelli in basso di B dalla stessa parte
+            pairs[0][0] = NAV_CELL_TOP_LEFT;        pairs[0][1] = NAV_CELL_BOTTOM_LEFT;
+            pairs[1][0] = NAV_CELL_TOP_RIGHT;       pairs[1][1] = NAV_CELL_BOTTOM_RIGHT;
+        break;
+
+        case -NAV_MAP_CELL_NUMBER:      // la cella B è sotto A
+            // i quadranti in basso di A toccano quelli in alto di B dalla stessa parte
+            pairs[0][0] = NAV_CELL_BOTTOM_LEFT;     pairs[0][1] = NAV_CELL_TOP_LEFT;
+            pairs[1][0] = NAV_CELL_BOTTOM_RIGHT;    pairs[1][1] = NAV_CELL_TOP_RIGHT;
+        break;
+
+    default:                            // A e B non sono adiacenti
+        return false;
+    }
+
+    // cerca la prima coppia con tutti e due i quadranti liberi (bit del quadrante a 0 --> libero)
+    for (int i = 0; i < 2; i++) {
+        if ((nav_state.map[cellA] & pairs[i][0]) == 0 && (nav_state.map[cellB] & pairs[i][1]) == 0) {
+            *quadA = pairs[i][0];
+            *quadB = pairs[i][1];
+            return true;
+        }
+    }
+
+    // nessuna coppia affacciata libera: da A non si può passare a B
+    return false;
+}
+
 
 // definizione dell'enum dei possibili obiettivi della funzione di ricerca
 typedef enum {
@@ -485,7 +552,7 @@ static bool cell_is_goal(const nav_search_goal_t goal, const uint16_t cell, cons
             if (nav_state.map[cell] == NAV_CELL_FREE) {     // se la cella in cui ci troviamo è libera
                 // controllo le 4 celle adiacenti alla cella corrente, se sono sconosciute,
                 // significa che cell è una cella di frontiera
-                for (int i = 0; i < 4; i++) if (nav_state.map[cell + NEIGHBOR_SHIFT[i]] == NAV_CELL_UNKNOWN) return true;
+                for (int i = 0; i < 4; i++) if (get_nav_cell_state(nav_state.map[cell + NEIGHBOR_SHIFT[i]]) == NAV_CELL_UNKNOWN) return true;
             }
             break;
         case GOAL_DIRTY:
@@ -496,7 +563,7 @@ static bool cell_is_goal(const nav_search_goal_t goal, const uint16_t cell, cons
             return cell == goal_cell;
             break;
         case GOAL_FREE:
-            return nav_state.map[cell] == NAV_CELL_FREE;
+            return is_nav_cell_free(cell);
             break;
         default:                // se entriamo in questo caso c'è un errore
             return false;       // ritorniamo false nel dubbio
@@ -524,15 +591,17 @@ static bool cell_can_enter(const uint16_t cur_cell, const uint16_t next_cell, co
     if (next_cell_x == 0 || next_cell_x == NAV_MAP_CELL_NUMBER - 1) return false;   // bordo destro e sinistro
     if (next_cell_y == 0 || next_cell_y == NAV_MAP_CELL_NUMBER - 1) return false;   // bordo superiore e inferiore
 
+    uint8_t quad_corridor1, quad_corridor2;
+
     // se next_cell è libera, può entrare
-    if (nav_state.map[next_cell] == NAV_CELL_FREE) return true;
+    if (is_nav_cell_free(next_cell) && (!is_nav_cell_free(cur_cell) || get_contact_quads(cur_cell, next_cell, &quad_corridor1, &quad_corridor2))) return true;
 
     // se siamo qui significa che next_cl, ferell è proibita, bloccata o sconosciuta
     // in questo caso si può passare solo se:
     // 1. next_cell non è sconosciuta
     // 2. cur_cell è bloccata o proibita (da una cella libera non puoi passare per una bloccata)
     // 3. se next_cell si trova entro ESCAPE_MAX_CELLS da start_cell
-    if (nav_state.map[next_cell] != NAV_CELL_UNKNOWN && nav_state.map[cur_cell] != NAV_CELL_FREE && nav_state.map[next_cell] != NAV_CELL_TOO_NARROW) {
+    if (get_nav_cell_state(nav_state.map[next_cell]) != NAV_CELL_UNKNOWN && !is_nav_cell_free(cur_cell) && get_nav_cell_state(nav_state.map[next_cell]) != NAV_CELL_TOO_NARROW) {
         
         // ricava x e y di start_cell dall'indice
         uint16_t start_cell_y = start_cell >> 8;
@@ -560,7 +629,7 @@ static inline double calc_speed(const double max_v) {
     // se la cella obiettivo è una cella sconosciuta, si moltiplica la velocità
     // per UNKNOWN_SPEED_FACTOR, ottenendo la velocità finale
 
-    return MIN(max_v, CRUISING_SPEED) * (nav_state.map[nav_state.path.cells[nav_state.path_idx]] != NAV_CELL_FREE ? UNKNOWN_SPEED_FACTOR : 1);
+    return MIN(max_v, CRUISING_SPEED) * (!is_nav_cell_free(nav_state.path.cells[nav_state.path_idx]) ? UNKNOWN_SPEED_FACTOR : 1);
 
 }
 
@@ -771,7 +840,7 @@ static uint16_t next_turning_point(void) {
     if (nav_state.path.length == 0 || cur_idx >= last_idx) return cur_idx;
 
     // Controlla se la posizione attuale è in una cella non libera o se non bisogna fare tagli al percorso (center_to_center)
-    if (nav_state.map[nav_state.path.cells[nav_state.path_idx]] != NAV_CELL_FREE || nav_state.center_to_center) {
+    if (!is_nav_cell_free(nav_state.path.cells[nav_state.path_idx]) || nav_state.center_to_center) {
         // se il robot si trova in una cella non libera, vai alla prossima cella
         // nel percorso, senza fare tagli
         return cur_idx + 1;
@@ -928,7 +997,7 @@ static bool append_unknown_neighbor(void) {
         int cur_neighbor_idx = cur_border + NEIGHBOR_SHIFT[i];
         
         // Controlla se il vicino i-esimo è sconosciuto
-        if (nav_state.map[cur_neighbor_idx] == NAV_CELL_UNKNOWN) {
+        if (get_nav_cell_state(nav_state.map[cur_neighbor_idx]) == NAV_CELL_UNKNOWN) {
             
             // Se sì, aggiungilo al percorso
             nav_state.path.cells[nav_state.path.length++] = cur_neighbor_idx;
@@ -951,7 +1020,7 @@ static void resume_after_stop(safety_alarm_t cur_alarm, movement_position_data_t
     uint16_t robot_index = coord_to_nav_index(cur_pos.x, cur_pos.y);
 
     // se la cella in cui si trova il robot non è libera
-    if (nav_state.map[robot_index] != NAV_CELL_FREE) {
+    if (!is_nav_cell_free(robot_index)) {
 
         // manda l'obiettivo di fermarsi al robot
         send_objective(OBJ_STOP, 0, 0, 0, 0, 0);
@@ -1172,7 +1241,7 @@ void job_navigation(void *arg) {
 
         // rimetti nella copia le celle chiuse, che la mappatura potrebbe non aver ancora ricevuto
         for (uint32_t i = 0; i < MIN(nav_state.closed_cells.num, CLOSED_CELLS_MAX); i++) {
-            nav_state.map[nav_state.closed_cells.cells[i]] = NAV_CELL_TOO_NARROW;
+            nav_state.map[nav_state.closed_cells.cells[i]] = set_nav_cell_state(nav_state.map[nav_state.closed_cells.cells[i]], NAV_CELL_TOO_NARROW);
         }
 
     }
@@ -1263,10 +1332,10 @@ void job_navigation(void *arg) {
             // quest'operazione verrà fatta poi dal task di mappatura, ma siccome 
             // è possibile che il task di navigazione parta prima e riceva una mappa
             // non aggiornata, lo segnamo anche nella mappa privata di questo task
-            if (nav_state.map[robot_index] == NAV_CELL_UNKNOWN) nav_state.map[robot_index] = NAV_CELL_FREE;
+            if (get_nav_cell_state(nav_state.map[robot_index]) == NAV_CELL_UNKNOWN) nav_state.map[robot_index] = NAV_CELL_FREE;
             
             // se il robot si trova in una cella non libera
-            if (nav_state.map[robot_index] != NAV_CELL_FREE) {
+            if (!is_nav_cell_free(robot_index)) {
 
                 go_to_nearest_free_cell(cur_alarm, cur_pos, robot_index);
 
@@ -1315,7 +1384,7 @@ void job_navigation(void *arg) {
             uint16_t robot_cell = coord_to_nav_index(cur_pos.x, cur_pos.y);
 
             // se la cella del robot non è libera, vai alla cella libera più vicina ed esci
-            if (nav_state.map[robot_cell] != NAV_CELL_FREE) {
+            if (!is_nav_cell_free(robot_cell)) {
                 go_to_nearest_free_cell(cur_alarm, cur_pos, robot_cell);
                 break;
             }

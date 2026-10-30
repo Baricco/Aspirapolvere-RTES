@@ -30,7 +30,8 @@ def stato():
 for _ in range(100):
     if stato(): break
     time.sleep(0.1)
-env = dict(os.environ, RTES_GD32='build/sim/gd32', RTES_LIDAR='build/sim/lidar')
+env = dict(os.environ, RTES_GD32='build/sim/gd32', RTES_LIDAR='build/sim/lidar',
+           RTES_SONDA=os.path.join(D, f'sonda_{tag}.bin'))   # registratore della mappatura (sonda_mappa.c)
 fout = os.path.join(D, f'prog_{tag}.log')
 prog = subprocess.Popen(['build/host/osserva', '--uscita', 'build/sim/mappa_robot', '--', 'taskset', '-c', '0-3',
                          os.path.join(D, 'vacdbg')], env=env, stdout=open(fout, 'w'), stderr=subprocess.STDOUT,
@@ -74,8 +75,8 @@ cont = ''
 if os.path.exists('build/sim/mappa_robot'):
     g = open('build/sim/mappa_robot', 'rb').read()
     if len(g) >= 128 + 65536 and g[:4] == b'RTNM':
-        gg = g[128:128 + 65536]; st = [v & 15 for v in gg]   # 4 bit bassi = stato, 4 alti = i 4 punti (mapping.h)
-        parz = sum(1 for v in gg if v & 15 == 1 and v >> 4 not in (0, 15))
+        gg = g[128:128 + 65536]; st = [v & 15 for v in gg]   # 4 bit bassi = stato, 4 alti = sottocelle bloccate (mapping.h)
+        parz = sum(1 for v in gg if v & 15 == 1 and v >> 4)
         cont = f"libere {st.count(1)} (in parte {parz}) bloccate {st.count(2)} troppo strette {st.count(4)}"
 mancate = re.findall(r'(task_\w+).*\n\s+job \d+, deadline mancate (\d+)', open(fout, errors='replace').read())
 fin = nav[-1] if nav else None
