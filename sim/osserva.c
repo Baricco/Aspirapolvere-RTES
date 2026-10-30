@@ -19,7 +19,7 @@
  *    12   uint32  versione della mappa letta nel programma
  *    16   uint32  letture riuscite
  *    20   char[108] messaggio (testo, terminato da 0)
- *   128   uint8[65536] griglia di navigazione (enum mapping_nav_cell_state)
+ *   128   uint8[65536] griglia di navigazione (4 bit bassi = stato, mapping_nav_cell_state; 4 alti = i 4 punti, mapping.h)
  *
  * Uso: build/host/osserva [--uscita FILE] [--simbolo NOME] [--ogni-ms N] -- programma [argomenti...]
  * Ctrl+C arriva al programma (che si ferma da solo e stampa le statistiche); osserva aspetta che finisca ed esce con

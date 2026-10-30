@@ -166,7 +166,8 @@ I task dell'esame li scrive l'utente da solo, sopra un framework e un driver pre
       chiusa è quella sbagliata e il robot ci riprova. Dopo 36 sblocchi crede di essere 2,85 m più in là, fuori dalla
       stanza; la mappa (lidar inserito con la posa sbagliata) e la maschera della copertura si spostano, e il robot
       ripulisce zone già pulite. Cucina e camera non hanno mobili a quell'altezza;
-    - **PROSSIMO PASSO (deciso 2026-10-29): l'allineamento delle scansioni** nella mappatura, che corregge la
+    - **PROSSIMO PASSO (deciso 2026-10-29; dal 2026-10-30 viene dopo la mappa a due livelli, vedi la mappatura più
+      sotto): l'allineamento delle scansioni** nella mappatura, che corregge la
       posizione dell'odometria con il lidar (e dà un rilevatore di incastro: encoder che dicono "mi muovo" e scena
       ferma). Con la posizione giusta le celle chiuse dopo gli incastri sono quelle giuste e il bordo della credenza
       si chiude dopo pochi tentativi. Va progettato prima di scrivere il codice, come BA\*;
@@ -321,7 +322,38 @@ I task dell'esame li scrive l'utente da solo, sopra un framework e un driver pre
       l'allineamento delle scansioni (già nel piano, vedi la mappatura in cima) lo spostamento scende alla precisione
       dell'allineamento; la posizione corretta dovrà arrivare anche al moto, che oggi guida con l'odometria;
     - **resta aperto** il caso opposto: passaggi larghi fra ~36 e ~60 cm che la regola "libera" chiude se nessun
-      centro di cella cade nella striscia in cui ci sta il centro del robot.
+      centro di cella cade nella striscia in cui ci sta il centro del robot. Risolto in parte con la mappa a due
+      livelli (sotto).
+  - **mappa a due livelli** (deciso 2026-10-30, da fare prima dell'allineamento delle scansioni): la regola "libera"
+    guarda solo il centro della cella, cioè controlla le posizioni del robot ogni 20 cm. Cucina del simulatore
+    (modello con la geometria vera, 2,5 cm di margine): il robot raggiunge il **19%** del pavimento che potrebbe
+    toccare; la mappa vera dell'esplorazione coincide con il modello, quindi è la regola, non la mappatura.
+    - **byte della cella**: 4 bit bassi = stato (i 5 valori di oggi; un bit resta libero), 4 bit alti = **4 punti a
+      ±5 cm dal centro** lungo x e y (bit 4 + k, k = 2 × "y alta" + "x alta"), cioè un reticolo di punti a 10 cm.
+      La maschera vale solo nelle celle libere (0 nelle altre). Stessa memoria (64 KB), stessa copia, stesso file;
+    - **punto libero** = nessuna cella fine occupata entro 20 cm (la regola di oggi, applicata al punto invece che al
+      centro); **cella libera** = almeno un punto libero e almeno 8 celle fini osservate; **bloccata** = nessun punto
+      libero; altrimenti sconosciuta. Se restano liberi solo due punti in diagonale (non collegati fra loro) la
+      mappatura tiene solo quello col bit più basso. La mappatura tiene 4 contatori per cella (256 KB) al posto di uno;
+    - **ricerca**: una sola, sulle celle da 20 cm come oggi. Passo da A a B: se tutte e due hanno i 4 punti liberi si
+      passa (caso grossolano, quasi tutta la stanza), altrimenti serve una **porta**: una coppia di punti affacciati
+      liberi (B a est: un punto "x alta" di A con il punto "x bassa" di B alla stessa y). Scartate le due ricerche
+      "prima grossolana, poi fine se non trova": costo doppio quando la prima fallisce, e percorsi lunghi che evitano
+      i passaggi stretti finché ce n'è un altro;
+    - **percorso**: a ogni cella si associa un punto (il centro per le celle con 4 punti liberi e per quelle non
+      libere); dopo la ricerca il percorso si allarga con i punti delle porte e, se in una cella si entra e si esce da
+      angoli opposti, il punto di mezzo. Scorciatoie con la linea di vista sul reticolo dei punti da 10 cm (512 × 512).
+      Fra due punti liberi vicini (10 cm) il centro del robot resta ad almeno 19,4 cm dai centri delle celle fini
+      occupate; dentro un quadrato di punti liberi pure;
+    - **pulizia**: una metà cella è percorribile se sono liberi i due punti della sua corsia, e la corsia sta sempre a
+      ±5 cm (sparisce la corsia al centro); la ricerca della cella sporca vuole una metà **percorribile** sporca,
+      altrimenti una metà bloccata resterebbe una meta per sempre. Frontiera: cella libera con una vicina sconosciuta
+      da un lato dove ha un punto affacciato libero. Allineamento dopo un arresto: il punto libero più vicino;
+    - **numeri** (modello della cucina, ostacoli arrotondati alle celle fini "a favore" / mezzo centimetro più
+      prudenti): oggi 19% / 19%, mappa a due livelli **66% / 28%**, maschera separata da 5 cm 81% / 29%. Il centro come
+      quinto punto non aggiunge niente; i punti da 5 cm in una cella possono fare 9113 figure diverse, che in un byte
+      non stanno. La parte sinistra della cucina resta dietro passaggi da ~45 cm: 5 cm di gioco per il centro del
+      robot, quanto una cella fine, quindi si apre o no col rumore (il margine va discusso a parte).
 
 ## Ancora da decidere
 - **Mappa e navigazione, punti aperti** (2026-10-13): ingombro della base, aggancio alla base nel driver (passaggio
