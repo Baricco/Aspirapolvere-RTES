@@ -101,8 +101,8 @@ if PULIZIA:
               f"sblocchi {sum(1 for n in nav_pul if NOMI[int(n[3])] == 'UNLOCK')}")
         for r in dopo:
             if r[0] == 'PULIZIA':
-                lib, pul, sp = int(r[3]), int(r[5]), int(r[7])
-                print(f"   metà pulite {pul} su {2 * lib} ({100 * pul / max(1, 2 * lib):.1f}%), celle libere con una metà sporca: {sp}")
+                per, pul, sp = int(r[3]), int(r[5]), int(r[7])
+                print(f"   metà percorribili pulite {pul} su {per} ({100 * pul / max(1, per):.1f}%), celle con una metà percorribile sporca: {sp}")
 for e in eventi: print('   EVENTO', e)
 for n in nav:
     if n[2] == n[3] == '0': continue

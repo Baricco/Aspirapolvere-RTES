@@ -36,20 +36,19 @@ static void prova_corsie(void) {
     memset(nav_state.map, NAV_CELL_FREE, sizeof nav_state.map);
     nav_state.strip_axis_x = false;                 /* strisce lungo y: asse laterale x */
     controlla("spostamento laterale, strisce lungo y", calc_clean_lateral_shift(), 1);
-    controlla("corsia 0, vicine libere (mm)", (int)lround(calc_clean_lane_shift(c, 0) * 1000), -50);
-    controlla("corsia 1, vicine libere (mm)", (int)lround(calc_clean_lane_shift(c, 1) * 1000), 50);
+    controlla("corsia 0, vicine libere (mm)", (int)lround(calc_clean_lane_shift(0) * 1000), -50);
+    controlla("corsia 1, vicine libere (mm)", (int)lround(calc_clean_lane_shift(1) * 1000), 50);
     controlla("robot sulla corsia 0", segna(0.05, 0.13), 1);
     controlla("robot sulla corsia 1", segna(0.15, 0.07), 2);
     controlla("robot al centro", segna(0.10, 0.10), 0);
     controlla("robot a 2 cm dalla corsia 0", segna(0.07, 0.10), 1);
     controlla("robot a 2,6 cm dalla corsia 0", segna(0.024, 0.10), 0);
     controlla("lo spostamento in y non conta", segna(0.05, 0.19), 1);
-    nav_state.map[c - 1] = NAV_CELL_BLOCKED;
-    controlla("corsia 0 con la vicina bloccata (mm)", (int)lround(calc_clean_lane_shift(c, 0) * 1000), 0);
-    controlla("robot al centro, vicina 0 bloccata", segna(0.10, 0.10), 1);
+    nav_state.map[c - 1] = NAV_CELL_BLOCKED;        /* la vicina non conta più: le corsie stanno sempre a ±5 cm */
+    controlla("corsia 0 con la vicina bloccata (mm)", (int)lround(calc_clean_lane_shift(0) * 1000), -50);
+    controlla("robot al centro, vicina 0 bloccata", segna(0.10, 0.10), 0);
+    controlla("robot sulla corsia 0, vicina 0 bloccata", segna(0.05, 0.10), 1);
     controlla("robot sulla corsia 1, vicina 0 bloccata", segna(0.15, 0.10), 2);
-    nav_state.map[c + 1] = NAV_CELL_UNKNOWN;
-    controlla("robot al centro, vicine non libere", segna(0.11, 0.10), 3);
     memset(nav_state.map, NAV_CELL_FREE, sizeof nav_state.map);
 
     nav_state.strip_axis_x = true;                  /* strisce lungo x: asse laterale y */
@@ -58,9 +57,8 @@ static void prova_corsie(void) {
     controlla("asse x: robot sulla corsia 1 (y alta)", segna(0.07, 0.15), 2);
     controlla("asse x: lo spostamento in x non conta", segna(0.19, 0.05), 1);
     nav_state.map[c - NAV_MAP_CELL_NUMBER] = NAV_CELL_BLOCKED;
-    controlla("asse x: vicina a y bassa bloccata, robot al centro", segna(0.10, 0.10), 1);
-    nav_state.map[c - 1] = NAV_CELL_BLOCKED;
-    controlla("asse x: la vicina lungo x non conta", (int)lround(calc_clean_lane_shift(c, 1) * 1000), 50);
+    controlla("asse x: vicina a y bassa bloccata, robot al centro", segna(0.10, 0.10), 0);
+    controlla("asse x: corsia 1 (mm)", (int)lround(calc_clean_lane_shift(1) * 1000), 50);
     memset(nav_state.map, NAV_CELL_FREE, sizeof nav_state.map);
 
     nav_state.strip_axis_x = false;                 /* cella (127,127), da -0,2 a 0, centro (-0,1; -0,1) */
@@ -235,9 +233,9 @@ static void prova_gruppo_a(void) {
     controlla("metà del robot: sulla corsia 0", meta_robot(0.07, 0.10), 0);
     controlla("metà del robot: al centro, vince la 0", meta_robot(0.10, 0.10), 0);
     controlla("metà del robot: appena a destra del centro", meta_robot(0.101, 0.10), 1);
-    nav_state.map[I(127, 128)] = NAV_CELL_BLOCKED;      /* corsie a 0 e +0,05 */
-    controlla("metà del robot: corsia 0 al centro, robot a +1 cm", meta_robot(0.11, 0.10), 0);
-    controlla("metà del robot: corsia 0 al centro, robot a +4 cm", meta_robot(0.14, 0.10), 1);
+    nav_state.map[I(127, 128)] = NAV_CELL_BLOCKED;      /* la vicina non conta: corsie sempre a -0,05 e +0,05 */
+    controlla("metà del robot: vicina bloccata, robot a +1 cm", meta_robot(0.11, 0.10), 1);
+    controlla("metà del robot: vicina bloccata, robot a -1 cm", meta_robot(0.09, 0.10), 0);
     nav_state.strip_axis_x = true;                       /* asse laterale y: conta la y */
     memset(nav_state.map, NAV_CELL_FREE, sizeof nav_state.map);
     controlla("metà del robot, asse x: conta la y", meta_robot(0.06, 0.14), 1);
@@ -276,9 +274,11 @@ static void prova_gruppo_b(void) {
     controlla_striscia("fino al muro", 125, 125, 0, 15, 125, 139);
 
     stanza(); for (int y = 125; y <= 135; y++) sporca_meta(125, y, 0);
-    nav_state.map[I(124, 130)] = NAV_CELL_BLOCKED;  /* da y=130 la corsia della metà 0 va al centro */
-    controlla_striscia("si ferma dove la corsia cambia scostamento", 125, 125, 0, 5, 125, 129);
-    controlla_striscia("la striscia dopo parte sulla corsia al centro", 125, 130, 0, 1, 125, 130);
+    nav_state.map[I(124, 130)] = NAV_CELL_BLOCKED;  /* la vicina bloccata non ferma più la striscia */
+    controlla_striscia("la vicina bloccata non conta", 125, 125, 0, 11, 125, 135);
+    nav_state.map[I(125, 130)] = NAV_CELL_FREE | NAV_CELL_BOTTOM_LEFT;  /* corsia della metà 0 bloccata a y=130 */
+    controlla_striscia("si ferma prima della corsia bloccata", 125, 125, 0, 5, 125, 129);
+    controlla_striscia("riparte dopo la corsia bloccata", 125, 131, 0, 5, 125, 135);
 
     stanza(); sporca_meta(125, 125, 0);
     controlla_striscia("una cella sola", 125, 125, 0, 1, 125, 125);
@@ -292,12 +292,34 @@ static void prova_gruppo_b(void) {
     nav_state.strip_axis_x = false;
 }
 
+/* ---- mappa a due livelli: metà percorribile e cella sporca da cercare ---- */
+static void prova_meta_percorribile(void) {
+    uint16_t c = I(125, 125);
+    stanza(); nav_state.map[c] = NAV_CELL_FREE | NAV_CELL_TOP_LEFT;     /* bloccato in alto a sinistra */
+    nav_state.strip_axis_x = true;                  /* metà 0 in basso, metà 1 in alto */
+    controlla("asse x, alto-sx bloccato: metà 0 (in basso) percorribile", is_half_cell_free_walkable(c, 0), 1);
+    controlla("asse x, alto-sx bloccato: metà 1 (in alto) no", is_half_cell_free_walkable(c, 1), 0);
+    nav_state.strip_axis_x = false;                 /* metà 0 a sinistra, metà 1 a destra */
+    controlla("asse y, alto-sx bloccato: metà 0 (a sinistra) no", is_half_cell_free_walkable(c, 0), 0);
+    controlla("asse y, alto-sx bloccato: metà 1 (a destra) percorribile", is_half_cell_free_walkable(c, 1), 1);
+    nav_state.map[c] = NAV_CELL_TOO_NARROW;         /* bit a 0, ma lo stato non è libero */
+    controlla("troppo stretta con i bit a 0: non percorribile", is_half_cell_free_walkable(c, 1), 0);
+
+    stanza(); sporca_meta(126, 125, 0);             /* l'unica metà sporca è la 0 (a sinistra) di (126,125) */
+    nav_state.map[I(126, 125)] = NAV_CELL_FREE | NAV_CELL_TOP_LEFT;     /* e la sua corsia è bloccata */
+    controlla("metà sporca non percorribile: nessuna meta", (int)search_cell(c, GOAL_DIRTY, 0), 0);
+    nav_state.map[I(126, 125)] = NAV_CELL_FREE | NAV_CELL_TOP_RIGHT;    /* bloccata la corsia della metà 1 */
+    uint32_t len = search_cell(c, GOAL_DIRTY, 0);
+    controlla("metà sporca percorribile: è una meta", len > 0 && nav_state.path.cells[len - 1] == I(126, 125), 1);
+}
+
 int main(void) {
     prova_corsie();
     prova_ricerca();
     prova_asse();
     prova_gruppo_a();
     prova_gruppo_b();
+    prova_meta_percorribile();
     printf("%d controlli, %d falliti\n", fatte, fallite);
     return fallite != 0;
 }

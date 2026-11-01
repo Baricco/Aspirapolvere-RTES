@@ -376,6 +376,33 @@ I task dell'esame li scrive l'utente da solo, sopra un framework e un driver pre
     Correzioni da provare sulla copia di prova: isteresi (occupata finché non scende molto sotto la soglia, per
     esempio sotto 0) e/o raggi che passano più leggeri (−3/−5 invece di −10, costo: un oggetto spostato sparisce
     più lentamente). Va fatta prima di giudicare i passaggi da 45 cm.
+  - **prove della mappa a due livelli, fasi 1–3** (2026-11-01, `build/prove-nav/serie-due-livelli.txt`, confronto
+    con `serie-celle-incastro.txt` del 2026-10-29): 144/144 controlli delle funzioni della pulizia; esplorazioni
+    finite 14 su 17 (prima 17). Celle libere: soggiorno ~340 → ~410 (~92 in parte), cucina 116/132 → 179/160,
+    camera ~183 → ~222, corridoio ~310 → ~420; cucina e camera esplorano (dopo la fase 2 finivano in 0,1 s).
+    Pavimento della cucina raggiungibile secondo la mappa finale (`modello.py --sonda`): 86% e 83% (modello 66%,
+    prima 19% / 29%), ma gonfiato dalle gambe sparite: in cucina_s1 mancano 5 gambe su 20 e 59 quadranti
+    raggiungibili hanno il centro a meno di 17,45 cm da un ostacolo vero (20 sotto 10 cm). Problemi nuovi:
+    **5 contatti del paraurti** (prima 0), contro muri, muretto e poltrona, con il centro del robot a 17,0–17,5 cm
+    dalla superficie; **il corridoio non finisce in 150 s** (3 prove su 3): ~110 s attorno alla poltrona, fermato
+    dalla sicurezza 5–7 volte, 4–5 celle chiuse. Causa comune, il margine: un quadrante è libero se nessun centro
+    di cella fine occupata è entro 20 cm (4 celle fini, `FINE_CELL_INFLATION_RADIUS`), ma la superficie vera può
+    essere fino a 3,5 cm più vicina del centro della sua cella fine, quindi un quadrante libero può stare a 16,5 cm
+    dall'ostacolo; la sicurezza porta a zero la velocità in avanti quando il bordo del robot è a 1 cm (centro a
+    18,45 cm). Prima i centri delle celle stavano raramente al limite, ora i percorsi passano per i quadranti sul
+    limite. Modello della cucina con ingrossamento più grande (`modello.py --ingrossamento`): 22 cm → 63% / 27%,
+    25 cm → 22% / 14% (20 cm: 66% / 28%). Deciso con l'utente: **22 cm** (`INFLATION_MARGIN_MM` 46, confronto in
+    metri invece che in celle fini intere). Con 22 cm (`serie-margine22.txt`): **17 esplorazioni su 17**, corridoio in
+    112–126 s, 4 urti in tutto (risolti dallo sblocco). Gli urti risolti dallo sblocco non sono un problema per
+    l'utente: conta che esplorazione e pulizia finiscano e coprano la stanza.
+  - **fase 4, pulizia sui quadranti** (2026-11-01, `pulizie-fase4.txt`): metà percorribile = cella libera e i due
+    quadranti della sua corsia liberi; corsie sempre a ±5 cm; la cella sporca da cercare vuole una metà percorribile
+    sporca. 156/156 controlli. Cucina: finita in 721 s, pavimento toccato 66% (modello a 22 cm 63%), metà
+    percorribili pulite 76% (29 celle con una metà percorribile sporca alla fine, da capire), 20 sblocchi. Camera:
+    finita in 404 s, toccato 82% (75% prima della fase 4, modello 85%), metà pulite 96,5%. Soggiorno: **il robot si
+    perde** (fermato a ~830 s): strisce perfette fino a 445 s, poi si incastra più di 10 volte sotto la credenza
+    rialzata (9–40 cm, il lidar a 8,7 cm ci passa sotto), le ruote slittano e la posizione deriva (oltre 50 cm dopo
+    626 s, fino a 1,9 m); niente la corregge perché manca l'allineamento delle scansioni (prossimo passo).
   - **memoria bloccata sul PC** (2026-10-30): il programma blocca in RAM 7,97 MB e il limite per i normali utenti è
     8 MB; con MCL_FUTURE i thread creati dopo non partivano più (il `main` esce senza messaggio). `rt_init` ora,
     se non è root e il limite c'è, blocca solo la memoria di adesso (sul robot, root, tutto come prima).

@@ -17,7 +17,7 @@
 #define LIDAR_HIT_SCORE             30          // punteggio aggiunto ad una cella se il lidar rileva che c'è un'ostacolo
 #define LIDAR_PASS_SCORE            (-10)       // punteggio tolto da una cella se il lidar non vede ostacoli
 #define LIDAR_MAPPING_MAX_RANGE     6           // distanza massima a cui il lidar può misurare un punto, prima che il rumore sia troppo alto, espresso in m
-#define INFLATION_MARGIN_MM         25          // margine usato per calcolare un margine di distanza tra il robot e gli ostacoli nella griglia di navigazione, espresso in mm
+#define INFLATION_MARGIN_MM         46          // margine usato per calcolare un margine di distanza tra il robot e gli ostacoli nella griglia di navigazione, espresso in mm
 #define FINE_CELL_INFLATION_RADIUS  (int)(ceil(((ROBOT_RADIUS + INFLATION_MARGIN_MM) / 1000) / FINE_MAP_CELL_SIZE)) // indica di quanto vengono ingrossate le celle con ostacoli nella mappa di navigazione, il margine serve per essere certi che il robot non sbatta contro gli ostacoli, considerando anche le dimensioni del robot e un piccolo margine d'errore
 #define FINE_CELL_OCCUPATION_THRESHOLD 50        // soglia sopra al quale una cella è considerata occupata
 #define UNKNOWN_CELL_THRESHOLD      8           // numero minimo di celle fini da osservare affinchè la cella di navigazione risulti osservata
@@ -273,9 +273,9 @@ static void update_occupied_cells(const int fine_x, const int fine_y, const int 
                 // calcola la distanza tra la cella di riferimento e il centro del quadrante
                 double dist = hypot(fine_x_mt - quad_x_mt, fine_y_mt - quad_y_mt);
 
-                // se la distanza è <= FINE_CELL_INFLATION_RADIUS * FINE_MAP_CELL_SIZE
+                // se la distanza è <= (ROBOT_RADIUS + INFLATION_MARGIN_MM) / 1000
                 //  aumenta il numero di celle occupate del quadrante corrente
-                if (dist <= FINE_CELL_INFLATION_RADIUS * FINE_MAP_CELL_SIZE)
+                if (dist <= (ROBOT_RADIUS + INFLATION_MARGIN_MM) / 1000)
                     map_state.num_occupied_fine_cells[quad][nav_index] += value;
             }
         }

@@ -5,15 +5,23 @@
 #   tocca; 0.005 = mezzo centimetro più prudente, come se il rumore spostasse gli ostacoli verso il robot).
 # Celle allineate alla partenza (la griglia del robot ha l'origine lì), partenza con angolo multiplo di 90 gradi.
 # Il "pavimento toccato" è l'unione dei cerchi del robot attorno ai centri raggiungibili, su un reticolo da 1 cm.
+#   --percorso F: aggiunge il pavimento toccato davvero dal robot nel simulatore, dal percorso vero F
+#   (build/prove-nav/vero_<prova>.csv di prova.py, colonne x e y in coordinate della stanza).
+#   --sonda P: aggiunge il pavimento raggiungibile secondo la mappa di navigazione finale della prova P (registrata
+#   da sonda_mappa.c in build/prove-nav/sonda_<P>.bin, partenza letta da stanza_<P>.txt): quadranti liberi collegati
+#   alla partenza sul reticolo da 10 cm (le porte fra celle sono quadranti affacciati liberi), come fa la ricerca.
 import math, sys
 from collections import deque
 import numpy as np
 
 R = 0.1745                      # raggio del robot
-INGR = 0.20                     # ingrossamento della mappatura: 4 celle fini dai centri
+INGR = 0.20                     # ingrossamento della mappatura: 4 celle fini dai centri (--ingrossamento M per cambiarlo)
 FINE = 0.05
 a = sys.argv[1:]
 toll = float(a[a.index('--tolleranza') + 1]) if '--tolleranza' in a else 0.0
+percorso = a[a.index('--percorso') + 1] if '--percorso' in a else None
+if '--ingrossamento' in a: INGR = float(a[a.index('--ingrossamento') + 1])
+sonda = a[a.index('--sonda') + 1] if '--sonda' in a else None
 stanza, sx, sy = a[0], float(a[1]), float(a[2])
 
 
@@ -145,3 +153,34 @@ for nome, soglia in (("sottocelle da 10 cm, bit = ostacolo, garanzia di oggi", I
     for x0, y0 in zip(qx, qy):
         lib &= np.hypot(np.maximum(abs(SX - x0) - 0.05, 0), np.maximum(abs(SY - y0) - 0.05, 0)) > soglia
     riga(nome, area_regola(SX, SY, lib))
+
+if percorso:
+    import csv
+    righe = list(csv.DictReader(open(percorso)))
+    xs = np.array([float(r['x']) for r in righe]); ys = np.array([float(r['y']) for r in righe])
+    riga(f"percorso vero nel simulatore ({len(righe)} posizioni)", tocca(su_reticolo(xs, ys, np.ones(len(xs), bool))))
+
+if sonda:
+    import os
+    D = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', 'build', 'prove-nav')
+    for r in open(os.path.join(D, f'stanza_{sonda}.txt')):
+        if r.split('#')[0].strip().startswith('robot '):
+            c = campi(r.split('#')[0]); x0, y0, a0 = float(c['x']), float(c['y']), math.radians(float(c['angolo']))
+    b = open(os.path.join(D, f'sonda_{sonda}.bin'), 'rb').read()
+    nav = np.frombuffer(b, np.uint8, 256 * 256, 4 + 1024 * 1024 + 512 * 512).reshape(256, 256)   # [y, x]
+    # reticolo dei quadranti [y, x]: libero se la cella è libera e il bit del quadrante è 0 (x dispari = destra, y dispari = alto)
+    stato = np.repeat(np.repeat(nav & 15, 2, 0), 2, 1)
+    bit = np.zeros((512, 512), np.uint8)
+    for qy, qx, b_ in ((1, 0, 16), (1, 1, 32), (0, 0, 64), (0, 1, 128)): bit[qy::2, qx::2] = (nav & b_) > 0
+    lib = (stato == 1) & (bit == 0)
+    s0 = np.unravel_index(np.argmin(np.where(lib, (np.mgrid[0:512, 0:512][0] - 255.5) ** 2 + (np.mgrid[0:512, 0:512][1] - 255.5) ** 2, 1e9)), lib.shape)
+    r = raggiungi(lib, s0)
+    jy, jx = np.nonzero(r)
+    xr, yr = (jx - 256 + 0.5) * 0.10, (jy - 256 + 0.5) * 0.10
+    xs, ys = x0 + math.cos(a0) * xr - math.sin(a0) * yr, y0 + math.sin(a0) * xr + math.cos(a0) * yr
+    riga(f"mappa finale di {sonda}: {len(xs)} quadranti raggiungibili", tocca(su_reticolo(xs, ys, np.ones(len(xs), bool))))
+    d = distanza(xs, ys)
+    print(f"      di questi, con il centro a meno di {R * 100:.2f} cm da un ostacolo (il robot lo tocca): {(d < R).sum()}"
+          f" (sotto 10 cm: {(d < 0.10).sum()}); il più vicino a {d.min() * 100:.1f} cm")
+    for i in np.argsort(d)[:8]:
+        if d[i] < R: print(f"         ({xs[i]:.2f}, {ys[i]:.2f}) a {d[i] * 100:.1f} cm")

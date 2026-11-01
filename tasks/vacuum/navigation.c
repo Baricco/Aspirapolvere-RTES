@@ -35,6 +35,9 @@
 #define LANE_DEVIATION 0.05                 // scostamento di una corsia dal centro della cella, espresso in metri
 #define LANE_CLEAN_DISTANCE_THRESHOLD 0.025 // la distanza entro cui una metà si segna come pulita, espresso in metri
 
+#define NAV_PATH_NO_QUAD 0                  // valore da restituire se non si trova nessun quadrante nelle funzioni di ricerca    
+#define NAV_PATH_CENTER 1                   // valore per indicare di raggiungere il centro di una cella, non un quadrante specifico
+
 typedef enum {
     UNLOCK_PHASE_BACK,
     UNLOCK_PHASE_ROTATE,    
@@ -92,7 +95,7 @@ typedef struct {
 
     uint16_t cells[NAV_MAP_CELL_NUMBER * NAV_MAP_CELL_NUMBER];       // lista di celle da percorere
     uint32_t length;                                                 // lunghezza del percorso
-
+    uint8_t quads[NAV_MAP_CELL_NUMBER * NAV_MAP_CELL_NUMBER];        // per ogni cella in cells, contiene i valori dei quadranti
 } nav_path_t;
 
 // enum per le direzioni da usare in BA*
@@ -135,7 +138,8 @@ typedef struct {
     
     nav_path_t path;                            // percorso che deve fare il robot
     uint16_t path_idx;                          // indice del path dell'ultimo punto a cui è stato mandato mandato il robot
-    
+    uint16_t raw_path[NAV_MAP_CELL_NUMBER * NAV_MAP_CELL_NUMBER]; // celle del percorso trovato con la ricerca prima di aggiungere i quadranti
+
     int64_t state_start;                        // istante di ingresso nello stato corrente, serve per gli stati temporizzati
     uint8_t unlock_attempt;                     // numero di tentativi di sblocco fatti di fila
     int64_t stall_start;                        // istante in cui è iniziato l'arresto, 0 se il robot non è in arresto
@@ -257,28 +261,45 @@ static inline int calc_clean_along_shift(void) {
     return nav_state.strip_axis_x ? 1 : NAV_MAP_CELL_NUMBER;
 }
 
+// funzione helper che prende l'indice di una cella e restituisce true se è totalmente libera
+// quindi se lo stato è libero e la bitmask è tutta a 0
+static inline bool is_nav_cell_completely_free(const uint16_t cell) {
+    return nav_state.map[cell] == NAV_CELL_FREE;
+}
+
+// funzione helper che prende l'indice di una cella e restituisce true se ha stato NAV_CELL_FREE
+// questa funzione potrebbe restituire true anche se la cella è solo parzialmente libera guardando la bitmask
+static inline bool is_nav_cell_free(const uint16_t cell) {
+    return get_nav_cell_state(nav_state.map[cell]) == NAV_CELL_FREE;
+}
+
+
+// funzione helper che prende una mezza cella e restituisce true se è possibile attraversarla
+static inline bool is_half_cell_free_walkable(const uint16_t cell, const bool cell_half) {
+
+    // i due quadranti della corsia della metà: con le strisce lungo x la metà 0 è in basso e la 1 in alto,
+    // con le strisce lungo y la metà 0 è a sinistra e la 1 a destra
+    uint8_t lane_quads;
+    if (nav_state.strip_axis_x) lane_quads = cell_half ? (NAV_CELL_TOP_LEFT | NAV_CELL_TOP_RIGHT) : (NAV_CELL_BOTTOM_LEFT | NAV_CELL_BOTTOM_RIGHT);
+    else lane_quads = cell_half ? (NAV_CELL_TOP_RIGHT | NAV_CELL_BOTTOM_RIGHT) : (NAV_CELL_TOP_LEFT | NAV_CELL_BOTTOM_LEFT);
+
+    // la metà è percorribile se la cella è libera e i due quadranti della corsia hanno il bit a 0
+    return is_nav_cell_free(cell) && (nav_state.map[cell] & lane_quads) == 0;
+}
 
 static inline bool is_half_cell_free_dirty(const uint16_t cell, const bool cell_half) {
-    return (nav_state.map[cell] == NAV_CELL_FREE && !is_half_cell_clean(cell, cell_half));
+    return (is_half_cell_free_walkable(cell, cell_half) && !is_half_cell_clean(cell, cell_half));
 }
+
 // funzione helper per calcolare quanto la corsia in cui passa il robot si scosti dal centro della cella
 // prende cell_index e cell_half e restituisce un valore in metri
-static inline double calc_clean_lane_shift(const uint16_t cell_index, const bool cell_half) {
+static inline double calc_clean_lane_shift(const bool cell_half) {
 
     // strumentopolo misterioso che ci servirà più tardi
     // serve per la logica di: metà dx -> vicino a dx, metà sx -> vicino sulla sx
     int8_t sign_shift = (cell_half ? 1 : -1);
-
-
-    // calcola la cella vicina alla metà della cella passata, 
-    // quindi se viene passata la metà sx, controlliamo la cella alla sua sx
-    // se viene passata la metà dx, guardiamo la cella alla sua dx
-    uint16_t neigh_cell = cell_index + (calc_clean_lateral_shift() * sign_shift);
-
-    // se la cella vicina è libera, restituisci LANE_DEVIATION (+ o - in base al sign_shift)
-    // altrimenti restituisci 0 (nessuno shift, per evitare di sbattere contro ostacoli vicini)
-    return nav_state.map[neigh_cell] == NAV_CELL_FREE ? LANE_DEVIATION * sign_shift : 0;
-
+    
+    return LANE_DEVIATION * sign_shift;
 }
 
 
@@ -320,8 +341,8 @@ static bool get_robot_half_cell(const movement_position_data_t robot_pos, uint16
 
     double dist = calc_robot_lateral_offset(robot_pos, cell);
 
-    double dist_half_sx = fabs(dist - calc_clean_lane_shift(cell, 0));
-    double dist_half_dx = fabs(dist - calc_clean_lane_shift(cell, 1));
+    double dist_half_sx = fabs(dist - calc_clean_lane_shift(0));
+    double dist_half_dx = fabs(dist - calc_clean_lane_shift(1));
 
     return dist_half_sx > dist_half_dx;
 }
@@ -336,12 +357,12 @@ static void set_robot_cell_clean(const movement_position_data_t robot_pos) {
     double dist = calc_robot_lateral_offset(robot_pos, robot_cell);
 
     // controlla se la mezza cella sx sia sotto al robot, se sì, segnala come pulita
-    if (fabs(dist - calc_clean_lane_shift(robot_cell, 0)) < LANE_CLEAN_DISTANCE_THRESHOLD) {
+    if (fabs(dist - calc_clean_lane_shift(0)) < LANE_CLEAN_DISTANCE_THRESHOLD) {
         set_half_cell_clean(robot_cell, 0);
     }
     
     // controlla se la mezza cella dx sia sotto al robot, se sì, segnala come pulita
-    if (fabs(dist - calc_clean_lane_shift(robot_cell, 1)) < LANE_CLEAN_DISTANCE_THRESHOLD) {
+    if (fabs(dist - calc_clean_lane_shift(1)) < LANE_CLEAN_DISTANCE_THRESHOLD) {
         
         set_half_cell_clean(robot_cell, 1);
     }
@@ -447,6 +468,7 @@ static bool is_stalled(safety_alarm_t cur_alarm, movement_position_data_t cur_po
 
 }
 
+
 // funzioni helper per la coda
 static inline void search_queue_push(uint16_t next_elem) {
     nav_state.s_q.values[nav_state.s_q.tail++] = next_elem;
@@ -464,18 +486,6 @@ static inline uint16_t search_queue_pop(void) {
 static inline void search_queue_flush(void) {
     nav_state.s_q.head = 0;
     nav_state.s_q.tail = 0;
-}
-
-// funzione helper che prende l'indice di una cella e restituisce true se è totalmente libera
-// quindi se lo stato è libero e la bitmask è tutta a 0
-static inline bool is_nav_cell_completely_free(const uint16_t cell) {
-    return nav_state.map[cell] == NAV_CELL_FREE;
-}
-
-// funzione helper che prende l'indice di una cella e restituisce true se ha stato NAV_CELL_FREE
-// questa funzione potrebbe restituire true anche se la cella è solo parzialmente libera guardando la bitmask
-static inline bool is_nav_cell_free(const uint16_t cell) {
-    return get_nav_cell_state(nav_state.map[cell]) == NAV_CELL_FREE;
 }
 
 // funzione helper che verifica se due celle vicine hanno due quadranti "di contatto" liberi
@@ -542,6 +552,23 @@ typedef enum {
     GOAL_FREE,      // l'obiettivo della ricerca è trovare una cella libera, partendo da una bloccata
 } nav_search_goal_t;
 
+
+
+// funzione helper che prende due celle vicine e restituisce quali quadranti sono liberi per transitare da una cella all'altra
+// restituisce NAV_PATH_NO_QUAD se non ci sono quadranti liberi, restituisce NAV_PATH_CENTER se i quadranti di cell1 sono tutti liberi
+static uint8_t get_adiacent_quad(const uint16_t cell1, const uint16_t cell2) {
+
+    uint8_t quad, neigh;
+
+    if (!get_contact_quads(cell1, cell2, &quad, &neigh)) return NAV_PATH_NO_QUAD;
+
+    // se la cella 1 è libera, il robot può andare direttamente al centro della cella
+    if (is_nav_cell_completely_free(cell1)) return NAV_PATH_CENTER; 
+
+    return quad;
+
+}
+
 // Funzione helper per stabilire se la cella fornita corrisponde all'obiettivo della ricerca
 // qui la ricerca viene fatta sempre sulle 4 celle adiacenti (su, giù, dx, sx), il percorso
 // verrà poi tagliato usando l'algoritmo di bresenham per permettere percorsi in diagonale
@@ -549,15 +576,20 @@ static bool cell_is_goal(const nav_search_goal_t goal, const uint16_t cell, cons
     
     switch (goal) {
         case GOAL_BORDER:           // se la cella cercata è una cella di frontiera
-            if (nav_state.map[cell] == NAV_CELL_FREE) {     // se la cella in cui ci troviamo è libera
+            if (is_nav_cell_free(cell)) {     // se la cella in cui ci troviamo è libera
                 // controllo le 4 celle adiacenti alla cella corrente, se sono sconosciute,
                 // significa che cell è una cella di frontiera
-                for (int i = 0; i < 4; i++) if (get_nav_cell_state(nav_state.map[cell + NEIGHBOR_SHIFT[i]]) == NAV_CELL_UNKNOWN) return true;
+                for (int i = 0; i < 4; i++) {
+                    if (
+                        get_nav_cell_state(nav_state.map[cell + NEIGHBOR_SHIFT[i]]) == NAV_CELL_UNKNOWN && 
+                        get_adiacent_quad(cell, cell + NEIGHBOR_SHIFT[i]) != NAV_PATH_NO_QUAD
+                    ) { return true; }
+                }
             }
             break;
         case GOAL_DIRTY:
             // restituisce true se la cella è libera e almeno una delle sue due metà è sporca
-            return (nav_state.map[cell] == NAV_CELL_FREE && (!is_half_cell_clean(cell, 0) || !is_half_cell_clean(cell, 1)));
+            return (is_half_cell_free_dirty(cell, 0) || is_half_cell_free_dirty(cell, 1));
             break;          
         case GOAL_CELL:     // il terzo parametro serve solo qui
             return cell == goal_cell;
@@ -665,6 +697,161 @@ static void calc_strip_axis() {
 }
 
 
+// funzione helper per aggiungere una cella + quadrante in fondo al percorso
+static void add_to_path(const uint16_t cell, const uint8_t quad) {
+    
+    // controlla se c'è spazio nell'array del percorso, se no esci
+    if (nav_state.path.length >= NAV_MAP_CELL_NUMBER * NAV_MAP_CELL_NUMBER) return;
+
+    // controlla se l'ultima cella nel percorso sia uguale a quella che stiamo aggiungendo, se sì esci
+    if (nav_state.path.length > 0 && nav_state.path.cells[nav_state.path.length - 1] == cell && nav_state.path.quads[nav_state.path.length - 1] == quad) return;
+
+    // aggiungi cella e quadrante al percorso e incrementa la lunghezza
+    nav_state.path.cells[nav_state.path.length] = cell;
+
+    nav_state.path.quads[nav_state.path.length] = quad;
+
+    nav_state.path.length++;
+
+}
+
+// funzione helper che data una cella e due suoi quadranti restituisce il quadrante per cui si può passare per congiungerli
+// ritorna NAV_PATH_NO_QUAD se non si può, altrimenti usa gli stessi valori e le stesse convenzioni della bitmask delle celle
+// se i due quadranti sono già adiacenti restituisce NAV_PATH_NO_QUAD
+static uint8_t get_middle_quad(const uint16_t cell, const uint8_t quad1, const uint8_t quad2) {
+
+    // i due quadranti di mezzo, cioè quelli diversi da quad1 e quad2
+    uint8_t middle1, middle2;
+
+    // controlla se i due quadranti sono opposti e ricava i due quadranti di mezzo, se non sono opposti non serve passare in mezzo
+    if ((quad1 | quad2) == (NAV_CELL_TOP_LEFT | NAV_CELL_BOTTOM_RIGHT)) {
+        middle1 = NAV_CELL_TOP_RIGHT;
+        middle2 = NAV_CELL_BOTTOM_LEFT;
+    } else if ((quad1 | quad2) == (NAV_CELL_TOP_RIGHT | NAV_CELL_BOTTOM_LEFT)) {
+        middle1 = NAV_CELL_TOP_LEFT;
+        middle2 = NAV_CELL_BOTTOM_RIGHT;
+    } else {
+        return NAV_PATH_NO_QUAD;
+    }
+
+    // restituisci il primo quadrante di mezzo libero (bit del quadrante a 0)
+    if ((nav_state.map[cell] & middle1) == 0) return middle1;
+    if ((nav_state.map[cell] & middle2) == 0) return middle2;
+
+    // nessuno dei due è libero: non dovrebbe succedere, la mappatura non lascia mai liberi solo due quadranti opposti
+    return NAV_PATH_NO_QUAD;
+}
+
+
+// funzione helper che prende due celle consecutive del percorso e scrive nei due puntatori
+// da quale quadrante il robot esce da cell1 (exit_quad) e in quale quadrante entra in cell2 (entry_quad).
+// se il passo non ha bisogno di quadranti scrive NAV_PATH_NO_QUAD in tutti e due:
+// se le due celle sono tutte libere il robot va da centro a centro
+// se cell1 non è libera il robot sta uscendo da una zona bloccata e va da centro a centro
+static void get_step_quads(const uint16_t cell1, const uint16_t cell2, uint8_t *exit_quad, uint8_t *entry_quad) {
+
+    // all'inizio supponiamo che non servano quadranti
+    *exit_quad = NAV_PATH_NO_QUAD;
+    *entry_quad = NAV_PATH_NO_QUAD;
+
+    // se una delle due celle non è libera non servono quadranti, esci
+    if (!is_nav_cell_free(cell1) || !is_nav_cell_free(cell2)) return;
+
+    // se le due celle sono tutte libere non servono quadranti, esci
+    if (is_nav_cell_completely_free(cell1) && is_nav_cell_completely_free(cell2)) return;
+
+    // altrimenti il robot deve passare per la porta tra le due celle: get_contact_quads scrive nei due
+    // puntatori il quadrante di cell1 e quello di cell2 adiacenti e liberi.
+    if (!get_contact_quads(cell1, cell2, exit_quad, entry_quad)) {
+        *exit_quad = NAV_PATH_NO_QUAD;
+        *entry_quad = NAV_PATH_NO_QUAD;
+    }
+
+}
+
+// funzione helper che prende il numero di celle del percorso grezzo 
+// e scrive in nav_state.path il percorso vero, con cella + quadrante per ogni punto da raggiungere.
+// restituisce la lunghezza del percorso vero.
+// per ogni cella del percorso grezzo aggiunge:
+// se la cella non è libera: il centro
+// se la cella è tutta libera: il quadrante di ingresso (se c'è), il centro, il quadrante di uscita (se c'è)
+// se la cella è libera in parte: il quadrante di ingresso, il quadrante di mezzo (se serve), il quadrante di uscita;
+// se non ci sono né ingresso né uscita, il primo quadrante libero
+static uint32_t expand_path(const uint32_t raw_length) {
+
+    // svuota il percorso vero, add_to_path lo riempie da capo
+    nav_state.path.length = 0;
+
+    // quadrante di ingresso nella cella corrente: viene calcolato al giro prima, insieme all'uscita dalla cella
+    // precedente, perchè ogni passo (cella precedente -> cella corrente) si calcola una volta sola.
+    // la prima cella del percorso non ha un ingresso
+    uint8_t entry_quad = NAV_PATH_NO_QUAD;
+
+    // scorri tutte le celle del percorso grezzo
+    for (uint32_t i = 0; i < raw_length; i++) {
+
+        // cella corrente del percorso grezzo
+        uint16_t cur_cell = nav_state.raw_path[i];
+
+        // quadrante di uscita dalla cella corrente e quadrante di ingresso nella prossima cella
+        // l'ultima cella del percorso non ha un'uscita, quindi restano NAV_PATH_NO_QUAD
+        uint8_t exit_quad = NAV_PATH_NO_QUAD;
+        uint8_t next_entry_quad = NAV_PATH_NO_QUAD;
+
+        // se c'è una prossima cella, calcola i quadranti del passo dalla cella corrente alla prossima
+        if (i + 1 < raw_length) get_step_quads(cur_cell, nav_state.raw_path[i + 1], &exit_quad, &next_entry_quad);
+
+        if (!is_nav_cell_free(cur_cell)) {      // se la cella corrente non è libera (il robot sta uscendo da una zona bloccata)
+
+            // il robot passa per il centro della cella, come prima della mappa a due livelli
+            add_to_path(cur_cell, NAV_PATH_CENTER);
+
+        } else if (is_nav_cell_completely_free(cur_cell)) {     // se la cella corrente è tutta libera
+
+            // se il robot entra da una porta, aggiungi il quadrante di ingresso
+            if (entry_quad != NAV_PATH_NO_QUAD) add_to_path(cur_cell, entry_quad);
+
+            // aggiungi il centro della cella
+            add_to_path(cur_cell, NAV_PATH_CENTER);
+
+            // se il robot esce da una porta, aggiungi il quadrante di uscita
+            if (exit_quad != NAV_PATH_NO_QUAD) add_to_path(cur_cell, exit_quad);
+
+        } else if (entry_quad == NAV_PATH_NO_QUAD && exit_quad == NAV_PATH_NO_QUAD) {     // se la cella è libera in parte, ma non ha né ingresso né uscita
+
+            // succede se il percorso è di una cella sola, o se è l'ultima cella dopo una zona bloccata:
+            // aggiungi il primo quadrante libero (bit del quadrante a 0) della cella
+            for (int quad = 0; quad < 4; quad++) {
+                if ((nav_state.map[cur_cell] & NAV_CELL_QUAD[quad]) == 0) {
+                    add_to_path(cur_cell, NAV_CELL_QUAD[quad]);
+                    break;
+                }
+            }
+
+        } else {        // se la cella corrente è libera in parte, il robot non passa mai per il centro
+
+            // se c'è un ingresso, aggiungi il quadrante di ingresso
+            if (entry_quad != NAV_PATH_NO_QUAD) add_to_path(cur_cell, entry_quad);
+
+            // se ingresso e uscita sono in angoli opposti, aggiungi il quadrante di mezzo libero tra i due.
+            // se manca uno dei due, o se non sono opposti, get_middle_quad restituisce NAV_PATH_NO_QUAD
+            uint8_t middle_quad = get_middle_quad(cur_cell, entry_quad, exit_quad);
+            if (middle_quad != NAV_PATH_NO_QUAD) add_to_path(cur_cell, middle_quad);
+
+            // se c'è un'uscita, aggiungi il quadrante di uscita
+            if (exit_quad != NAV_PATH_NO_QUAD) add_to_path(cur_cell, exit_quad);
+
+        }
+
+        // l'ingresso nella prossima cella diventa l'ingresso della cella corrente al prossimo giro
+        entry_quad = next_entry_quad;
+    }
+
+    // restituisci la lunghezza del percorso vero
+    return nav_state.path.length;
+}
+
+
 // Funzione helper che scrive il percorso completo nello stato della navigazione
 // riceve il punto di partenza e il punto di arrivo del percorso
 static uint32_t reconstruct_path(const uint16_t start_cell, const uint16_t end_cell) {
@@ -678,26 +865,23 @@ static uint32_t reconstruct_path(const uint16_t start_cell, const uint16_t end_c
     for (int cur_cell = end_cell; cur_cell != start_cell; cur_cell = nav_state.came_from[cur_cell]) {
         
         // aggiungi cur_cell al percorso nello stato di navigazione
-        nav_state.path.cells[length] = cur_cell;
+        nav_state.raw_path[length] = cur_cell;
 
         // aumenta la lunghezza del percorso
         length++;
     }
     
     // aggiungi start_cell alla fine, il for di prima non lo aggiungeva
-    nav_state.path.cells[length] = start_cell;
+    nav_state.raw_path[length] = start_cell;
     length++;
 
     // rovescia l'array del percorso
     for (int i = 0; i < length / 2; i++) {
         uint16_t tmp;
-        tmp = nav_state.path.cells[i];
-        nav_state.path.cells[i] = nav_state.path.cells[length - 1 - i];
-        nav_state.path.cells[length - 1 - i] = tmp;
+        tmp = nav_state.raw_path[i];
+        nav_state.raw_path[i] = nav_state.raw_path[length - 1 - i];
+        nav_state.raw_path[length - 1 - i] = tmp;
     }
-
-    // salva la lunghezza totale del percorso nello stato della navigazione
-    nav_state.path.length = length;
 
     return length;
 }
@@ -730,7 +914,7 @@ static uint32_t search_cell(const uint16_t start_cell, const nav_search_goal_t g
         uint16_t cur_cell = search_queue_pop();
 
         // se corrisponde al goal, ricorstruisci il percorso completo e restituiscine la lunghezza
-        if (cell_is_goal(goal, cur_cell, goal_cell)) return reconstruct_path(start_cell, cur_cell);
+        if (cell_is_goal(goal, cur_cell, goal_cell)) return expand_path(reconstruct_path(start_cell, cur_cell));
 
         // se siamo qui significa che cur_cell non è il goal, quindi controlliamo le celle vicine
         for (int i = 0; i < 4; i++) {
@@ -755,18 +939,65 @@ static uint32_t search_cell(const uint16_t start_cell, const nav_search_goal_t g
     
 }
 
-// Funzione helper che usa Bresenham per verificare se due punti cadono sulla stessa
-// retta e non ci sono celle non libere nel mezzo
+
+
+// Funzione che prende l'indice di un punto del percorso e calcola le sue coordinate in metri:
+// se il punto è un quadrante, le coordinate sono il centro del quadrante
+// se il punto è il centro della cella, le coordinate sono il centro della cella spostato dello scostamento
+// laterale della corsia attuale (nav_state.cur_lat_shift), come per le strisce della pulizia
+static void get_path_coord(const uint32_t path_idx, double *x, double *y) {
+
+    // calcola le coordinate del punto: quad_to_coord con NAV_PATH_CENTER finisce nel default e restituisce il centro della cella
+    quad_to_coord(nav_state.path.cells[path_idx], nav_state.path.quads[path_idx], x, y);
+
+    // se il punto è il centro della cella, applica lo scostamento laterale alle x o alle y in base all'asse di riferimento per lo scostamento
+    if (nav_state.path.quads[path_idx] == NAV_PATH_CENTER) {
+        if (nav_state.strip_axis_x) *y += nav_state.cur_lat_shift; else *x += nav_state.cur_lat_shift;
+    }
+
+}
+
+// Funzione helper che prende delle coordinate in metri e calcola il punto del reticolo dei quadranti in cui cadono.
+// il reticolo ha 512x512 punti distanti mezza cella, ogni punto è il centro di un quadrante di una cella:
+// è come coord_to_nav_index, ma con mezza cella al posto della cella
+static inline void coord_to_lattice(const double x, const double y, int *lattice_x, int *lattice_y) {
+    *lattice_x = (int)floor(x / (NAV_MAP_CELL_SIZE / 2)) + 2 * NAV_MAP_ORIGIN;
+    *lattice_y = (int)floor(y / (NAV_MAP_CELL_SIZE / 2)) + 2 * NAV_MAP_ORIGIN;
+}
+
+// Funzione helper che prende un punto del reticolo dei quadranti e restituisce true se il suo quadrante è libero
+static bool is_lattice_point_free(const int lattice_x, const int lattice_y) {
+
+    // se il punto è fuori dal reticolo non è libero
+    if (lattice_x < 0 || lattice_y < 0 || lattice_x >= 2 * NAV_MAP_CELL_NUMBER || lattice_y >= 2 * NAV_MAP_CELL_NUMBER) return false;
+
+    // ogni cella contiene 2x2 punti del reticolo, quindi la cella del punto è la metà delle coordinate
+    uint16_t cell = (lattice_y / 2) << 8 | (lattice_x / 2);
+
+    // il resto della divisione per 2 dice quale quadrante della cella è: x dispari = destra, y dispari = alto
+    uint8_t quad;
+    if (lattice_y % 2 == 1) quad = (lattice_x % 2 == 1) ? NAV_CELL_TOP_RIGHT : NAV_CELL_TOP_LEFT;
+    else quad = (lattice_x % 2 == 1) ? NAV_CELL_BOTTOM_RIGHT : NAV_CELL_BOTTOM_LEFT;
+
+    // il punto è libero se la cella è libera (le troppo strette e le proibite possono avere i bit a 0) e il bit del quadrante è 0
+    return is_nav_cell_free(cell) && (nav_state.map[cell] & quad) == 0;
+}
+
+// Funzione helper che usa Bresenham per verificare se due punti del percorso cadono sulla stessa
+// retta e non ci sono quadranti non liberi nel mezzo (sul reticolo dei quadranti, da 10 cm)
 // Se fossi stato un buon programmatore avrei riutilizzato il codice
 // per fare Bresenham di mapping.c ma non ho voglia e sono stanco
-static bool line_of_sight(uint16_t start_cell, uint16_t end_cell) {
-    
-    // Ricava x e y base (il punto il punto di partenza) e da 
-    // tail (il punto di svolta)
-    int base_y = start_cell >> 8;
-    int base_x = start_cell & 0xFF;  
-    int tail_y = end_cell >> 8;
-    int tail_x = end_cell & 0xFF;
+static bool line_of_sight(uint32_t start_idx, uint32_t end_idx) {
+
+    // Ricava x e y base (il punto il punto di partenza) e da
+    // tail (il punto di svolta), come punti del reticolo dei quadranti
+    double start_x, start_y, end_x, end_y;
+    get_path_coord(start_idx, &start_x, &start_y);
+    get_path_coord(end_idx, &end_x, &end_y);
+
+    int base_x, base_y, tail_x, tail_y;
+    coord_to_lattice(start_x, start_y, &base_x, &base_y);
+    coord_to_lattice(end_x, end_y, &tail_x, &tail_y);
 
     
     // calcola la distanza tra i due punti nell'asse x
@@ -809,17 +1040,13 @@ static bool line_of_sight(uint16_t start_cell, uint16_t end_cell) {
 
             if (vert_error && hor_error) {  
                 
-                // calcola le due celle in diagonale 
-                uint8_t fd_cur_cell = nav_state.map[(cur_cell_y + sy) << 8 | cur_cell_x];
-                uint8_t sd_cur_cell = nav_state.map[cur_cell_y << 8 | (cur_cell_x + sx)];
-
-                // se una delle due celle in diagonale non è libera, ritorna false
-                if (fd_cur_cell != NAV_CELL_FREE || sd_cur_cell != NAV_CELL_FREE) return false;
+                // se uno dei due punti in diagonale non è libero, ritorna false
+                if (!is_lattice_point_free(cur_cell_x, cur_cell_y + sy) || !is_lattice_point_free(cur_cell_x + sx, cur_cell_y)) return false;
             }
             if (hor_error) { err += dy; cur_cell_x += sx; }
             if (vert_error) { err += dx; cur_cell_y += sy; }
 
-            if (nav_state.map[cur_cell_y << 8 | cur_cell_x] != NAV_CELL_FREE ) return false;
+            if (!is_lattice_point_free(cur_cell_x, cur_cell_y)) return false;
         }
     } 
 
@@ -853,7 +1080,7 @@ static uint16_t next_turning_point(void) {
 
     // Controllo Rapido del Caso Migliore:
     // se si può tagliare direttamente tra low e high, fallo senza fare ricerca dicotomica
-    if (line_of_sight(nav_state.path.cells[cur_idx], nav_state.path.cells[high])) return high;
+    if (line_of_sight(cur_idx, high)) return high;
 
     while (low < high) {        // ciclo di ricerca
 
@@ -862,7 +1089,7 @@ static uint16_t next_turning_point(void) {
         int mid = (low + high + 1) / 2;      
 
         // se dal robot si vede il punto mid, allora il punto di svolta è da mid in poi
-        if (line_of_sight(nav_state.path.cells[cur_idx], nav_state.path.cells[mid])) {
+        if (line_of_sight(cur_idx, mid)) {
             low = mid;
         } else {    // altrimenti il punto di svolta è prima
             high = mid - 1;
@@ -996,15 +1223,27 @@ static bool append_unknown_neighbor(void) {
 
         int cur_neighbor_idx = cur_border + NEIGHBOR_SHIFT[i];
         
-        // Controlla se il vicino i-esimo è sconosciuto
-        if (get_nav_cell_state(nav_state.map[cur_neighbor_idx]) == NAV_CELL_UNKNOWN) {
-            
-            // Se sì, aggiungilo al percorso
-            nav_state.path.cells[nav_state.path.length++] = cur_neighbor_idx;
+        // quadrante della cella di frontiera da cui il robot esce verso il vicino
+        // (NAV_PATH_CENTER se la cella di frontiera è tutta libera, NAV_PATH_NO_QUAD se non c'è un quadrante adiacente libero)
+        uint8_t facing_quad = get_adiacent_quad(cur_border, cur_neighbor_idx);
+
+        // Controlla se il vicino i-esimo è sconosciuto e raggiungibile
+        if (get_nav_cell_state(nav_state.map[cur_neighbor_idx]) == NAV_CELL_UNKNOWN && facing_quad != NAV_PATH_NO_QUAD) {
+
+            // se l'ultimo quadrante del percorso e quello di uscita sono in angoli opposti, passa per il quadrante di mezzo
+            uint8_t middle_quad = get_middle_quad(cur_border, nav_state.path.quads[nav_state.path.length - 1], facing_quad);
+            if (middle_quad != NAV_PATH_NO_QUAD) add_to_path(cur_border, middle_quad);
+
+            // aggiungi il quadrante di uscita dalla cella di frontiera
+            // (se è il centro ed era già l'ultimo punto del percorso, add_to_path non lo ripete)
+            add_to_path(cur_border, facing_quad);
+
+            // aggiungi il centro della cella sconosciuta
+            add_to_path(cur_neighbor_idx, NAV_PATH_CENTER);
 
             return true;
 
-        } 
+        }
     }
 
     // Se nessuno dei vicini è sconosciuto restituisci false, non dovremmo mai finire qui:
@@ -1014,10 +1253,13 @@ static bool append_unknown_neighbor(void) {
 }
 
 // Dopo un arresto o uno sblocco, riporta il robot al centro della sua cella se è 
-// libera, altrimenti ricalcola il percorso
+// libera o al quadrante libero più vicino, altrimenti ricalcola il percorso
 static void resume_after_stop(safety_alarm_t cur_alarm, movement_position_data_t cur_pos) {
     // calcola la cella di navigazione in cui si trova il robot
     uint16_t robot_index = coord_to_nav_index(cur_pos.x, cur_pos.y);
+
+    double x = 0, y = 0;
+
 
     // se la cella in cui si trova il robot non è libera
     if (!is_nav_cell_free(robot_index)) {
@@ -1029,19 +1271,47 @@ static void resume_after_stop(safety_alarm_t cur_alarm, movement_position_data_t
         // ricalcola il percorso
         set_state(nav_state.mission);
 
-    } else {        // se il robot si trova in una cella libera
+        return;
+
+    } else if (is_nav_cell_completely_free(robot_index)){        // se il robot si trova in una cella libera
         
         // ricava le coordinate del centro della cella
-        double x, y;
         nav_index_to_coord(robot_index, &x, &y);
     
-        // manda al robot l'obiettivo di andare verso il centro della cella
-        send_objective(OBJ_MOVE, MAX_ROTATION_SPEED, 0, MIN(cur_alarm.max_v_forw, CRUISING_SPEED), x, y);
+    } else {                                                    // se il robot è in una cella parzialmente libera
 
-        // passa allo stato di allineamento
-        set_state(NAV_STATE_ALIGN);
-    
+        // vai al quadrante libero più vicino
+
+        // coordinate del quadrante libero più vicino al robot e la sua distanza dal robot
+        // (la distanza parte da un valore enorme, così il primo quadrante libero la sostituisce sempre)
+        double best_dist = INFINITY;
+
+        // scorri i 4 quadranti della cella del robot
+        for (int quad = 0; quad < 4; quad++) {
+
+            // se il quadrante è bloccato (bit a 1) passa al prossimo
+            if (nav_state.map[robot_index] & NAV_CELL_QUAD[quad]) continue;
+
+            // calcola le coordinate del centro del quadrante e la sua distanza dal robot
+            double quad_x, quad_y;
+            quad_to_coord(robot_index, NAV_CELL_QUAD[quad], &quad_x, &quad_y);
+            double dist = hypot(quad_x - cur_pos.x, quad_y - cur_pos.y);
+
+            // se è il più vicino trovato finora, salvalo
+            if (dist < best_dist) {
+                x = quad_x;
+                y = quad_y;
+                best_dist = dist;
+            }
+        }
+
     }
+
+    // manda al robot l'obiettivo di andare verso il centro della cella / quadrante libero trovato
+    send_objective(OBJ_MOVE, MAX_ROTATION_SPEED, 0, MIN(cur_alarm.max_v_forw, CRUISING_SPEED), x, y);
+
+    // passa allo stato di allineamento
+    set_state(NAV_STATE_ALIGN);
 }
 
 // Funzione Helper per lo sblocco del robot, fa partire la rotazione del tentativo corrente
@@ -1120,17 +1390,6 @@ static void start_unlock_attempt(safety_alarm_t cur_alarm, movement_position_dat
 
 }
 
-// Funzione che calcola il punto di una corsia (prende il centro della cella e applica lo scostamento laterale)
-static void get_lane_coord(const uint16_t cell, const double lat_shift, double *x, double *y) {
-
-    // calcola le coordinate del centro della cella
-    nav_index_to_coord(cell, x, y);
-
-    // applica lo scostamento laterale alle x o alle y in base all'asse di riferimento per lo scostamento
-    if (nav_state.strip_axis_x) *y += lat_shift; else *x += lat_shift;
-        
-}
-
 // Funzione per far partire il robot seguendo il percorso che ha nello stato
 static void start_following_path(const safety_alarm_t cur_alarm, const movement_position_data_t cur_pos, const double lat_shift, const bool is_first_point) {
 
@@ -1144,7 +1403,7 @@ static void start_following_path(const safety_alarm_t cur_alarm, const movement_
 
         double lane_x, lane_y;
         
-        get_lane_coord(nav_state.path.cells[0], lat_shift, &lane_x, &lane_y);
+        get_path_coord(0, &lane_x, &lane_y);
 
         // calcola la distanza tra il robot e la corsia
         double dist = hypot(cur_pos.x - lane_x, cur_pos.y - lane_y);
@@ -1177,15 +1436,16 @@ static void go_to_nearest_free_cell(const safety_alarm_t cur_alarm, const moveme
 
 // funzione helper che restituisce true se è possibile estendere la striscia attuale
 static inline bool can_extend_strip(const uint16_t cell, const bool cell_half, const double lat_shift) {
-    return is_half_cell_free_dirty(cell, cell_half) && calc_clean_lane_shift(cell, cell_half) == lat_shift;
+    return is_half_cell_free_dirty(cell, cell_half) && calc_clean_lane_shift(cell_half) == lat_shift;
 }
 
 // funzione che prende la mezza cella di partenza e scrive la striscia da percorrere dentro nav_state.path, restituendo la lunghezza
 static uint32_t plan_strip(const uint16_t start_cell, const bool start_half) {
 
-    double lat_shift = calc_clean_lane_shift(start_cell, start_half);
+    double lat_shift = calc_clean_lane_shift(start_half);
 
     nav_state.path.cells[0] = start_cell;
+    nav_state.path.quads[0] = NAV_PATH_CENTER;
     
     uint32_t length = 1;
 
@@ -1217,7 +1477,9 @@ static uint32_t plan_strip(const uint16_t start_cell, const bool start_half) {
     while (can_extend_strip(next_cell, next_half, lat_shift)) {
 
         // aggiungi la cella alla striscia
-        nav_state.path.cells[length++] = next_cell;
+        nav_state.path.cells[length] = next_cell;
+        nav_state.path.quads[length] = NAV_PATH_CENTER;
+        length++;
 
         // passa alla vicina successiva nella stessa direzione
         get_half_cell_neighbor(next_cell, next_half, dir, &next_cell, &next_half);
@@ -1397,7 +1659,7 @@ void job_navigation(void *arg) {
                 
                 plan_strip(robot_cell, robot_half_cell);
 
-                start_following_path(cur_alarm, cur_pos, calc_clean_lane_shift(robot_cell, robot_half_cell), true);
+                start_following_path(cur_alarm, cur_pos, calc_clean_lane_shift(robot_half_cell), true);
 
             } else {
 
@@ -1415,7 +1677,7 @@ void job_navigation(void *arg) {
                         
                         // se sì, pulisci lui
                         plan_strip(start_cell, start_half_cell);
-                        start_following_path(cur_alarm, cur_pos, calc_clean_lane_shift(start_cell, start_half_cell), true);
+                        start_following_path(cur_alarm, cur_pos, calc_clean_lane_shift(start_half_cell), true);
                         return;
                     } 
 
@@ -1472,7 +1734,7 @@ void job_navigation(void *arg) {
                     
                     // Calcola le coordinate del centro della corsia
                     double next_x, next_y;
-                    get_lane_coord(nav_state.path.cells[nav_state.path_idx], nav_state.cur_lat_shift, &next_x, &next_y);
+                    get_path_coord(nav_state.path_idx, &next_x, &next_y);
 
                     // imposta come prossimo obiettivo di andare al prossimo punto di svolta
                     send_objective(OBJ_MOVE, MAX_ROTATION_SPEED, 0, calc_speed(cur_alarm.max_v_forw), next_x, next_y);
