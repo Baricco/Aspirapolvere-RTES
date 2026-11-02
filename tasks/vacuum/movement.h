@@ -33,15 +33,34 @@ typedef struct {
     bool obj_achieved;          // indica se l'obiettivo attualmente preso in carico sia stato raggiunto o meno
     bool valid;                 // se il robot viene sollevato o spostato a mano la sua posizione calcolata in movement risulta invalida
 
+    double odom_x, odom_y, odom_theta;  // posizione grezza del robot, serve alla mappatura per correggere x, y e theta
 
 } movement_position_data_t;
 
+
+// Numero di pose nello storico dell'odometria: a un frame ogni 20 ms sono circa 640 ms, più del ritardo
+// massimo di una scansione del lidar (la sua durata, circa 170 ms, più il periodo della mappatura, 200 ms)
+#define MOVEMENT_ODOM_HISTORY_SIZE 32
+
+// Una posa dell'odometria grezza e l'istante in cui è stata calcolata
+typedef struct {
+    int64_t t_ns;
+    double x, y, theta;
+} movement_odom_pose_t;
+
+// Storico delle ultime pose dell'odometria grezza: buffer circolare, serve alla mappatura
+typedef struct {
+    movement_odom_pose_t pose[MOVEMENT_ODOM_HISTORY_SIZE];
+    uint32_t next_index;        // dove verrà scritta la prossima posa, quella precedente è la più recente
+    uint32_t count;             // numero di pose valide
+} movement_odom_history_t;
 
 // caratteristiche del task movement, definita in movement.c
 extern rt_task_t movement_task;
 
 void init_movement(void);
 movement_position_data_t read_movement(void);
+void read_odom_history(movement_odom_history_t *history);
 void job_movement(void *arg);
 
 

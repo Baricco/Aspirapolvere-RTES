@@ -54,7 +54,6 @@ typedef enum {
     NAV_CELL_TOO_NARROW,                 // Cella troppo Stretta: il passaggio è troppo stretto, nonostante questa cella sia libera, il robot non può comunque passare
 } mapping_nav_cell_state;
 
-
 // Funzione helper per calcolare l'indice della cella nella navigation map partendo dalle coordinate espresse in metri rispetto all'origine
 static inline uint16_t coord_to_nav_index(double x, double y) { 
     // prende le due coordinate (x,y) e ne calcola l'indice nella navigation map. l'indice è un numero a 16bit composto da 8bit che sono la y + 8bit che sono la x
@@ -158,11 +157,24 @@ typedef struct {
 
 } mapping_forbidden_zone_list_t;
 
+// Struttura dati che contiene la correzione usata nel riallineamento della mappatura
+typedef struct {
+    
+    uint32_t version;                       // versione dell'allineamento, per rilevare i cambiamenti
+    
+    double odom_x, odom_y, odom_theta;      // odometria all'ultimo allineamento
+    double map_x, map_y, map_theta;         // stima allineata in quell'istante
+
+    bool is_stuck;                  // indica se il robot è incastrato, va a true se le ruote girano liberamente ma il robot è fermo
+
+} mapping_correction_t;
+
 // caratteristiche del task mapping, definita in mapping.c
 extern rt_task_t mapping_task;
 
 int init_mapping(void);
 mapping_forbidden_zone_list_t read_forbidden_zone_list(void);
+mapping_correction_t read_mapping_correction(void);
 // funzione per pubblicare la lista di zone proibite (lo leggerà task navigation e safety)
 void write_forbidden_zone_list(const mapping_forbidden_zone_list_t *new_forbidden_zones);
 uint32_t read_nav_map_version_number(void);

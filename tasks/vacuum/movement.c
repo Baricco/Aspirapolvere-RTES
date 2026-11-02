@@ -4,6 +4,7 @@
 
 #include "movement.h"
 #include "navigation.h"
+#include "mapping.h"
 
 // struttura dati interna che contiene lo stato interno del task
 typedef struct {
@@ -22,6 +23,8 @@ typedef struct {
     uint32_t cur_obj_num;               // numero dell'obiettivo in esecuzione al momento
     bool obj_achieved;                  // indica se l'obiettivo attuale è stato raggiunto
 
+    double map_x, map_y, map_theta;     // posizione del robot sulla mappa
+
 } movement_state_t;
 
 
@@ -32,6 +35,13 @@ static movement_state_t mov_state;
 static scambio_t double_buffer;
 // i due buffer
 static movement_position_data_t buffer1, buffer2;
+
+// canale di scambio dello storico delle pose dell'odometria
+static scambio_t double_buffer_history;
+// i due buffer
+static movement_odom_history_t history_buffer1, history_buffer2;
+// lo storico aggiornato da questo task
+static movement_odom_history_t odom_history;
 
 // caratteristiche del task
 rt_task_t movement_task;
@@ -46,6 +56,14 @@ void init_movement(void) {
         &buffer1,
         &buffer2, 
         sizeof(movement_position_data_t)
+    );
+
+    // inizializza il doppio buffer dello storico delle pose
+    scambio_init(
+        &double_buffer_history,
+        &history_buffer1,
+        &history_buffer2,
+        sizeof(movement_odom_history_t)
     );
 
     // azzera la struttura dati dello stato del moviment
@@ -64,6 +82,14 @@ movement_position_data_t read_movement(void) {
 
     // ritorna position_data
     return position_data;
+}
+
+// funzione di lettura dello storico delle pose dell'odometria.
+// la struttura è grande, quindi si passa il puntatore invece di restituirla
+void read_odom_history(movement_odom_history_t *history) {
+
+    // se non è ancora stato pubblicato niente, lo storico risulta vuoto
+    if (scambio_leggi(&double_buffer_history, history) == 0) history->count = 0;
 }
 
 // funzione helper che legge il frame dal driver
@@ -115,9 +141,14 @@ static movement_position_data_t get_cur_pos_data_from_cur_state(const movement_s
     // Copia nella variabile tutti i valori necessari presi dallo stato attuale
     next_mov_pos_data.num = cur_state->last_frame_num;
     next_mov_pos_data.frame_acq_t = cur_state->last_frame_arrival_time;
-    next_mov_pos_data.x = cur_state->x;
-    next_mov_pos_data.y = cur_state->y;
-    next_mov_pos_data.theta = cur_state->theta;
+    // x, y e theta sono la posizione sulla mappa: quella che usano navigazione, sicurezza e driver
+    next_mov_pos_data.x = cur_state->map_x;
+    next_mov_pos_data.y = cur_state->map_y;
+    next_mov_pos_data.theta = cur_state->map_theta;
+    // odom_x, odom_y e odom_theta sono l'odometria grezza: la usa solo la mappatura per calcolare la correzione
+    next_mov_pos_data.odom_x = cur_state->x;
+    next_mov_pos_data.odom_y = cur_state->y;
+    next_mov_pos_data.odom_theta = cur_state->theta;
     next_mov_pos_data.v = cur_state->v;
     next_mov_pos_data.omega = cur_state->omega;
     
@@ -155,6 +186,8 @@ static void update_mov_state(movement_state_t *cur_state, const movement_state_t
 
 }
 
+
+
 // Funzione helper che normalizza un angolo tra due i valori -max_min_value e max_min_value
 static void normalize_angle(const double max_min_value, double *to_normalize) {
     if (*to_normalize > max_min_value) *to_normalize -= max_min_value * 2;
@@ -168,6 +201,54 @@ static double saturate_value(const double max_min, double value) {
         return max_min * (value < 0 ? -1 : 1);
     }
     return value;
+}
+
+// Funzione helper che calcola la posizione sulla mappa partendo dall'odometria grezza (cur_state->x, y e theta)
+// e dall'ultima correzione pubblicata dalla mappatura. La correzione dice dove stava il robot sulla mappa quando l'odometria
+// valeva odom_x, odom_y e odom_theta: basta ripartire da lì con lo spostamento fatto da allora, ruotato di offset
+// ! l'odometria grezza non viene mai modificata, la correzione cambia solo map_x, map_y e map_theta
+static void apply_map_correction(movement_state_t *cur_state, const mapping_correction_t *correction) {
+
+    // Finché non è arrivata nessuna correzione, la posizione sulla mappa coincide con l'odometria
+    if (correction->version == 0) {
+        cur_state->map_x = cur_state->x;
+        cur_state->map_y = cur_state->y;
+        cur_state->map_theta = cur_state->theta;
+        return;
+    }
+
+    // calcola l'angolo fra il sistema della mappa e quello dell'odometria
+    double offset = correction->map_theta - correction->odom_theta;
+    normalize_angle(M_PI, &offset);
+
+    // calcola lo spostamento dell'odometria dall'ultimo allineamento
+    double dx = cur_state->x - correction->odom_x;
+    double dy = cur_state->y - correction->odom_y;
+
+    // ruota lo spostamento negli assi della mappa e sommalo alla posizione allineata
+    cur_state->map_x = correction->map_x + dx * cos(offset) - dy * sin(offset);
+    cur_state->map_y = correction->map_y + dx * sin(offset) + dy * cos(offset);
+
+    // calcola la rotazione sulla mappa e normalizzala tra -PI e PI
+    cur_state->map_theta = cur_state->theta + offset;
+    normalize_angle(M_PI, &cur_state->map_theta);
+}
+
+// Funzione helper che aggiunge allo storico la posa attuale dell'odometria grezza e lo pubblica
+static void publish_odom_history(const movement_state_t *cur_state) {
+
+    odom_history.pose[odom_history.next_index] = (movement_odom_pose_t){
+        .t_ns = cur_state->last_frame_arrival_time,
+        .x = cur_state->x,
+        .y = cur_state->y,
+        .theta = cur_state->theta,
+    };
+
+    // il buffer è circolare: arrivato in fondo riparte dall'inizio, sovrascrivendo la posa più vecchia
+    odom_history.next_index = (odom_history.next_index + 1) % MOVEMENT_ODOM_HISTORY_SIZE;
+    if (odom_history.count < MOVEMENT_ODOM_HISTORY_SIZE) odom_history.count++;
+
+    scambio_scrivi(&double_buffer_history, &odom_history);
 }
 
 // job del task
@@ -251,6 +332,16 @@ void job_movement(void *arg) {
         // Aggiorna lo stato del movimento
         update_mov_state(&mov_state, &cur_state);
 
+        // Aggiungi la nuova posa allo storico dell'odometria e pubblicalo
+        publish_odom_history(&mov_state);
+
+        // Leggi la correzione della posizione proveniente dalla mappatura 
+        mapping_correction_t map_correction = read_mapping_correction();
+
+        // Calcola la posizione sulla mappa. Va fatto a ogni frame, anche se la correzione è sempre la stessa,
+        // perché nel frattempo l'odometria è cambiata. Da qui in poi la guida usa solo la posizione sulla mappa
+        apply_map_correction(&mov_state, &map_correction);
+
         // Leggi l'obiettivo da raggiungere
         navigation_objective_t cur_obj = read_navigation();
 
@@ -296,7 +387,7 @@ void job_movement(void *arg) {
                 
                 case OBJ_ROTATE: {      // se l'obiettivo è ruotare
                     // calcola l'errore di rotazione attuale
-                    double cur_error = cur_obj.theta - mov_state.theta;
+                    double cur_error = cur_obj.theta - mov_state.map_theta;
                     normalize_angle(M_PI, &cur_error);
                     
                     // controlla se l'errore è <= della tolleranza
@@ -321,8 +412,8 @@ void job_movement(void *arg) {
                 case OBJ_MOVE: {        // se l'obiettivo è spostarsi
 
                     // calcola dx e dy del robot rispetto all'obiettivo
-                    double dx = cur_obj.x - mov_state.x,
-                           dy = cur_obj.y - mov_state.y;
+                    double dx = cur_obj.x - mov_state.map_x,
+                           dy = cur_obj.y - mov_state.map_y;
 
                     // calcola la distanza tra il robot e l'obiettivo
                     double dist_error = hypot(dx, dy);
@@ -341,7 +432,7 @@ void job_movement(void *arg) {
                     // Calcola la direzione dell'obiettivo rispetto a quella del robot,
                     // se il robot ha velocità negativa, significa che deve andare indietro 
                     // quindi sommiamo PI alla dir_error
-                    double dir_error = atan2(dy, dx) - mov_state.theta + (signbit(cur_obj.v) ? M_PI : 0);
+                    double dir_error = atan2(dy, dx) - mov_state.map_theta + (signbit(cur_obj.v) ? M_PI : 0);
                     normalize_angle(M_PI, &dir_error);
 
                     

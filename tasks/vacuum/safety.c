@@ -130,6 +130,10 @@ void job_safety(void *arg) {
             }
         } else safe_state.stuck_frame_counter = 0;      // se il robot non risulta bloccato azzera il contatore
 
+        // le ruote possono slittare a piena velocità, e gli encoder non se ne accorgono
+        // la mappatura confronta l'odometria con la scena vista dal lidar
+        if (read_mapping_correction().is_stuck) cur_error_mask |= SAFETY_ERROR_STUCK;
+
     }
 
     // Controlla se il robot è incastrato ed eventualmente  segnala l'incastro
