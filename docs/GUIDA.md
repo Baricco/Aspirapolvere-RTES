@@ -464,6 +464,12 @@ L'indirizzo può aprire direttamente una scheda o una selezione: `#messaggi`, `#
 `./rtes.sh sim` mette le pseudo-seriali in `RTES_GD32` e `RTES_LIDAR`, e `drv_config_default()` le usa al posto di
 `/dev/ttyS3` e `/dev/ttyS1`. Se il programma è un `build/host/<nome>` di `tasks/`, lo ricompila prima di lanciarlo.
 
+**Fantasma.** Con lo stesso comando la pagina disegna anche il robot semitrasparente dove il programma **crede** di
+essere (casella "Fantasma"), e sotto la griglia scrive quanto dista dal robot vero. `sim/osserva.c` legge ogni 20 ms
+l'ultima posizione data dal moto con `drv_posa()` (simboli `sc_posa` e `buf_posa` di `driver/driver.c`), e il
+simulatore la riporta in `/stato` nel campo `creduta`. In movimento 1-2 cm di differenza sono normali: i due dati
+arrivano con qualche decina di millisecondi di scarto.
+
 **Griglia del robot.** Con `./rtes.sh sim stanza.txt build/host/vacuum` la pagina disegna sopra la stanza vera la
 **griglia di navigazione** del programma (casella "Griglia del robot"): celle libere in azzurro, bloccate in rosso,
 proibite in viola, più la versione della mappa in alto a destra. Il codice del robot non cambia: il programma parte

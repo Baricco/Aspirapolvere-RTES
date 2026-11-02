@@ -56,6 +56,16 @@ const Griglia = (() => {
     setTimeout(ciclo, 250);
   }
 
+  // Distanza fra il robot vero e dove crede di essere. Può valere 1-2 cm in movimento anche senza errore: i due dati
+  // arrivano con qualche decina di millisecondi di differenza.
+  function erroreFantasma() {
+    const s = App.stato;
+    if (!s || !s.creduta) return "";
+    let da = (s.creduta.dir - s.robot.dir) % 360;
+    if (da > 180) da -= 360; else if (da < -180) da += 360;
+    return `<br>Fantasma: ${(100 * Math.hypot(s.creduta.x - s.robot.x, s.creduta.y - s.robot.y)).toFixed(1)} cm e ${Math.abs(da).toFixed(1)}° dal robot vero`;
+  }
+
   const chip = (c, t) => `<span class="c" style="background:rgba(${c[0]},${c[1]},${c[2]},${(c[3] / 255).toFixed(2)})"></span>${t}`;
   function aggiornaInfo() {
     if (!casella.checked) { info.hidden = true; return; }
@@ -70,7 +80,7 @@ const Griglia = (() => {
       info.innerHTML = `<b>Griglia del robot</b>: versione ${dati.versione}` + (dati.stato === 2 ? " (programma terminato)" : "") +
         `<br>${dati.libere} libere` + (dati.parziali ? ` (${dati.parziali} solo in parte)` : "") +
         `, ${dati.bloccate} bloccate (1020 sono il bordo della mappa)` +
-        (dati.proibite ? `, ${dati.proibite} proibite` : "") + (dati.strette ? `, ${dati.strette} troppo strette` : "") + `<br>${legenda}`;
+        (dati.proibite ? `, ${dati.proibite} proibite` : "") + (dati.strette ? `, ${dati.strette} troppo strette` : "") + `<br>${legenda}` + erroreFantasma();
     } else {
       info.innerHTML = `<b>Griglia del robot</b>: ${STATI[dati.stato] || "?"}` + (dati.msg ? `<br><span class="${dati.stato === 3 ? "err" : "tenue"}">${dati.msg}</span>` : "");
     }

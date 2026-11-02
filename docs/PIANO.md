@@ -135,8 +135,8 @@ I task dell'esame li scrive l'utente da solo, sopra un framework e un driver pre
       mezza cella vicina libera e sporca nell'ordine nord, sud, est, ovest (nord/sud = lungo le strisce, nella stessa
       metà; est/ovest = l'altra metà della stessa cella o la metà più vicina della cella accanto), e si allunga lungo
       le strisce finché la metà successiva è libera, sporca e con la corsia allo stesso scostamento. Vicolo cieco:
-      ricerca della cella con almeno una metà sporca (`GOAL_DIRTY`). Niente da pulire: riposo (poi seguimuro e
-      ritorno alla base);
+      ricerca della cella con almeno una metà sporca (`GOAL_DIRTY`). Niente da pulire: riposo (poi ritorno alla
+      base; il giro dei bordi viene prima delle strisce, deciso 2026-11-01, vedi più sotto);
     - **"segui percorso"** riceve uno scostamento laterale sommato a ogni punto (zero fuori dalle strisce, che sono
       dritte) e, **solo per le strisce**, se il robot è a più di 2 cm dal primo punto ci va prima: così si entrano le
       corsie e si fanno i passi laterali di 10 cm. Negli altri percorsi il primo punto è la cella del robot, e se è
@@ -214,7 +214,8 @@ I task dell'esame li scrive l'utente da solo, sopra un framework e un driver pre
     attivo abbastanza a lungo da non perderlo. I segni valgono per la sessione;
   - **celle di navigazione da 20 cm** (2026-10-19): lungo i muri il corpo del robot resta fra 2,5 e 22,5 cm dal
     muro (dipende da dove cade il muro rispetto alla griglia). Si lasciano così: i bordi li pulisce un **seguimuro**
-    guidato dalla distanza del lidar, da aggiungere alla navigazione dopo BA*;
+    guidato dalla distanza del lidar, da aggiungere alla navigazione dopo BA* (progettato il 2026-11-01: giro dei
+    bordi, anche attorno agli ostacoli, vedi più sotto);
   - **rumore della mappa** (2026-10-18): la versione cresce anche con il robot fermo (celle di bordo che cambiano
     stato); si accetta per ora, da misurare e tarare dopo la correzione del giro.
   - **frontiere che si chiudono sempre** (2026-10-21): l'esplorazione non tiene liste di frontiere scartate (sarebbe
@@ -365,7 +366,9 @@ I task dell'esame li scrive l'utente da solo, sopra un framework e un driver pre
       quinto punto non aggiunge niente; i punti da 5 cm in una cella possono fare 9113 figure diverse, che in un byte
       non stanno. La parte sinistra della cucina resta dietro passaggi da ~45 cm: 5 cm di gioco per il centro del
       robot, quanto una cella fine, quindi si apre o no col rumore (il margine va discusso a parte).
-  - **gambe sottili che lampeggiano** (misurato 2026-10-30, da correggere dopo la mappa a due livelli): con il
+  - **gambe sottili che lampeggiano** (misurato 2026-10-30; **2026-11-01, decisione dell'utente: restano così**, a
+    meno di trovare un approccio completamente nuovo e semplice, con poche righe di codice; in parte le copre il
+    giro dei bordi con i quadranti attraversati, vedi sotto): con il
     registratore della copia di prova (`tools/prove-nav/sonda_mappa.c`, `analizza_mappa.py`), cucina, 4 minuti.
     Misure e posizione vanno bene: 800 celle fini occupate su 804 toccano un ostacolo vero, 1 fantasma; nessuna
     delle 182 celle di navigazione bloccate è senza un ostacolo vero entro 20 cm (più l'arrotondamento). Ma le celle
@@ -403,6 +406,101 @@ I task dell'esame li scrive l'utente da solo, sopra un framework e un driver pre
     perde** (fermato a ~830 s): strisce perfette fino a 445 s, poi si incastra più di 10 volte sotto la credenza
     rialzata (9–40 cm, il lidar a 8,7 cm ci passa sotto), le ruote slittano e la posizione deriva (oltre 50 cm dopo
     626 s, fino a 1,9 m); niente la corregge perché manca l'allineamento delle scansioni (prossimo passo).
+  - **giro dei bordi** (deciso 2026-11-01, **obbligatorio**, da fare dopo l'allineamento delle scansioni): oggi il
+    robot non pulisce né lungo i muri né attorno agli ostacoli, perché il centro resta ad almeno 22 cm (corpo a
+    ~4,5 cm). Missione: **esplorazione → giro dei bordi → strisce (BA\*) → ritorno alla base** (i bordi prima delle
+    strisce, così i quadranti attraversati aprono la mappa per le strisce).
+    - **controllo che reagisce al lidar**, non alla griglia: obiettivo `OBJ_CONST_SPEED` (v e ω), distanze dei 12
+      settori che il lidar già pubblica (`lidar_scan_data_t.sector_distance`), ostacolo sempre dallo stesso lato a
+      **3 cm** dal corpo (non 1–2: vedi i quadranti attraversati); gira verso l'esterno quando davanti c'è un
+      ostacolo, verso il lato seguito quando il bordo finisce (angolo). Con la spazzola laterale pulisce la fascia
+      che le strisce non toccano;
+    - **non solo i muri: anche gli ostacoli in mezzo alla stanza** (pulisce meglio e apre più quadranti). Prima il
+      muro esterno, poi una ricerca del **quadrante di bordo più vicino non ancora percorso** (libero, accanto a uno
+      bloccato, non attraversato), il robot ci va e segue l'ostacolo finché torna vicino al punto di partenza; si
+      ripete finché non restano bordi. Da guardare nelle prove: le gambe sottili (girarci attorno costa tempo e,
+      se la gamba lampeggia, il robot la perde): eventuale dimensione minima dell'ostacolo o tempo massimo per giro.
+  - **quadranti attraversati** (deciso 2026-11-01, insieme al giro dei bordi): dove il robot è passato davvero, il
+    quadrante resta libero per tutta la sessione, qualunque cosa dica il lidar. Serve in cucina: i passaggi da ~45 cm
+    verso la metà sinistra, che la mappa (margine 22 cm, celle fini da 5 cm) chiude ma il giro dei bordi (guidato
+    dal lidar, ~1 cm di precisione) può attraversare, e l'uscita da sotto il tavolo (le celle da cui il robot è
+    entrato restano aperte anche quando le gambe lampeggiano); sui quadranti attraversati il rumore sparisce.
+    - **dove si salva: il bit più alto (128) dei contatori della mappatura** `num_occupied_fine_cells[4][...]`, uno
+      per quadrante, 8 bit: contano le celle fini occupate entro 22 cm, al massimo ~61, quindi il bit 128 non si usa
+      mai. Niente strutture nuove e la navigazione non cambia. **Segno**: a ogni job della mappatura `|= 128` sul
+      contatore del quadrante sotto il robot, **solo se il centro del robot passa entro ~2 cm dal centro del
+      quadrante** (con il giro dei bordi a 3 cm, un quadrante segnato ha il robot dentro con almeno 1 cm di gioco).
+      **Lettura**: in `calc_nav_cell_bitmask` un quadrante è bloccato solo se il contatore è fra 1 e 127. I ±1 dei
+      contatori non toccano il bit 128 (restano sotto ~61);
+    - **la cella chiusa vince**: lo stato "troppo stretta" è separato dai bit, quindi sotto la credenza (il robot ci
+      arriva ma si incastra) la navigazione la chiude come oggi;
+    - **scartato uno stato nuovo della cella** ("attraversabile", o il bit libero dei 4 dello stato): la cella da
+      20 cm è troppo grande. Il giro dei bordi passa con il centro a ~18,5–19,5 cm dal muro, e una cella intera
+      libera includerebbe quadranti con il centro a 13–14 cm dal muro (dentro il corpo); lungo tutti i muri strisce
+      e percorsi andrebbero contro il muro, con urti e celle chiuse a catena. Serve un'informazione per quadrante
+      (4 bit per cella), che nel byte della mappa non sta;
+    - **dopo l'allineamento delle scansioni**: un quadrante attraversato non cambia più per tutta la sessione, quindi
+      con la posizione sbagliata (come nel soggiorno, fino a 1,9 m) se ne segnerebbero per sempre dentro i mobili.
+  - **allineamento delle scansioni, progetto** (deciso 2026-11-02, da scrivere in `mapping.c` e `movement.c`).
+    Scelto dopo le prove su un modello semplificato (stanze del simulatore, griglia e punteggi come `mapping.c`, giro
+    del lidar senza deformazione da movimento; programmi temporanei, non nel repository): la conferma vera è nel
+    simulatore con il codice dei task.
+    - **a ogni job, prima di scrivere il giro in mappa**: la stima parte da quella precedente più lo spostamento
+      dell'odometria, poi **5 passi di Gauss-Newton** su x, y e angolo, con **lettura bilineare** della griglia fine
+      esistente (media pesata delle 4 celle attorno al punto, da cui esce anche il gradiente; punteggi negativi e valori
+      speciali -128 e 127 contano 0). Per ogni punto: `r = 100 - M`, si accumulano i prodotti di gradiente e `r`, e si
+      risolve un sistema 3×3. Alla diagonale si somma un numero piccolo (**1e8**, con i punteggi in 0..100 e il gradiente
+      in punteggio/m): nelle direzioni piatte, come lungo un corridoio, il passo resta quasi nullo. Numero di passi e di
+      punti fissi, quindi tempo fisso. Provati e scartati: bicubica (non migliora e costa di più), solo x e y
+      (l'oscillazione raddoppia), tentativi a 1 cm (più lenti e non più precisi).
+    - **ricerca a tentativi su richiesta**: dopo i passi si contano, fra i punti su celle note (`!= 0`), quelli su celle
+      con punteggio positivo; con almeno 30 punti noti e **meno dell'80%** positivi parte la ricerca: **±20 cm a passi di
+      5 cm, ±5° a passi di 0,5°**, somma dei punteggi delle celle meno una piccola penalità per la distanza dalla posa
+      prevista, poi altri 5 passi. Il risultato si tiene solo se il punteggio migliora. Non gira a ogni job perché nei
+      corridoi lunghi è lei a portare fuori strada; il caso peggiore per l'analisi è comunque il job che la esegue.
+      Ogni giro si scrive in mappa con la posa corretta. Niente seconda griglia, niente memoria in più.
+    - **punteggi**: restano +30/-10, i migliori nelle prove (con +10/-3 l'errore costante sale a 5,5 cm), quindi la mappa
+      di navigazione non cambia. Provati dal firmware originale e non presi: filtro di movimento (nessun effetto),
+      riduzione dei punti (-40% di tempo, picco un po' più alto), controllo dell'angolo 10°/50° (peggiora con le spinte).
+    - **correzione al moto**: il moto tiene l'**odometria grezza** (mai corretta) e uno **storico delle ultime pose con
+      il loro istante** (~20, ~400 ms). La mappatura prende dallo storico la posa all'istante del giro e pubblica con il
+      doppio buffer una **trasformazione** mappa ← odometria, che sostituisce la precedente: non invecchia e perderne una
+      non crea errori. Il moto pubblica `trasformazione ⊕ odometria` nella posa di sempre: navigazione e sicurezza non
+      cambiano (leggono solo `read_movement()`) e il driver la riceve da `drv_posa()`, chiamata dal moto. La correzione
+      applicata alla guida avanza di **pochi millimetri per frame** (valore da tarare nel simulatore), perché vicino a un
+      obiettivo un salto di 1 cm fa ruotare il robot sul posto; la mappatura invece usa subito la trasformazione intera.
+      Niente filtri sulla stima: dimezzare ogni correzione ha peggiorato i picchi. Lo storico sostituisce anche l'ipotesi
+      di velocità costante nella correzione del giro.
+    - **risultati sul modello** (griglia allineata ai muri, 3 griglie, 4 stanze, incastri di 3 s ogni 30-50 s): errore
+      costante 2,0 cm, oscillazione 0,5 cm, 95% del tempo sotto 2,6 cm, picco 4,8 cm (solo odometria, nelle prove più
+      vecchie: fino a 126 cm). Spinte non viste dall'odometria, picco: 15 cm e 3° → 4,8 cm; 15 cm e 10° → 6,1 cm. Corridoi
+      lisci 8/12/20 m, picco 9/32/163 cm (solo odometria 95/107/149 cm). La ricerca parte in meno dell'1% dei job.
+    - **tempi sul robot** (2026-11-02, programma di prova, non il codice finale, a priorità normale): controllo del
+      punteggio ≤ 0,19 ms; 5 passi ≤ 0,90 ms; ricerca + 5 passi ≤ 11,8 ms. Job normale ~1,1 ms, job con ricerca ~13 ms, da
+      sommare alla scrittura in mappa e alla pubblicazione (`job_mapping` non è ancora stato misurato).
+    - **punti aperti**: corridoi lisci molto lunghi (lungo l'asse resta l'errore dell'odometria); spinte oltre ~25 cm o
+      10-20° non sempre recuperate; angolo di aggancio alla base da misurare (griglia ruotata di 3°: picco 22 cm; la base
+      sta contro un muro, quindi gli assi partono circa allineati); errore costante di 2 cm e un rientro da 34 job dopo una
+      spinta, non spiegati; soglia dell'80% scelta su queste stanze, da riprovare con persone e oggetti in movimento.
+  - **ricerca globale dopo un sollevamento** (deciso 2026-11-02, recupero da un guasto: **da fare dopo il giro dei
+    bordi**, l'ordine preciso è da decidere). Oggi `valid` è sempre vero (`movement.c:124`): manca il collegamento al
+    sollevamento riconosciuto dal driver; mappatura e navigazione già reagiscono a `valid` falso. Robot sollevato: `valid`
+    falso, tutto fermo. Riappoggiato: resta fermo e cerca la posizione su tutta la mappa **a fette**, ogni job con tempo
+    limitato e un numero di job libero, così nessuna scadenza si perde. Riparte solo con la posizione confermata (errore
+    entro quello dell'allineamento locale), con `valid` di nuovo vero, e riprende il lavoro che stava facendo. Può girarsi
+    per avere una vista migliore. Ordine di grandezza (misurato sul robot con griglia a bit da 32 KB, 10 cm, 6000
+    posizioni, 85 punti): 8 ms per angolo, griglia a bit 15 ms una volta sola. Da decidere quando si fa: stanze simili,
+    affidabilità, se l'IMU conta anche da sollevato (non verificato), uso anche per le spinte grandi.
+  - **cosa resta per finire il progetto** (2026-11-01, aggiornato 2026-11-02, in ordine). Fase 4: (1) allineamento delle
+    scansioni (progetto qui sopra);
+    (2) giro dei bordi; (3) quadranti attraversati; (4) ritorno alla base (`RETURN_HOME`, `HOOK_UP`, `SLEEP` oggi
+    vuoti): percorso fino davanti alla base (zona proibita permanente), aggancio con l'IR nel driver, poi riposo;
+    (5) spazzole e aspirazione (accese in pulizia, ferme nello sblocco); (6) mappa salvata e ricaricata; (7) guasto
+    chiesto da un task (`drv_segnala_guasto`); (8) prove sul robot vero con i motori; (9) WCET e jitter sul robot,
+    assegnazione ai core, analisi di schedulabilità (RM partizionato). Da inserire dopo il giro dei bordi, in un punto
+    da decidere: ricerca globale dopo un sollevamento. Fase 5: tipo di server aperiodico e di app,
+    comandi e telemetria. Fase 6: avvio automatico con ritorno all'originale, SSH solo con chiave, refactoring di
+    driver, `rt/` e simulatore (stile da decidere insieme) con revisione dell'utente, relazione.
   - **memoria bloccata sul PC** (2026-10-30): il programma blocca in RAM 7,97 MB e il limite per i normali utenti è
     8 MB; con MCL_FUTURE i thread creati dopo non partivano più (il `main` esce senza messaggio). `rt_init` ora,
     se non è root e il limite c'è, blocca solo la memoria di adesso (sul robot, root, tutto come prima).

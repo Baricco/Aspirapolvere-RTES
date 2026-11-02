@@ -17,7 +17,8 @@
  *       GET /mappa-robot (la griglia di navigazione del programma, letta da build/host/osserva: vedi sim/osserva.c).
  * Griglia del robot: quando nel file di osserva compare un programma nuovo (pid diverso), il simulatore si segna la
  * posizione vera del robot in quel momento: è l'origine dell'odometria del programma, e la pagina disegna la griglia
- * a partire da lì (in /stato, campo "programma").
+ * a partire da lì (in /stato, campo "programma"). Con la stessa origine, il campo "creduta" di /stato è la posizione che
+ * il programma crede di avere (il "fantasma" sulla pagina), letta da osserva: quella che il moto dà al driver.
  *
  * Uso: build/host/sim [opzioni] [stanza.txt]
  *   --porta N            porta della pagina (default 8080; 0 = niente pagina)
@@ -71,6 +72,7 @@ static const char *dir_stanze = "sim/stanze", *dir_web = "sim/web";
 static char stanza_corrente[600] = "(nuova)";
 static volatile sig_atomic_t fermati;
 static char file_mappa[600];             /* il file scritto da osserva (dir/mappa_robot) */
+static char file_posa[640];              /* la posizione creduta dal programma, scritta da osserva (dir/mappa_robot_posa) */
 static struct { uint32_t pid; double x, y, dir; } programma;   /* origine del programma osservato */
 
 static void al_segnale(int s) { (void)s; fermati = 1; }
@@ -284,6 +286,31 @@ static void ag_stringa(testo_t *s, const char *t)
 	ag(s, "\"");
 }
 
+/* La posizione che il programma osservato crede di avere (osserva, file _posa), nelle coordinate della stanza grazie
+ * all'origine del programma. Ritorna 0 se non c'è, o se è di un altro programma. Va chiamata con mx. */
+static int posa_creduta(double *x, double *y, double *dir)
+{
+	uint8_t b[40];
+	int fd = open(file_posa, O_RDONLY);
+	if (fd < 0)
+		return 0;
+	ssize_t k = read(fd, b, sizeof b);
+	close(fd);
+	uint32_t pid;
+	double p[3];
+	if (k != (ssize_t)sizeof b || memcmp(b, "RTPS", 4))
+		return 0;
+	memcpy(&pid, b + 4, 4);
+	memcpy(p, b + 16, sizeof p);
+	if (!programma.pid || pid != programma.pid)
+		return 0;
+	double c = cos(programma.dir), sn = sin(programma.dir);
+	*x = programma.x + p[0] * c - p[1] * sn;
+	*y = programma.y + p[0] * sn + p[1] * c;
+	*dir = programma.dir + p[2];
+	return 1;
+}
+
 static void stato_json(testo_t *s)
 {
 	double t = adesso() - t0, v, w;
@@ -316,6 +343,9 @@ static void stato_json(testo_t *s)
 	ag(s, "]},\"avviso\":");
 	ag_stringa(s, g.avviso);
 	ag(s, ",\"t_avviso\":%.1f,\"storia_n\":%llu,", g.t_avviso, (unsigned long long)storia_n);
+	double cx, cy, cd;
+	if (posa_creduta(&cx, &cy, &cd))
+		ag(s, "\"creduta\":{\"x\":%.4f,\"y\":%.4f,\"dir\":%.2f},", cx, cy, cd * 180 / M_PI);
 	ag(s, "\"programma\":{\"pid\":%u,\"x\":%.4f,\"y\":%.4f,\"dir\":%.5f}}", programma.pid, programma.x, programma.y,
 	   programma.dir);
 }
@@ -688,6 +718,7 @@ int main(int argc, char **argv)
 	snprintf(p_gd32, sizeof p_gd32, "%s/gd32", dir);
 	snprintf(p_lidar, sizeof p_lidar, "%s/lidar", dir);
 	snprintf(file_mappa, sizeof file_mappa, "%s/mappa_robot", dir);
+	snprintf(file_posa, sizeof file_posa, "%s/mappa_robot_posa", dir);
 	pty_t pg, pl;
 	if (apri_pty(&pg, p_gd32) || apri_pty(&pl, p_lidar)) {
 		fprintf(stderr, "sim: non riesco a creare le pseudo-seriali: %s\n", strerror(errno));

@@ -514,6 +514,7 @@ const Editor = (() => {
       ctx.fillStyle = col.lidar; const p = s.lidar.punti, r = Math.max(1.5, V.s * 0.01);
       for (let i = 0; i + 1 < p.length; i += 2) { const [a, b] = aSchermo(p[i], p[i + 1]); ctx.fillRect(a - r / 2, b - r / 2, r, r); }
       disegnaRobot(s);
+      disegnaFantasma(s);
     }
     // anteprima del disegno
     if (disegno) {
@@ -540,10 +541,21 @@ const Editor = (() => {
     requestAnimationFrame(disegna);
   }
 
-  function disegnaRobot(s) {
-    const r = posaRobot(), G = s.geometria, [rx, ry] = aSchermo(r.x, r.y), R = G.raggio * V.s;
+  // Il fantasma: lo stesso robot, semitrasparente, dove il programma dei task crede di essere (s.creduta, da sim/osserva.c).
+  const casellaFantasma = document.getElementById("fantasma-robot");
+  try { casellaFantasma.checked = localStorage.getItem("fantasma-robot") !== "0"; } catch (e) { /* va bene anche senza */ }
+  casellaFantasma.onchange = () => { try { localStorage.setItem("fantasma-robot", casellaFantasma.checked ? "1" : "0"); } catch (e) { } };
+  function disegnaFantasma(s) {
+    if (!casellaFantasma.checked || !s.creduta) return;
+    ctx.save(); ctx.globalAlpha = 0.45;
+    disegnaRobot(s, { x: s.creduta.x, y: s.creduta.y, angolo: s.creduta.dir }, true);
+    ctx.restore();
+  }
+
+  function disegnaRobot(s, posa, fantasma) {
+    const r = posa || posaRobot(), G = s.geometria, [rx, ry] = aSchermo(r.x, r.y), R = G.raggio * V.s;
     ctx.save(); ctx.translate(rx, ry); ctx.rotate(-r.angolo * GRADI);
-    if (s.sollevato) { ctx.shadowColor = "rgba(0,0,0,.45)"; ctx.shadowBlur = 18; ctx.shadowOffsetY = 10; }
+    if (s.sollevato && !fantasma) { ctx.shadowColor = "rgba(0,0,0,.45)"; ctx.shadowBlur = 18; ctx.shadowOffsetY = 10; }
     ctx.fillStyle = col.robot; ctx.strokeStyle = col["robot-bordo"]; ctx.lineWidth = 1.5;
     ctx.beginPath(); ctx.arc(0, 0, R, 0, 7); ctx.fill(); ctx.stroke(); ctx.shadowColor = "transparent";
     // bumper: arco anteriore sinistro (y negativo sullo schermo = sinistra del robot) e destro
@@ -564,7 +576,7 @@ const Editor = (() => {
     ctx.strokeStyle = col["robot-bordo"]; ctx.lineWidth = 2; ctx.beginPath(); ctx.moveTo(0, 0); ctx.lineTo(R * 0.65, 0); ctx.stroke();
     const cl = coloreLed(s.led);
     ctx.fillStyle = cl || col.griglia; ctx.beginPath(); ctx.arc(R * 0.45, 0, Math.max(3, R * 0.1), 0, 7); ctx.fill();
-    if (App.sel && App.sel.k === "robot") { ctx.strokeStyle = col.sel; ctx.lineWidth = 2.5; ctx.beginPath(); ctx.arc(0, 0, R * 1.12, 0, 7); ctx.stroke(); }
+    if (!fantasma && App.sel && App.sel.k === "robot") { ctx.strokeStyle = col.sel; ctx.lineWidth = 2.5; ctx.beginPath(); ctx.arc(0, 0, R * 1.12, 0, 7); ctx.stroke(); }
     if (s.caduto) { ctx.strokeStyle = col.errore; ctx.lineWidth = 4; ctx.beginPath(); ctx.moveTo(-R, -R); ctx.lineTo(R, R); ctx.moveTo(R, -R); ctx.lineTo(-R, R); ctx.stroke(); }
     ctx.restore();
   }

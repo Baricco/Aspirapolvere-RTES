@@ -21,6 +21,13 @@
  *    20   char[108] messaggio (testo, terminato da 0)
  *   128   uint8[65536] griglia di navigazione (4 bit bassi = stato, mapping_nav_cell_state; 4 alti = sottocelle bloccate, mapping.h)
  *
+ * Posizione creduta: dallo stesso eseguibile legge anche `sc_posa` e `buf_posa` (driver/driver.c), cioè l'ultima posizione
+ * che il moto ha dato al driver con drv_posa() (x, y, theta nel sistema della mappa), molto più spesso della griglia
+ * (ogni 20 ms) perché sulla pagina deve stare al passo con il robot vero. Non serve la struttura dei task: drv_posa è
+ * l'interfaccia del driver. Se il programma non ha quei simboli la posizione manca e il resto funziona.
+ * File FILE_posa, riscritto con un rename, little endian: 0 "RTPS"; 4 uint32 pid; 8 uint32 versione (scritture di
+ * drv_posa); 12 uint32 riservato; 16, 24, 32 double x, y, theta.
+ *
  * Uso: build/host/osserva [--uscita FILE] [--simbolo NOME] [--ogni-ms N] -- programma [argomenti...]
  * Ctrl+C arriva al programma (che si ferma da solo e stampa le statistiche); osserva aspetta che finisca ed esce con
  * il suo stesso codice.
@@ -41,6 +48,7 @@
 
 #define CELLE      65536                 /* NAV_MAP_CELL_NUMBER * NAV_MAP_CELL_NUMBER (tasks/vacuum/mapping.h) */
 #define TESTA      128
+#define POSA_DIM   32                    /* sizeof(drv_posa_t), driver/contatti.h */
 
 enum { CERCO = 0, LETTA = 1, TERMINATO = 2, ERRORE = 3 };
 
@@ -48,6 +56,8 @@ static const char *uscita = "build/sim/mappa_robot", *simbolo = "navigation_map_
 static pid_t figlio;
 static uint8_t file_out[TESTA + CELLE];
 static uint32_t letture, ultima_versione;
+static int fd_mem = -1;                 /* la memoria del programma */
+static uint64_t ind_sc_posa, ind_buf_posa;   /* 0 = il programma non ha quei simboli */
 
 static void al_segnale(int s)
 {
@@ -157,7 +167,6 @@ static void leggi(void)
 {
 	static char exe_noto[600];
 	static uint64_t indirizzo;
-	static int fd_mem = -1;
 	char p[64], exe[600], msg[200];
 	snprintf(p, sizeof p, "/proc/%d/exe", (int)figlio);
 	ssize_t k = readlink(p, exe, sizeof exe - 1);
@@ -167,6 +176,7 @@ static void leggi(void)
 	if (strcmp(exe, exe_noto)) {                 /* nuovo eseguibile: all'inizio c'è taskset, poi il programma */
 		snprintf(exe_noto, sizeof exe_noto, "%s", exe);
 		indirizzo = 0;
+		ind_sc_posa = ind_buf_posa = 0;
 		if (fd_mem >= 0)
 			close(fd_mem);
 		fd_mem = -1;
@@ -188,6 +198,14 @@ static void leggi(void)
 			return;
 		}
 		indirizzo = base + val;
+		uint64_t v1, v2, d1, d2;
+		int pie2;
+		char ignora[200];
+		if (!cerca_simbolo(exe, "sc_posa", &v1, &d1, &pie2, ignora, sizeof ignora) &&
+		    !cerca_simbolo(exe, "buf_posa", &v2, &d2, &pie2, ignora, sizeof ignora) && d2 == 2 * POSA_DIM) {
+			ind_sc_posa = base + v1;
+			ind_buf_posa = base + v2;
+		}
 		snprintf(p, sizeof p, "/proc/%d/mem", (int)figlio);
 		fd_mem = open(p, O_RDONLY);
 		if (fd_mem < 0) {
@@ -210,6 +228,39 @@ static void leggi(void)
 	letture++;
 	ultima_versione = versione;
 	scrivi(LETTA, versione, "");
+}
+
+/* Copia nel file _posa l'ultima posizione data dal moto al driver, se è nuova. Legge senza fermare il programma: se nel
+ * frattempo è arrivata una scrittura salta il giro (il prossimo è fra 20 ms). */
+static void leggi_posa(void)
+{
+	static uint32_t ultima;
+	static char nome[640], tmp[650];
+	if (fd_mem < 0 || !ind_sc_posa)
+		return;
+	uint32_t v, v2;
+	uint8_t buf[POSA_DIM];
+	if (pread(fd_mem, &v, 4, (off_t)ind_sc_posa) != 4 || v == 0 || v == ultima)   /* versione: primo campo di scambio_t */
+		return;
+	if (pread(fd_mem, buf, sizeof buf, (off_t)(ind_buf_posa + (v & 1) * POSA_DIM)) != (ssize_t)sizeof buf)
+		return;
+	if (pread(fd_mem, &v2, 4, (off_t)ind_sc_posa) != 4 || v2 != v)
+		return;
+	ultima = v;
+	uint8_t out[40] = "RTPS";
+	metti32(out + 4, (uint32_t)figlio);
+	metti32(out + 8, v);
+	memcpy(out + 16, buf, 24);                 /* x, y, theta: i primi campi di drv_posa_t */
+	if (!nome[0]) {
+		snprintf(nome, sizeof nome, "%s_posa", uscita);
+		snprintf(tmp, sizeof tmp, "%s.tmp", nome);
+	}
+	FILE *f = fopen(tmp, "wb");
+	if (!f)
+		return;
+	size_t ok = fwrite(out, 1, sizeof out, f);
+	if (fclose(f) == 0 && ok == sizeof out)
+		rename(tmp, nome);
 }
 
 int main(int argc, char **argv)
@@ -245,15 +296,20 @@ int main(int argc, char **argv)
 	sigaction(SIGHUP, &sa, NULL);
 	scrivi(CERCO, 0, "programma appena avviato");
 
-	int st = 0;
+	int st = 0, attesa = 0;
 	for (;;) {
 		pid_t r = waitpid(figlio, &st, WNOHANG);
 		if (r == figlio)
 			break;
 		if (r < 0 && errno != EINTR)
 			break;
-		leggi();
-		struct timespec ts = { ogni_ms / 1000, (long)(ogni_ms % 1000) * 1000000L };
+		if (attesa <= 0) {
+			leggi();
+			attesa = ogni_ms;
+		}
+		leggi_posa();
+		attesa -= 20;
+		struct timespec ts = { 0, 20 * 1000000L };
 		nanosleep(&ts, NULL);
 	}
 	scrivi(TERMINATO, ultima_versione, "programma terminato: resta l'ultima griglia letta");
