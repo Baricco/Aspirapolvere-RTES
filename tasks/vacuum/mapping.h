@@ -172,6 +172,10 @@ typedef struct {
 // caratteristiche del task mapping, definita in mapping.c
 extern rt_task_t mapping_task;
 
+// funzione helper che serve alla navigazione per rilevare se una cella di navigazione contiene al suo interno almeno una 
+// cella fine che sia un LOW_OBSTACLE o VOID_OBSTACLE, entrambi invisibili per il lidar
+bool is_nav_cell_invisible_obstacle(uint16_t cell);
+
 int init_mapping(void);
 mapping_forbidden_zone_list_t read_forbidden_zone_list(void);
 mapping_correction_t read_mapping_correction(void);

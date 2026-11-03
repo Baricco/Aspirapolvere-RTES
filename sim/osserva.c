@@ -20,6 +20,13 @@
  *    16   uint32  letture riuscite
  *    20   char[108] messaggio (testo, terminato da 0)
  *   128   uint8[65536] griglia di navigazione (4 bit bassi = stato, mapping_nav_cell_state; 4 alti = sottocelle bloccate, mapping.h)
+ * 65664   uint8  1 se le metà pulite qui sotto sono state lette, 0 se mancano (il resto funziona lo stesso)
+ * 65665   uint8  strip_axis_x: true se le strisce vanno lungo x, quindi le due metà di una cella sono y bassa e y alta
+ * 65666   uint8[2] riservati
+ * 65668   uint8[16384] clean_cell_mask: 2 bit per cella, metà pulite (bit = 2 * cella + metà, tasks/vacuum/navigation.c)
+ *
+ * Metà pulite: stanno in `nav_state`, una struttura privata di navigation.c che cambia spesso. Per non dipendere dall'ordine
+ * dei campi, la posizione di clean_cell_mask e strip_axis_x si chiede alle informazioni di debug con readelf (una volta sola).
  *
  * Posizione creduta: dallo stesso eseguibile legge anche `sc_posa` e `buf_posa` (driver/driver.c), cioè l'ultima posizione
  * che il moto ha dato al driver con drv_posa() (x, y, theta nel sistema della mappa), molto più spesso della griglia
@@ -49,15 +56,18 @@
 #define CELLE      65536                 /* NAV_MAP_CELL_NUMBER * NAV_MAP_CELL_NUMBER (tasks/vacuum/mapping.h) */
 #define TESTA      128
 #define POSA_DIM   32                    /* sizeof(drv_posa_t), driver/contatti.h */
+#define PULITE_TESTA 4                   /* presente, strip_axis_x, 2 riservati */
+#define PULITE_DIM (CELLE / 4)           /* sizeof(clean_cell_mask): 2 bit per cella */
 
 enum { CERCO = 0, LETTA = 1, TERMINATO = 2, ERRORE = 3 };
 
 static const char *uscita = "build/sim/mappa_robot", *simbolo = "navigation_map_data";
 static pid_t figlio;
-static uint8_t file_out[TESTA + CELLE];
+static uint8_t file_out[TESTA + CELLE + PULITE_TESTA + PULITE_DIM];
 static uint32_t letture, ultima_versione;
 static int fd_mem = -1;                 /* la memoria del programma */
 static uint64_t ind_sc_posa, ind_buf_posa;   /* 0 = il programma non ha quei simboli */
+static uint64_t ind_maschera, ind_asse;      /* 0 = metà pulite non trovate */
 
 static void al_segnale(int s)
 {
@@ -162,6 +172,50 @@ static int base_caricamento(pid_t pid, const char *percorso, uint64_t *base)
 	return r;
 }
 
+/* Chiede a readelf la posizione di due campi di nav_state nelle informazioni di debug di `exe`. 0 se le trova tutte e due. */
+static int cerca_campi_pulizia(const char *exe, uint64_t *off_maschera, uint64_t *off_asse)
+{
+	char cmd[700], riga[400];
+	if (strchr(exe, '\''))
+		return -1;
+	snprintf(cmd, sizeof cmd, "LC_ALL=C readelf --debug-dump=info '%s' 2>/dev/null", exe);
+	FILE *f = popen(cmd, "r");
+	if (!f)
+		return -1;
+	uint64_t *attesa = NULL;
+	int trovati = 0;
+	while (fgets(riga, sizeof riga, f)) {
+		riga[strcspn(riga, "\n")] = 0;
+		char *q;
+		if (strstr(riga, "DW_AT_name")) {
+			size_t n = strlen(riga);
+			while (n && riga[n - 1] == ' ')
+				riga[--n] = 0;
+			q = strrchr(riga, ' ');
+			attesa = !q ? NULL : !strcmp(q + 1, "clean_cell_mask") ? off_maschera :
+			         !strcmp(q + 1, "strip_axis_x") ? off_asse : NULL;
+		} else if (attesa && (q = strstr(riga, "DW_AT_data_member_location:"))) {
+			*attesa = strtoull(q + strlen("DW_AT_data_member_location:"), NULL, 0);
+			trovati++;
+			attesa = NULL;
+		}
+	}
+	pclose(f);
+	return trovati == 2 ? 0 : -1;
+}
+
+/* Copia nel file le metà pulite, se le abbiamo trovate. */
+static void leggi_pulite(void)
+{
+	uint8_t *d = file_out + TESTA + CELLE, asse = 0;
+	d[0] = 0;
+	if (!ind_maschera || pread(fd_mem, &asse, 1, (off_t)ind_asse) != 1 ||
+	    pread(fd_mem, d + PULITE_TESTA, PULITE_DIM, (off_t)ind_maschera) != PULITE_DIM)
+		return;
+	d[1] = asse;
+	d[0] = 1;
+}
+
 /* Un giro di lettura: trova la griglia (la prima volta, o se il programma ha fatto exec) e la copia nel file. */
 static void leggi(void)
 {
@@ -177,6 +231,7 @@ static void leggi(void)
 		snprintf(exe_noto, sizeof exe_noto, "%s", exe);
 		indirizzo = 0;
 		ind_sc_posa = ind_buf_posa = 0;
+		ind_maschera = ind_asse = 0;
 		if (fd_mem >= 0)
 			close(fd_mem);
 		fd_mem = -1;
@@ -206,6 +261,12 @@ static void leggi(void)
 			ind_sc_posa = base + v1;
 			ind_buf_posa = base + v2;
 		}
+		uint64_t v3, d3, off_m = 0, off_a = 0;
+		if (!cerca_simbolo(exe, "nav_state", &v3, &d3, &pie2, ignora, sizeof ignora) &&
+		    !cerca_campi_pulizia(exe, &off_m, &off_a) && off_m + PULITE_DIM <= d3 && off_a < d3) {
+			ind_maschera = base + v3 + off_m;
+			ind_asse = base + v3 + off_a;
+		}
 		snprintf(p, sizeof p, "/proc/%d/mem", (int)figlio);
 		fd_mem = open(p, O_RDONLY);
 		if (fd_mem < 0) {
@@ -225,6 +286,7 @@ static void leggi(void)
 	uint32_t versione;
 	memcpy(&versione, b + CELLE, 4);
 	memcpy(file_out + TESTA, b, CELLE);
+	leggi_pulite();
 	letture++;
 	ultima_versione = versione;
 	scrivi(LETTA, versione, "");

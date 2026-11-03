@@ -1,6 +1,6 @@
 # Una prova della navigazione: simulatore (stanza, seme del rumore, partenza) + build/prove-nav/vacdbg.
 # Uso (dalla cartella del progetto): python3 tools/prove-nav/prova.py [--pulizia] stanza.txt seme durata_s [x y angolo]
-# Si ferma quando la navigazione arriva alla pulizia o al guasto, o alla durata. Con --pulizia va avanti fino al
+# Si ferma quando la navigazione finisce l'esplorazione (arriva al giro dei bordi) o al guasto, o alla durata. Con --pulizia va avanti fino al
 # riposo o al ritorno alla base (fine della pulizia) o al guasto, e stampa anche strisce, trasferimenti e metà pulite (righe PERCORSO e
 # PULIZIA di costruisci.sh). Stampa un riassunto; i registri restano in build/prove-nav/, compreso il percorso vero
 # del robot nel simulatore (vero_<prova>.csv: orologio monotono, t del simulatore, x, y, dir, contatti), che
@@ -8,12 +8,14 @@
 import json, os, re, signal, subprocess, sys, time, urllib.request
 REPO = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..'))
 D = os.path.join(REPO, 'build', 'prove-nav')
-NOMI = ['WAIT', 'EXPLORE', 'CLEAN', 'BORDERS', 'HOME', 'HOOK', 'FOLLOW', 'UNLOCK', 'SLEEP', 'ALIGN', 'FAILURE']
+NOMI = ['WAIT', 'EXPLORE', 'CLEAN', 'BORDERS', 'HOME', 'HOOK', 'FOLLOW', 'UNLOCK', 'SLEEP', 'ALIGN', 'FAILURE', 'LAP']
 CLEAN, FAILURE, SLEEP, HOME = NOMI.index('CLEAN'), NOMI.index('FAILURE'), NOMI.index('SLEEP'), NOMI.index('HOME')
+BORDERS, LAP = NOMI.index('BORDERS'), NOMI.index('LAP')
+LAP_TIMEOUT = 1800   # BORDER_LAP_TIMEOUT di navigation.c: la rete di sicurezza, non deve mai scattare
 a = sys.argv[1:]
 PULIZIA = '--pulizia' in a
 a = [x for x in a if x != '--pulizia']
-FINE = (SLEEP, HOME, FAILURE) if PULIZIA else (CLEAN, FAILURE)
+FINE = (SLEEP, HOME, FAILURE) if PULIZIA else (BORDERS, FAILURE)
 stanza, seme, durata = a[0], a[1], float(a[2])
 testo = open(os.path.join(REPO, stanza)).read()
 if len(a) >= 6:
@@ -64,7 +66,7 @@ os.killpg(sim.pid, signal.SIGTERM); sim.wait(); vero.close()
 nav = righe_nav()
 t_start = next((float(n[1]) for n in nav if n[2] == '0' and n[3] == '1'), None)
 esito = 'TIMEOUT'
-fine_espl = next((i for i, n in enumerate(nav) if n[2] == '1' and n[3] == str(CLEAN)), None)
+fine_espl = next((i for i, n in enumerate(nav) if n[2] == '1' and n[3] == str(BORDERS)), None)
 if PULIZIA:
     if nav: esito = {SLEEP: 'PULIZIA FINITA', HOME: 'PULIZIA FINITA', FAILURE: 'GUASTO'}.get(int(nav[-1][3]), 'TIMEOUT')
 else:
@@ -86,7 +88,12 @@ print(f"   riallineamenti: {sum(1 for n in nav if NOMI[int(n[3])] == 'ALIGN')}, 
       f"celle chiuse: {fin[10] if fin else 0}, deadline mancate: {[m for m in mancate if m[1] != '0'] or 'nessuna'}")
 if PULIZIA:
     righe = [l.split() for l in open(fout, errors='replace') if l.startswith(('PERCORSO ', 'PULIZIA '))]
-    t_pul = next((float(n[1]) for n in nav if n[2] == '1' and n[3] == str(CLEAN)), None)
+    t_bor = next((float(n[1]) for n in nav if n[2] == '1' and n[3] == str(BORDERS)), None)
+    t_pul = next((float(n[1]) for n in nav if n[3] == str(CLEAN)), None)
+    giri = [float(b[1]) - float(a[1]) for a, b in zip(nav, nav[1:]) if a[3] == str(LAP)]
+    if t_bor is not None:
+        print(f"   giri dei bordi: {len(giri)}, il più lungo {max(giri, default=0):.1f}s, arrivati al tempo massimo: {sum(1 for g in giri if g >= LAP_TIMEOUT)}"
+              + (f", giro dei bordi {t_pul - t_bor:.1f}s" if t_pul else ", giro dei bordi non finito"))
     if t_pul is None: print("   la pulizia non è cominciata")
     else:
         dopo = [r for r in righe if float(r[1]) >= t_pul]
@@ -107,6 +114,6 @@ for e in eventi: print('   EVENTO', e)
 for n in nav:
     if n[2] == n[3] == '0': continue
     da, verso = NOMI[int(n[2])], NOMI[int(n[3])]
-    if verso in (('ALIGN', 'UNLOCK', 'FAILURE', 'SLEEP', 'HOME') if PULIZIA else ('ALIGN', 'UNLOCK', 'FAILURE', 'CLEAN')) or \
-       (PULIZIA and da == 'EXPLORE' and verso == 'CLEAN'):
+    if verso in (('ALIGN', 'UNLOCK', 'FAILURE', 'SLEEP', 'HOME') if PULIZIA else ('ALIGN', 'UNLOCK', 'FAILURE', 'BORDERS')) or \
+       (PULIZIA and da == 'EXPLORE' and verso == 'BORDERS') or (PULIZIA and da == 'BORDERS' and verso == 'CLEAN'):
         print(f"   {float(n[1]) - (t_start or 0):6.1f}s {da}->{verso} pos=({n[4]},{n[5]}) th={n[6]} maxv={n[7]} c2c={n[8]} chiuse={n[10]}")

@@ -6,9 +6,13 @@
 // le 4 sottocelle da 10 cm, a 1 se bloccate (bit 4 in alto a sinistra, 5 in alto a destra, 6 in basso a sinistra,
 // 7 in basso a destra; alto = y più alta), in tutte le celle: una cella tutta libera vale 1. Ogni cella si
 // disegna come 2 x 2 pixel, uno per sottocella: in una cella libera le sottocelle bloccate sono rosse.
+// Dopo la griglia, se c'è, la maschera delle metà pulite (sim/osserva.c): in una cella libera le sottocelle non bloccate di
+// una metà che il robot crede pulita sono verdi. Le metà dipendono dall'asse delle strisce: y bassa e alta se le strisce
+// vanno lungo x, altrimenti x bassa e alta. Le metà pulite su celle non libere si contano ma restano del colore della cella.
 "use strict";
 const Griglia = (() => {
   const N = 256, CELLA = 0.2, TESTA = 128;
+  const PULITE = TESTA + N * N, PULITE_TESTA = 4, VERDE = [30, 170, 70, 170];
   const COLORI = { 1: [42, 98, 184, 55], 2: [214, 39, 40, 135], 3: [142, 36, 170, 135], 4: [230, 140, 20, 150] };   // RGBA
   const STATI = ["cerco la griglia", "griglia letta", "programma terminato", "errore"];
   const tela = document.createElement("canvas");
@@ -30,13 +34,20 @@ const Griglia = (() => {
                 letture: dv.getUint32(16, true), msg: new TextDecoder().decode(b.subarray(20, fine)),
                 libere: 0, parziali: 0, bloccate: 0, proibite: 0, strette: 0 };
     const px = img.data;
+    d.mostraPulite = b.length >= PULITE + PULITE_TESTA + N * N / 4 && b[PULITE] === 1;
+    d.pulite = 0;
+    const assex = d.mostraPulite && b[PULITE + 1] !== 0, maschera = PULITE + PULITE_TESTA;
+    const pulita = (i, meta) => { const n = 2 * i + meta; return d.mostraPulite && (b[maschera + (n >> 3)] >> (n & 7) & 1) === 1; };
     for (let i = 0; i < N * N; i++) {
       const v = b[TESTA + i] & 15, bloccate = b[TESTA + i] >> 4, x = i % N, y = (i / N) | 0;
       if (v === 1) { d.libere++; if (bloccate) d.parziali++; }
       else if (v === 2) d.bloccate++; else if (v === 3) d.proibite++; else if (v === 4) d.strette++;
+      if (pulita(i, 0)) d.pulite++;
+      if (pulita(i, 1)) d.pulite++;
       for (let k = 0; k < 4; k++) {        // k = bit - 4; riga dell'immagine = y della griglia (la si capovolge disegnando)
         const p = ((2 * y + (k < 2 ? 1 : 0)) * 2 * N + 2 * x + (k & 1)) * 4;
-        const c = v === 1 && (bloccate >> k & 1) ? COLORI[2] : COLORI[v];
+        const meta = assex ? (k < 2 ? 1 : 0) : (k & 1);    // k < 2 = y alta, k dispari = x alta
+        const c = v === 1 && (bloccate >> k & 1) ? COLORI[2] : v === 1 && pulita(i, meta) ? VERDE : COLORI[v];
         if (c) { px[p] = c[0]; px[p + 1] = c[1]; px[p + 2] = c[2]; px[p + 3] = c[3]; } else px[p + 3] = 0;
       }
     }
@@ -75,12 +86,14 @@ const Griglia = (() => {
         `<code>./rtes.sh sim stanza.txt build/host/vacuum</code>.</span>`;
       return;
     }
-    const legenda = `${chip(COLORI[1], "libera")} &nbsp; ${chip(COLORI[2], "bloccata")} &nbsp; ${chip(COLORI[3], "proibita")} &nbsp; ${chip(COLORI[4], "troppo stretta")}`;
+    const legenda = `${chip(COLORI[1], "libera")} &nbsp; ${chip(COLORI[2], "bloccata")} &nbsp; ${chip(COLORI[3], "proibita")} &nbsp; ${chip(COLORI[4], "troppo stretta")}` +
+      (dati.mostraPulite ? ` &nbsp; ${chip(VERDE, "pulita")}` : "");
     if (dati.stato === 1 || dati.stato === 2) {
       info.innerHTML = `<b>Griglia del robot</b>: versione ${dati.versione}` + (dati.stato === 2 ? " (programma terminato)" : "") +
         `<br>${dati.libere} libere` + (dati.parziali ? ` (${dati.parziali} solo in parte)` : "") +
         `, ${dati.bloccate} bloccate (1020 sono il bordo della mappa)` +
-        (dati.proibite ? `, ${dati.proibite} proibite` : "") + (dati.strette ? `, ${dati.strette} troppo strette` : "") + `<br>${legenda}` + erroreFantasma();
+        (dati.proibite ? `, ${dati.proibite} proibite` : "") + (dati.strette ? `, ${dati.strette} troppo strette` : "") +
+        (dati.mostraPulite ? `<br>${dati.pulite} metà pulite` : `<br><span class="tenue">metà pulite non disponibili</span>`) + `<br>${legenda}` + erroreFantasma();
     } else {
       info.innerHTML = `<b>Griglia del robot</b>: ${STATI[dati.stato] || "?"}` + (dati.msg ? `<br><span class="${dati.stato === 3 ? "err" : "tenue"}">${dati.msg}</span>` : "");
     }

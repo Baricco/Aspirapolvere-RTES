@@ -46,6 +46,10 @@
 #define STUCK_MIN_ODOM_MOVE_M  0.05     // distanza minima che il robot deve percorrere prima che si consideri in movimento
 #define STUCK_MAX_MAP_MOVE_M   0.02     // distanza massima da percorrere perchè si consideri fermo
 
+#define QUAD_CROSSED_FLAG 128           // se questo flag è attivo dentro al contatore num_occupied_fine_cells, significa che quella cella fine è attraversabile dal robot
+#define QUAD_CROSSED_DISTANCE 0.02      // quanto il centro del robot deve passare vicino al centro del quadrante per attivarne il flag
+#define QUAD_CROSSED_MAX_STEP 0.15      // se il robot si sposta di una distanza superiore a questa tra due job, non si considerano le celle in mezzo come attraversate
+
 // canale di scambio del doppio buffer delle zone proibite
 static scambio_t double_buffer;
 // i due buffer
@@ -142,6 +146,12 @@ typedef struct {
 
     uint32_t stuck_history_count;     // numero delle scansioni registrate finora
 
+    // Struct che contiene l'ultima posizione registrata del robot
+    struct {                            
+        double x, y;                // coordinate
+        bool is_valid;              // indica se esiste un ultima posizione
+    } last_mark;
+
 } mapping_state_t;
 
 // stato del task di mappatura
@@ -158,8 +168,9 @@ static uint8_t calc_nav_cell_bitmask(uint16_t index) {
     
     // scorri tutti i quadranti
     for (int q = 0; q < 4; q++) {
-        // se un quadrante ha una delle celle fini bloccate al suo interno
-        if (map_state.num_occupied_fine_cells[q][index] != 0) {
+        // se un quadrante ha una delle celle fini bloccate al suo interno 
+        // se è 0 non ha celle fini bloccate, l'8° bit serve come flag per il passaggio del robot
+        if (map_state.num_occupied_fine_cells[q][index] >= 1 && map_state.num_occupied_fine_cells[q][index] <= 127) {
             // metti a 1 il bit corrispondente nella bitmask
             bitmask |= NAV_CELL_QUAD[q];
         }
@@ -180,6 +191,29 @@ static uint8_t calc_nav_cell_bitmask(uint16_t index) {
     bitmask <<= 4;
 
     return bitmask;
+}
+
+// funzione che prende un punto p(x, y), cioè il centro di un quadrante
+// e un segmento s(x1, y1, x2, y2), cioè il tragitto percorso dal robot tra due job di mappatura
+// e restituisce la distanza tra il punto e il segmento
+static double calc_segment_distance(double p_x, double p_y, double s_x1, double s_y1, double s_x2, double s_y2) {
+    
+    // calcola il vettore del segmento e la sua lunghezza al quadrato
+    double d_x = s_x2 - s_x1;
+    double d_y = s_y2 - s_y1;
+    double len2 = d_x * d_x + d_y * d_y;
+
+    // se il segmento ha lunghezza 0 (robot fermo), la distanza è quella dal suo estremo
+    if (len2 == 0) return hypot(p_x - s_x1, p_y - s_y1);
+
+    // calcola a che punto del segmento viene proiettato il punto: 0 sul primo estremo, 1 sul secondo
+    double t = ((p_x - s_x1) * d_x + (p_y - s_y1) * d_y) / len2;
+
+    // se il punto cade oltre uno dei due estremi, il punto più vicino è quest'ultimo
+    t = fmax(0, fmin(t, 1));
+
+    // restituisci la distanza dal punto del segmento più vicino
+    return hypot(p_x - (s_x1 + t * d_x), p_y - (s_y1 + t * d_y));
 }
 
 // funzione che legge la mappa interpolando con interpolazione bilineare. prende la posizione nella mappa x, y espressa in metri
@@ -469,18 +503,61 @@ static void update_occupied_cells(const int fine_x, const int fine_y, const int 
     }
 }
 
+// Funzione helper che toglie il segno di quadrante attraversato dai quadranti attorno a una cella della griglia fine:
+// il robot sarà anche passato di lì, ma un contatto con il vuoto o con un ostacolo dimostra che non deve tornarci
+static void clear_crossed_quads(const int fine_x, const int fine_y) {
+
+    // calcola le celle attorno a quella corrente (fine_x, fine_y)
+    int nav_x_min = 0;
+    int nav_x_max = 0;
+
+    int nav_y_min = 0;
+    int nav_y_max = 0;
+
+    get_x_y_min_max_area_around_cell(fine_x, fine_y, FINE_CELL_INFLATION_RADIUS, &nav_x_min, &nav_x_max, &nav_y_min, &nav_y_max);
+
+    // calcola le coordinate in metri della cella corrente
+    double fine_x_mt, fine_y_mt;
+    fine_index_to_coord((fine_y << 10) | fine_x, &fine_x_mt, &fine_y_mt);
+
+    // scorri le celle attorno alla cella alle coordinate fine_x e fine_y
+    for (int nav_y = nav_y_min; nav_y <= nav_y_max; nav_y++) {
+        for (int nav_x = nav_x_min; nav_x <= nav_x_max; nav_x++) {
+
+            uint16_t nav_index = (nav_y << 8) | nav_x;
+
+            // scorri i 4 quadranti della cella corrente, nell'ordine di NAV_CELL_QUAD
+            for (int quad = 0; quad < 4; quad++) {
+
+                // calcola il centro del quadrante corrente in metri
+                double quad_x_mt, quad_y_mt;
+                quad_to_coord(nav_index, NAV_CELL_QUAD[quad], &quad_x_mt, &quad_y_mt);
+
+                // se il quadrante è entro la stessa distanza usata per i contatori, togli il segno
+                if (hypot(fine_x_mt - quad_x_mt, fine_y_mt - quad_y_mt) <= (ROBOT_RADIUS + INFLATION_MARGIN_MM) / 1000) {
+                    map_state.num_occupied_fine_cells[quad][nav_index] &= ~QUAD_CROSSED_FLAG;
+                }
+            }
+        }
+    }
+}
+
 // Funzione Helper che imposta una cella ad un valore speciale
 static void set_fine_cell_special_value(const uint32_t cell_index, const int special_value) {
+
+    // calcola x e y della griglia fine partendo da cell_index
+    int x_fine = cell_index & 0x3FF;
+    int y_fine = cell_index >> 10;
+
+    // togli il segno di quadrante attraversato, va fatto anche se la cella ha già un valore speciale:
+    // se il robot torna a vedere il buco nella stessa cella, il segno potrebbe essere stato rimesso
+    clear_crossed_quads(x_fine, y_fine);
 
     // Salva il vecchio punteggio della griglia fine
     int old_score = map_state.fine_grid[cell_index];
 
     // se old_score è uno dei valori speciali, esci
     if (old_score == VOID_OBSTACLE || old_score == LOW_OBSTACLE) return;
-
-    // calcola x e y della griglia fine partendo da cell_index
-    int x_fine = cell_index & 0x3FF;
-    int y_fine = cell_index >> 10;
 
     // Ricava l'indice della cella della griglia di navigazione
     // che corrisponde alla cella della griglia fine all'indice cell_index
@@ -672,6 +749,49 @@ static void exec_bresenham_algorithm(const int x_coord_start, const int y_coord_
 
 }
 
+// funzione helper che prende la posizione attuale del robot e segna le celle che attraversa come attraversabili
+// in questo modo, se il robot è passato una volta per una cella, potrà passarci durante tutta la sessione
+static void mark_crossed_quads(double pos_x, double pos_y) {
+
+    // se lo spostamento non è valido o supera QUAD_CROSSED_MAX_STEP, salva la posizione ed esci
+    if (!map_state.last_mark.is_valid ||
+        hypot(pos_x - map_state.last_mark.x, pos_y - map_state.last_mark.y) > QUAD_CROSSED_MAX_STEP) {
+    
+            map_state.last_mark.x = pos_x;
+            map_state.last_mark.y = pos_y;
+            map_state.last_mark.is_valid = true;
+            return;
+    }
+
+    // Altrimenti, controlla i quadranti delle 3x3 celle attorno al robot
+    uint16_t robot_cell = coord_to_nav_index(pos_x, pos_y);
+
+    for (int dy = -1; dy <= 1; dy++) {
+        for (int dx = -1; dx <= 1; dx++) {
+
+            uint16_t cell = robot_cell + dy * NAV_MAP_CELL_NUMBER + dx;
+
+            // scorri i 4 quadranti della cella, nell'ordine di NAV_CELL_QUAD
+            for (int quad = 0; quad < 4; quad++) {
+
+                // calcola il centro del quadrante
+                double quad_x, quad_y;
+                quad_to_coord(cell, NAV_CELL_QUAD[quad], &quad_x, &quad_y);
+
+                // se il tratto percorso dal robot passa abbastanza vicino al centro del quadrante, segnalo come attraversato
+                if (calc_segment_distance(quad_x, quad_y, map_state.last_mark.x, map_state.last_mark.y, pos_x, pos_y) <= QUAD_CROSSED_DISTANCE) {
+                    map_state.num_occupied_fine_cells[quad][cell] |= QUAD_CROSSED_FLAG;
+                }
+            }
+        }
+    }
+
+    // Salva la nuova posizione attuale
+    map_state.last_mark.x = pos_x;
+    map_state.last_mark.y = pos_y;
+
+}
+
 // funzione helper che data la posizione attuale del robot,
 // segna le celle sopra alle quali passa come libere
 static void mark_cells_under_robot(double pos_x, double pos_y) {
@@ -686,6 +806,8 @@ static void mark_cells_under_robot(double pos_x, double pos_y) {
     // se il robot si trova sul bordo della mappa, non aggiornare le celle sotto di lui (esci)
     if (robot_x < radius || robot_y < radius || robot_x > 1023 - radius || robot_y > 1023 - radius) return;
 
+    mark_crossed_quads(pos_x, pos_y);
+    
     // scorri tutte le celle sotto al robot
     for (int dy = -radius; dy <= radius; dy++) {
         for (int dx = -radius; dx <= radius; dx++) {
@@ -860,6 +982,27 @@ static void update_aligned_pose(double ref_x, double ref_y, double ref_theta) {
     };
 
     scambio_scrivi(&double_buffer_align, &mapping_correction);
+}
+
+// funzione helper che serve alla navigazione per rilevare se una cella di navigazione contiene al suo interno almeno una 
+// cella fine che sia un LOW_OBSTACLE o VOID_OBSTACLE, entrambi invisibili per il lidar
+bool is_nav_cell_invisible_obstacle(uint16_t cell) {
+    
+    // calcola la prima cella fine della cella di navigazione
+    const int first_fine_x = (cell & 0xFF) * FINE_CELL_IN_NAV_CELL;
+    const int first_fine_y = (cell >> 8) * FINE_CELL_IN_NAV_CELL;
+
+    // scorri le celle fini della cella di navigazione
+    for (int fine_y = first_fine_y; fine_y < first_fine_y + FINE_CELL_IN_NAV_CELL; fine_y++) {
+        for (int fine_x = first_fine_x; fine_x < first_fine_x + FINE_CELL_IN_NAV_CELL; fine_x++) {
+
+            const int score = map_state.fine_grid[(fine_y << 10) | fine_x];
+
+            if (score == VOID_OBSTACLE || score == LOW_OBSTACLE) return true;
+        }
+    }
+
+    return false;
 }
 
 // job del task

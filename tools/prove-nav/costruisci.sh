@@ -14,10 +14,11 @@ grep -q 'NAV %.2f' $F || { echo "stampa non inserita: in set_state non trovo 'na
 if [ "$(grep -c '^    (void)arg;$' $F)" = 1 ]; then
     sed -i '/^    (void)arg;$/a\    { movement_position_data_t pp = read_movement(); fprintf(stderr, "POSA %.2f %.4f %.4f %.1f %d\\n", rt_adesso() / 1e9, pp.x, pp.y, pp.theta * 57.29578, nav_state.state); }' $F
 else echo "avviso: in job_navigation non trovo '(void)arg;', niente righe POSA" >&2; fi
-# per la pulizia: "PERCORSO t lunghezza scostamento dal_primo_punto" a ogni partenza di un percorso, e
+# per la pulizia: "PERCORSO t lunghezza scostamento dal_primo_punto" a ogni partenza di un percorso (per le strisce
+# la lunghezza conta solo le celle, senza i punti di estremità), e
 # "PULIZIA t meta_percorribili N meta_pulite M celle_con_meta_sporca K" quando la pulizia finisce (riposo o ritorno alla base)
 if grep -q '^static void start_following_path(.*lat_shift.*is_first_point.*{$' $F; then
-    sed -i '/^static void start_following_path(.*{$/a\    fprintf(stderr, "PERCORSO %.2f %u %.3f %d\\n", rt_adesso() / 1e9, nav_state.path.length, lat_shift, (int)is_first_point);' $F
+    sed -i '/^static void start_following_path(.*{$/a\    fprintf(stderr, "PERCORSO %.2f %u %.3f %d\\n", rt_adesso() / 1e9, nav_state.path.length - (is_first_point ? nav_state.strip_has_back + nav_state.strip_has_end : 0), lat_shift, (int)is_first_point);' $F
 else echo "avviso: start_following_path(..., lat_shift, is_first_point) non trovata, niente righe PERCORSO" >&2; fi
 if grep -q 'is_half_cell_free_walkable' $F; then
     sed -i 's|^\(    { movement_position_data_t p = read_movement(); safety_alarm_t a = read_safety(); fprintf(stderr, "NAV \)|    if ((next_state == NAV_STATE_SLEEP \|\| next_state == NAV_STATE_RETURN_HOME) \&\& nav_state.state == NAV_STATE_CLEAN) { uint32_t per = 0, pul = 0, sp = 0; for (uint32_t c = 0; c < NAV_MAP_CELL_NUMBER * NAV_MAP_CELL_NUMBER; c++) { int sporca = 0; for (int h = 0; h < 2; h++) if (is_half_cell_free_walkable(c, h)) { per++; if (is_half_cell_clean(c, h)) pul++; else sporca = 1; } sp += sporca; } fprintf(stderr, "PULIZIA %.2f meta_percorribili %u meta_pulite %u celle_con_meta_sporca %u\\n", rt_adesso() / 1e9, per, pul, sp); }\n\1|' $F

@@ -8,6 +8,7 @@
 #include "mapping.h"
 #include "movement.h"
 #include "safety.h"
+#include "lidar.h"
 
 #define DEG_TO_RAD(a) ((a) * M_PI / 180)
 
@@ -34,6 +35,26 @@
 // due "corsie" durante la fase di pulizia, questo significa che ogni cella verrà divisa in due parti 10x20 
 #define LANE_DEVIATION 0.05                 // scostamento di una corsia dal centro della cella, espresso in metri
 #define LANE_CLEAN_DISTANCE_THRESHOLD 0.025 // la distanza entro cui una metà si segna come pulita, espresso in metri
+
+// il rettangolo attorno al robot che si segna come pulito durante il giro dei bordi, espresso in metri
+#define BORDER_CLEAN_LEFT 0.05              // a sinistra del centro: il lato verso la stanza, dove arriva il rullo
+#define BORDER_CLEAN_RIGHT 0.1745           // a destra del centro: tutto il lato della spazzola laterale, fino al bordo del robot
+#define BORDER_CLEAN_ALONG 0.10             // avanti e indietro rispetto al centro: i centri delle metà distano fino a 20 cm lungo le strisce
+#define BORDER_DONE_DISTANCE 0.16           // distanza entro cui una metà pulita fa considerare pulito un quadrante, espressa in metri
+
+#define BORDER_SPEED 0.15                   // velocità massima lungo il bordo, espressa in m/s
+#define BORDER_ROTATION_GAIN 2.5            // guadagno usato per calcolare la velocità di rotazione dall'errore di direzione, espresso in 1/secondi
+#define BORDER_MAX_OMEGA 1.0                // velocità massima di rotazione durante il giro dei bordi, espressa in rad/s
+#define BORDER_SLOW_ANGLE 0.8               // errore di direzione da cui in su il robot non avanza e ruota soltanto, espresso in radianti
+#define BORDER_HOOK_TOLERANCE 0.44          // errore entro cui l'ostacolo si considera a destra del robot (25°), espresso in radianti
+#define BORDER_NO_NEW_DISTANCE 0.5          // strada senza mezze celle nuove dopo cui il giro finisce, espressa in metri
+#define BORDER_LOST_TIME RT_MS(1000)        // tempo senza vedere l'ostacolo dopo cui il giro finisce
+#define BORDER_LAP_TIMEOUT RT_MS(1800000)   // rete di sicurezza contro i giri infiniti (30 minuti, circa 225 m di contorno), non deve mai scattare
+#define SCAN_HALF_TIME RT_MS(85)            // metà della durata di un giro del lidar
+
+// le due estremità di ogni striscia si allungano fino al primo ostacolo, così il rullo pulisce la corsia da un capo all'altro
+#define STRIP_END_FRONT_DISTANCE 30         // spazio da lasciare davanti al robot alle estremità della striscia, espresso in mm
+#define STRIP_END_ZONE 0.22                 // distanza dal punto di estremità entro cui il robot può fermarsi senza proseguire la striscia, espressa in metri
 
 #define NAV_PATH_NO_QUAD 0                  // valore da restituire se non si trova nessun quadrante nelle funzioni di ricerca    
 #define NAV_PATH_CENTER 1                   // valore per indicare di raggiungere il centro di una cella, non un quadrante specifico
@@ -121,6 +142,7 @@ typedef enum {
     NAV_STATE_SLEEP,            // robot fermo, missione completata
     NAV_STATE_ALIGN,            // robot in allineamento, dopo un arresto, porta il robot al centro della cella di navigazione
     NAV_STATE_FAILURE,          // robot fermo, qualcosa è andato storto
+    NAV_STATE_BORDER_LAP,       // il robot segue un ostacolo tenendolo a destra, fino alla fine del giro
 } nav_state_t;
 
 // definizione dello stato interno del task di navigazione
@@ -161,6 +183,15 @@ typedef struct {
     bool strip_axis_x;              // l'asse secondo il quale si sviluppano le strisce della pulizia (true -> x, false -> y), viene calcolato dinamicamente all'inzio della fase di pulizia, in modo tale da minimizzare il numero di strisce (riducendo i tempi di pulizia)
     double cur_lat_shift;           // scostamento laterale del percorso attuale, espresso in metri      
     bool is_axis;                   // true se strip_axis_x è già stato calcolato, false altrimenti
+   
+    bool is_border_hooked;                  // true se durante il giro dei bordi il robot ha finito di ruotare e ha l'ostacolo a destra
+    double border_no_new_dist;              // strada percorsa nel giro dall'ultima mezza cella nuova, espressa in metri
+    double border_last_x, border_last_y;    // ultima posizione del giro, serve per misurare la strada percorsa
+    int64_t border_lost_start;              // istante in cui il robot ha smesso di vedere l'ostacolo, 0 se lo vede
+
+    bool strip_has_back;                    // indica se nella striscia di pulizia attuale c'è un punto dietro all'inizio
+    bool is_clean_started;                  // true se la pulizia a strisce è già iniziata, la prima striscia parte da un estremo della stanza
+    bool strip_has_end;                     // indica se nella striscia di pulizia attuale c'è un punto oltre alla fine
 
 } navigation_state_t;
 
@@ -237,7 +268,8 @@ static inline bool is_half_cell_clean(const uint16_t cell_index, const bool cell
 }
 
 // funzione helper per segnare una mezza cella nella clean mask come pulita
-static inline void set_half_cell_clean(const uint16_t cell_index, const bool cell_half) {
+// restituisce true se la mezza cella era sporca, false se era già pulita
+static inline bool set_half_cell_clean(const uint16_t cell_index, const bool cell_half) {
 
     uint16_t byte_idx = 0;
     uint8_t bit_shift = 0;
@@ -245,8 +277,13 @@ static inline void set_half_cell_clean(const uint16_t cell_index, const bool cel
     // calcola byte della clean mask e indice del bit all'interno del byte
     calc_byte_bit_shift(cell_index, cell_half, &byte_idx, &bit_shift);
 
+    // controlla se la mezza cella era sporca
+    bool was_dirty = !(nav_state.clean_cell_mask[byte_idx] & (1u << bit_shift));
+
     // metti il bit corrispondente a 1
     nav_state.clean_cell_mask[byte_idx] |= (1u << bit_shift);
+
+    return was_dirty;
 
 }
 
@@ -345,6 +382,60 @@ static bool get_robot_half_cell(const movement_position_data_t robot_pos, uint16
     double dist_half_dx = fabs(dist - calc_clean_lane_shift(1));
 
     return dist_half_sx > dist_half_dx;
+}
+
+// funzione che durante il giro dei bordi segna come pulito quello che il robot ha sotto, restituisce
+// true se ha segnato almeno una mezza cella nuova. L'asse delle strisce deve essere già stato calcolato
+static bool set_border_band_clean(const movement_position_data_t robot_pos) {
+
+    // calcola la cella in cui si trova il robot
+    uint16_t robot_cell = coord_to_nav_index(robot_pos.x, robot_pos.y);
+
+    // finché il robot non è agganciato segna solo la mezza cella sotto il centro, così ogni giro pulisce almeno il punto di arrivo.
+    if (!nav_state.is_border_hooked) return set_half_cell_clean(robot_cell, get_robot_half_cell(robot_pos, robot_cell));
+
+    bool new_clean = false;
+
+    // calcola seno e coseno dell'angolo del robot
+    double cos_theta = cos(robot_pos.theta);
+    double sin_theta = sin(robot_pos.theta);
+
+    // scorri le 3x3 celle attorno al robot
+    for (int dy = -1; dy <= 1; dy++) {
+        for (int dx = -1; dx <= 1; dx++) {
+
+            uint16_t cell = robot_cell + dy * NAV_MAP_CELL_NUMBER + dx;
+
+            // scorri le due mezze celle
+            for (int half = 0; half < 2; half++) {
+
+                // calcola il centro della mezza cella
+                double half_x, half_y;
+                nav_index_to_coord(cell, &half_x, &half_y);
+
+                if (nav_state.strip_axis_x) {
+                    half_y += calc_clean_lane_shift(half);
+                } else {
+                    half_x += calc_clean_lane_shift(half);
+                }
+
+                // calcola lo scostamento della mezza cella dal robot
+                double shift_x = half_x - robot_pos.x;
+                double shift_y = half_y - robot_pos.y;
+
+                // porta lo scostamento nel sistema del robot: quanto è avanti e quanto è a sinistra (a destra è negativo)
+                double along = shift_x * cos_theta + shift_y * sin_theta;
+                double left = -shift_x * sin_theta + shift_y * cos_theta;
+
+                // se il centro della mezza cella cade nel rettangolo, segnala come pulita
+                if (left >= -BORDER_CLEAN_RIGHT && left <= BORDER_CLEAN_LEFT && fabs(along) <= BORDER_CLEAN_ALONG) {
+                    if (set_half_cell_clean(cell, half)) new_clean = true;
+                }
+            }
+        }
+    }
+
+    return new_clean;
 }
 
 // funzione helper che segna le due mezze celle che si trovano sotto il robot come pulite se lo scostamento 
@@ -550,6 +641,7 @@ typedef enum {
     GOAL_DIRTY,     // l'obiettivo della ricerca è trovare una cella con almeno una metà non pulita
     GOAL_CELL,      // l'obiettivo della ricerca è trovare una cella precisa (indice della cella)
     GOAL_FREE,      // l'obiettivo della ricerca è trovare una cella libera, partendo da una bloccata
+    GOAL_EDGE,      // l'obiettivo della ricerca è trovare una cella con un quadrante di bordo ancora non pulito
 } nav_search_goal_t;
 
 
@@ -567,6 +659,108 @@ static uint8_t get_adiacent_quad(const uint16_t cell1, const uint16_t cell2) {
 
     return quad;
 
+}
+
+// Funzione helper che prende delle coordinate in metri e calcola il punto del reticolo dei quadranti in cui cadono.
+// il reticolo ha 512x512 punti distanti mezza cella, ogni punto è il centro di un quadrante di una cella:
+// è come coord_to_nav_index, ma con mezza cella al posto della cella
+static inline void coord_to_lattice(const double x, const double y, int *lattice_x, int *lattice_y) {
+    *lattice_x = (int)floor(x / (NAV_MAP_CELL_SIZE / 2)) + 2 * NAV_MAP_ORIGIN;
+    *lattice_y = (int)floor(y / (NAV_MAP_CELL_SIZE / 2)) + 2 * NAV_MAP_ORIGIN;
+}
+
+// Funzione helper che prende le coordinate di un punto in una cella di navigazione
+// e restituisce true se quel punto si trova in un quadrante bloccato, false altrimenti
+static bool is_lattice_point_blocked(const double x, const double y) {
+
+    // calcola il punto del reticolo dei quadranti in cui cade il punto
+    int lattice_x, lattice_y;
+    coord_to_lattice(x, y, &lattice_x, &lattice_y);
+
+    // se il punto è fuori dal reticolo non c'è nessun ostacolo noto
+    if (lattice_x < 0 || lattice_y < 0 || lattice_x >= 2 * NAV_MAP_CELL_NUMBER || lattice_y >= 2 * NAV_MAP_CELL_NUMBER) return false;
+
+    // ogni cella contiene 2x2 punti del reticolo, quindi la cella del punto è la metà delle coordinate
+    uint16_t cell = (lattice_y / 2) << 8 | (lattice_x / 2);
+
+    // il resto della divisione per 2 dice quale quadrante della cella è: x dispari --> destra, y dispari --> alto
+    uint8_t quad;
+    if (lattice_y % 2 == 1) quad = (lattice_x % 2 == 1) ? NAV_CELL_TOP_RIGHT : NAV_CELL_TOP_LEFT;
+    else quad = (lattice_x % 2 == 1) ? NAV_CELL_BOTTOM_RIGHT : NAV_CELL_BOTTOM_LEFT;
+
+    // conta solo il bit del quadrante, non lo stato della cella: il bit a 1 vuol dire che lì c'è un ostacolo vero,
+    // quindi le zone proibite, le celle troppo strette e quelle sconosciute da sole non generano bordi
+    return (nav_state.map[cell] & quad) != 0;
+}
+
+
+// Funzione helper che prende una cella e uno dei suoi quadranti e restituisce true se il quadrante
+// è di bordo, cioè se è libero e tocca con un lato un quadrante bloccato
+static bool is_quad_border(const uint16_t cell, const uint8_t quad) {
+
+    // se il bit del quadrante è a 1 il quadrante non è libero
+    if (nav_state.map[cell] & quad) return false;
+
+    // calcola il centro del quadrante
+    double x, y;
+    quad_to_coord(cell, quad, &x, &y);
+
+    // i centri dei quadranti vicini distano mezza cella
+    const double quad_size = NAV_MAP_CELL_SIZE / 2;
+
+    // il quadrante è di bordo se almeno uno dei 4 vicini è bloccato, le diagonali non contano
+    return (
+        is_lattice_point_blocked(x + quad_size, y) ||
+        is_lattice_point_blocked(x - quad_size, y) ||
+        is_lattice_point_blocked(x, y + quad_size) ||
+        is_lattice_point_blocked(x, y - quad_size)
+    );
+}
+
+// Funzione helper che prende le coordinate di un punto (il centro di un quadrante) e restituisce true
+// se c'è una mezza cella pulita a meno di BORDER_DONE_DISTANCE da quel punto.
+// L'asse delle strisce deve essere già stato calcolato
+static bool is_clean_half_near(const double x, const double y) {
+
+    // calcola la cella in cui si trova il punto
+    const uint16_t center_cell = coord_to_nav_index(x, y);
+
+    // scorri le 3x3 celle attorno al punto
+    for (int dy = -1; dy <= 1; dy++) {
+        for (int dx = -1; dx <= 1; dx++) {
+
+            const uint16_t cell = center_cell + dy * NAV_MAP_CELL_NUMBER + dx;
+
+            // scorri le due mezze celle
+            for (int half = 0; half < 2; half++) {
+
+                // le mezze celle sporche non contano
+                if (!is_half_cell_clean(cell, half)) continue;
+
+                // calcola il centro della mezza cella, e metà dei suoi lati
+                double half_x, half_y, side_x, side_y;
+                nav_index_to_coord(cell, &half_x, &half_y);
+
+                if (nav_state.strip_axis_x) {
+                    half_y += calc_clean_lane_shift(half);
+                    side_x = NAV_MAP_CELL_SIZE / 2;
+                    side_y = NAV_MAP_CELL_SIZE / 4;
+                } else {
+                    half_x += calc_clean_lane_shift(half);
+                    side_x = NAV_MAP_CELL_SIZE / 4;
+                    side_y = NAV_MAP_CELL_SIZE / 2;
+                }
+
+                // calcola la distanza del punto dal rettangolo della mezza cella
+                const double dist_x = fmax(fabs(x - half_x) - side_x, 0);
+                const double dist_y = fmax(fabs(y - half_y) - side_y, 0);
+
+                if (hypot(dist_x, dist_y) <= BORDER_DONE_DISTANCE) return true;
+            }
+        }
+    }
+
+    return false;
 }
 
 // Funzione helper per stabilire se la cella fornita corrisponde all'obiettivo della ricerca
@@ -596,6 +790,25 @@ static bool cell_is_goal(const nav_search_goal_t goal, const uint16_t cell, cons
             break;
         case GOAL_FREE:
             return is_nav_cell_free(cell);
+            break;
+        case GOAL_EDGE:
+           
+            if (!is_nav_cell_free(cell)) return false;          // se la cella non è libera non è un bordo
+
+            // scorri i 4 quadranti della cella
+            for (int i = 0; i < 4; i++) {
+
+                // se il quadrante non è di bordo passa al prossimo
+                if (!is_quad_border(cell, NAV_CELL_QUAD[i])) continue;
+
+                // calcola il centro del quadrante
+                double x, y;
+                quad_to_coord(cell, NAV_CELL_QUAD[i], &x, &y);
+
+                // se non c'è una mezza cella pulita vicina, questo bordo è ancora da pulire
+                if (!is_clean_half_near(x, y)) return true;
+            }
+
             break;
         default:                // se entriamo in questo caso c'è un errore
             return false;       // ritorniamo false nel dubbio
@@ -651,6 +864,7 @@ static bool cell_can_enter(const uint16_t cur_cell, const uint16_t next_cell, co
     // in tutti gli altri casi, non può entrare
     return false;
 }
+
 
 // Funzione helper per calcolare la velocità alla quale deve andare il robot
 // in base agli allarmi mandati dal task di sicurezza e la cella obiettivo
@@ -957,14 +1171,6 @@ static void get_path_coord(const uint32_t path_idx, double *x, double *y) {
 
 }
 
-// Funzione helper che prende delle coordinate in metri e calcola il punto del reticolo dei quadranti in cui cadono.
-// il reticolo ha 512x512 punti distanti mezza cella, ogni punto è il centro di un quadrante di una cella:
-// è come coord_to_nav_index, ma con mezza cella al posto della cella
-static inline void coord_to_lattice(const double x, const double y, int *lattice_x, int *lattice_y) {
-    *lattice_x = (int)floor(x / (NAV_MAP_CELL_SIZE / 2)) + 2 * NAV_MAP_ORIGIN;
-    *lattice_y = (int)floor(y / (NAV_MAP_CELL_SIZE / 2)) + 2 * NAV_MAP_ORIGIN;
-}
-
 // Funzione helper che prende un punto del reticolo dei quadranti e restituisce true se il suo quadrante è libero
 static bool is_lattice_point_free(const int lattice_x, const int lattice_y) {
 
@@ -982,6 +1188,8 @@ static bool is_lattice_point_free(const int lattice_x, const int lattice_y) {
     // il punto è libero se la cella è libera (le troppo strette e le proibite possono avere i bit a 0) e il bit del quadrante è 0
     return is_nav_cell_free(cell) && (nav_state.map[cell] & quad) == 0;
 }
+
+
 
 // Funzione helper che usa Bresenham per verificare se due punti del percorso cadono sulla stessa
 // retta e non ci sono quadranti non liberi nel mezzo (sul reticolo dei quadranti, da 10 cm)
@@ -1055,8 +1263,11 @@ static bool line_of_sight(uint32_t start_idx, uint32_t end_idx) {
 }
 
 // Funzione che dato nav_state.path_idx, che indica in quale punto del percorso
-// si trova il robot, restituisce l'indice del prossimo punto di svolta per mandare il 
-// prossimo obiettivo.
+// si trova il robot, restituisce l'indice del prossimo punto di svolta per mandare il prossimo obiettivo.
+static inline bool is_strip_path(void) {
+    return nav_state.mission == NAV_STATE_CLEAN && nav_state.cur_lat_shift != 0;
+}
+
 static uint16_t next_turning_point(void) {
 
     // Inizializza gli indici all'inizio del path e alla fine del path
@@ -1068,8 +1279,7 @@ static uint16_t next_turning_point(void) {
 
     // Controlla se la posizione attuale è in una cella non libera o se non bisogna fare tagli al percorso (center_to_center)
     if (!is_nav_cell_free(nav_state.path.cells[nav_state.path_idx]) || nav_state.center_to_center) {
-        // se il robot si trova in una cella non libera, vai alla prossima cella
-        // nel percorso, senza fare tagli
+        // se il robot si trova in una cella non libera, vai alla prossima cella nel percorso senza fare tagli
         return cur_idx + 1;
     }
 
@@ -1129,6 +1339,8 @@ void init_navigation(void) {
     nav_state.mission = NAV_STATE_EXPLORE;      // si parte in attesa (stato azzerato), poi l'attesa porta all'esplorazione
 
     nav_state.is_axis = false;
+
+    nav_state.is_clean_started = false;
 
 }
 
@@ -1439,39 +1651,71 @@ static inline bool can_extend_strip(const uint16_t cell, const bool cell_half, c
     return is_half_cell_free_dirty(cell, cell_half) && calc_clean_lane_shift(cell_half) == lat_shift;
 }
 
-// funzione che prende la mezza cella di partenza e scrive la striscia da percorrere dentro nav_state.path, restituendo la lunghezza
-static uint32_t plan_strip(const uint16_t start_cell, const bool start_half) {
+// funzione helper che parte da una mezza cella e avanza sulla corsia nella direzione passata finché la corsia è
+// sporca e percorribile: restituisce quante celle ha fatto e salva l'ultima cella raggiunta in end_cell
+static uint32_t find_lane_end(const uint16_t cell, const bool cell_half, const clean_dir_t dir, const double lat_shift, uint16_t *end_cell) {
 
-    double lat_shift = calc_clean_lane_shift(start_half);
-
-    nav_state.path.cells[0] = start_cell;
-    nav_state.path.quads[0] = NAV_PATH_CENTER;
-    
-    uint32_t length = 1;
+    uint32_t count = 0;
 
     uint16_t next_cell;
     bool next_half;
-    clean_dir_t dir;
 
-    get_half_cell_neighbor(start_cell, start_half, CLEAN_DIR_NORTH, &next_cell, &next_half);
+    *end_cell = cell;
 
-    if (can_extend_strip(next_cell, next_half, lat_shift)) {
-        dir = CLEAN_DIR_NORTH;
-    } else {
+    get_half_cell_neighbor(cell, cell_half, dir, &next_cell, &next_half);
 
-        // Se nord non va bene, prova a sud
-        get_half_cell_neighbor(start_cell, start_half, CLEAN_DIR_SOUTH, &next_cell, &next_half);
+    while (can_extend_strip(next_cell, next_half, lat_shift)) {
 
-        if (can_extend_strip(next_cell, next_half, lat_shift)) {
-            dir = CLEAN_DIR_SOUTH;
-        } else {
+        *end_cell = next_cell;
+        count++;
 
-            // se non va bene nemmeno sud, la striscia è di una cella sola
-            nav_state.path.length = length;
-
-            return length;
-        }
+        get_half_cell_neighbor(next_cell, next_half, dir, &next_cell, &next_half);
     }
+
+    return count;
+}
+
+// funzione che prende una mezza cella della corsia da pulire e scrive la striscia da percorrere dentro nav_state.path, restituendo la lunghezza
+static uint32_t plan_strip(const uint16_t lane_cell, const bool start_half) {
+
+    double lat_shift = calc_clean_lane_shift(start_half);
+
+    // trova i due capi della corsia sporca, così la striscia la percorre tutta e la corsia non si spezza
+    uint16_t north_end, south_end;
+    uint32_t north_count = find_lane_end(lane_cell, start_half, CLEAN_DIR_NORTH, lat_shift, &north_end);
+    uint32_t south_count = find_lane_end(lane_cell, start_half, CLEAN_DIR_SOUTH, lat_shift, &south_end);
+
+    // parti dal capo più vicino alla cella passata e vai verso l'altro
+    const uint16_t start_cell = (north_count < south_count) ? north_end : south_end;
+    const clean_dir_t dir = (north_count < south_count) ? CLEAN_DIR_SOUTH : CLEAN_DIR_NORTH;
+
+    // calcola la prima cella dopo quella di inizio
+    uint16_t next_cell;
+    bool next_half;
+    get_half_cell_neighbor(start_cell, start_half, dir, &next_cell, &next_half);
+
+    // calcola la cella prima dell'inizio della striscia, sulla stessa corsia
+    uint16_t back_cell;
+    bool back_half;
+    get_half_cell_neighbor(start_cell, start_half, dir == CLEAN_DIR_NORTH ? CLEAN_DIR_SOUTH : CLEAN_DIR_NORTH, &back_cell, &back_half);
+
+    uint32_t length = 0;
+
+    // se dietro all'inizio della striscia c'è un ostacolo, il percorso parte dal punto indietro:
+    // lì il rullo non passerebbe mai, così la corsia viene pulita dall'estremità.
+    // se invece la cella dietro è percorribile non serve, un'altra striscia ci passa comunque
+    nav_state.strip_has_back = !is_half_cell_free_walkable(back_cell, back_half) && !is_nav_cell_invisible_obstacle(back_cell);
+
+    if (nav_state.strip_has_back) {
+        nav_state.path.cells[length] = back_cell;
+        nav_state.path.quads[length] = NAV_PATH_CENTER;
+        length++;
+    }
+
+    // la cella d'inizio della striscia
+    nav_state.path.cells[length] = start_cell;
+    nav_state.path.quads[length] = NAV_PATH_CENTER;
+    length++;
 
     // allunga la striscia nella direzione scelta finché si può
     while (can_extend_strip(next_cell, next_half, lat_shift)) {
@@ -1485,10 +1729,155 @@ static uint32_t plan_strip(const uint16_t start_cell, const bool start_half) {
         get_half_cell_neighbor(next_cell, next_half, dir, &next_cell, &next_half);
     }
 
+    // se dopo la fine della striscia c'è un ostacolo, l'ultimo punto è la cella successiva sulla stessa corsia, questo
+    // serve per assicurarsi che non rimangano spazi sporchi tra la zona interna della stanza, e i bordi lungo gli ostacoli
+    nav_state.strip_has_end = !is_half_cell_free_walkable(next_cell, next_half) && !is_nav_cell_invisible_obstacle(next_cell);
+
+    if (nav_state.strip_has_end) {
+        nav_state.path.cells[length] = next_cell;
+        nav_state.path.quads[length] = NAV_PATH_CENTER;
+        length++;
+    }
+
     // salva la lunghezza della striscia nel percorso
     nav_state.path.length = length;
 
     return length;
+}
+
+// funzione helper che riporta un angolo tra -M_PI e M_PI
+static inline double wrap_angle(const double angle) {
+    return atan2(sin(angle), cos(angle));
+}
+
+// funzione helper che calcola la velocità di rotazione del giro dei bordi dall'errore di direzione
+static inline double calc_border_omega(const double dir_error) {
+    return MAX(-BORDER_MAX_OMEGA, MIN(BORDER_ROTATION_GAIN * dir_error, BORDER_MAX_OMEGA));
+}
+
+// funzione che restituisce di quanto ha ruotato il robot da quando il lidar ha letto la scansione, in radianti:
+// i dati del lidar possono essere vecchi di 300 ms, se nel frattempo il robot ha girato bisogna tenerne conto
+static double calc_turn_since_scan(const int64_t scan_end_t, const movement_position_data_t cur_pos) {
+
+    // leggi lo storico delle ultime pose
+    movement_odom_history_t history;
+    read_odom_history(&history);
+
+    // l'istante medio della scansione, i punti sono stati letti lungo tutto il giro
+    const int64_t scan_t = scan_end_t - SCAN_HALF_TIME;
+
+    // cerca la posa con l'istante più vicino
+    double scan_theta = cur_pos.odom_theta;
+    int64_t best_diff = INT64_MAX;
+
+    for (uint32_t i = 0; i < history.count; i++) {
+
+        int64_t diff = llabs(history.pose[i].t_ns - scan_t);
+
+        if (diff < best_diff) {
+            best_diff = diff;
+            scan_theta = history.pose[i].theta;
+        }
+    }
+
+    return wrap_angle(cur_pos.odom_theta - scan_theta);
+}
+
+// funzione che prepara un nuovo giro attorno a un ostacolo e passa allo stato del giro
+static void start_border_lap(const movement_position_data_t cur_pos) {
+
+    nav_state.is_border_hooked = false;
+    nav_state.border_no_new_dist = 0;
+    nav_state.border_last_x = cur_pos.x;
+    nav_state.border_last_y = cur_pos.y;
+    nav_state.border_lost_start = 0;
+
+    set_state(NAV_STATE_BORDER_LAP);
+}
+
+// funzione che termina il giro attorno all'ostacolo
+static void end_border_lap(void) {
+
+    // manda il segnale di stop per fermare il robot
+    send_objective(OBJ_STOP, 0, 0, 0, 0, 0);
+
+    // imposta lo stato della navigazione allo stato precedente all'inizio del giro
+    set_state(nav_state.mission);
+}
+
+// funzione helper che restituisce true se il robot sta andando verso un punto di estremità della striscia
+// (il punto indietro o l'ultimo punto) e deve fermarsi lì: quei punti possono stare dentro un ostacolo, quindi il
+// robot non ci arriva e fermarsi è il comportamento normale, non un problema da risolvere
+static bool is_strip_end_reached(const safety_alarm_t cur_alarm, const movement_position_data_t cur_pos) {
+
+    // controlla che il percorso sia una striscia e che il robot stia andando verso un punto di estremità
+    if (
+        !is_strip_path() ||
+        !((nav_state.strip_has_back && nav_state.path_idx == 0) ||
+        (nav_state.strip_has_end && nav_state.path_idx == nav_state.path.length - 1))
+    ) return false;
+
+    // calcola il punto di estremità
+    double end_x, end_y;
+    get_path_coord(nav_state.path_idx, &end_x, &end_y);
+
+    // se la cella dopo la striscia è libera il robot taglia dritto e questo punto può essere ancora lontano:
+    // uno stallo a metà striscia non è la fine, deve essere gestito come tutti gli altri stalli
+    if (hypot(end_x - cur_pos.x, end_y - cur_pos.y) > STRIP_END_ZONE) return false;
+
+    // il robot deve guardare verso il punto: mentre ruota, il corridoio davanti può passare su un muro laterale
+    if (fabs(wrap_angle(atan2(end_y - cur_pos.y, end_x - cur_pos.x) - cur_pos.theta)) > ALIGNMENT_THRESHOLD) return false;
+
+    // il robot si ferma se davanti c'è un ostacolo o se la sicurezza lo sta trattenendo
+    lidar_scan_data_t scan = read_lidar();
+
+    return (scan.valid && scan.corridor_front_distance <= STRIP_END_FRONT_DISTANCE) || is_stalled(cur_alarm, cur_pos);
+}
+
+
+// funzione che cerca da dove far partire la pulizia a strisce: tra tutte le mezze celle sporche raggiungibili dal robot
+// prende quelle con la coordinata laterale più bassa e più alta, cioè i due estremi della stanza, e sceglie la più vicina al
+// robot. restituisce true se ha trovato una mezza cella e ne salva la cella in start_cell
+static bool find_clean_start_cell(const uint16_t robot_cell, const movement_position_data_t cur_pos, uint16_t *start_cell) {
+
+    // una ricerca che non trova niente visita tutte le celle raggiungibili e le lascia nella coda
+    search_cell(robot_cell, GOAL_CELL, CELL_NOT_VISITED);
+
+    bool found = false;
+    double min_lateral = 0, max_lateral = 0;
+    uint16_t min_cell = 0, max_cell = 0;
+
+    // scorri tutte le celle raggiungibili
+    for (uint32_t i = 0; i < nav_state.s_q.tail; i++) {
+
+        const uint16_t cell = nav_state.s_q.values[i];
+
+        // calcola il centro della cella
+        double cell_x, cell_y;
+        nav_index_to_coord(cell, &cell_x, &cell_y);
+
+        // scorri le due mezze celle
+        for (int half = 0; half < 2; half++) {
+
+            if (!is_half_cell_free_dirty(cell, half)) continue;
+
+            // calcola la coordinata laterale della mezza cella
+            double lateral = (nav_state.strip_axis_x ? cell_y : cell_x) + calc_clean_lane_shift(half);
+
+            if (!found || lateral < min_lateral) { min_lateral = lateral; min_cell = cell; }
+            if (!found || lateral > max_lateral) { max_lateral = lateral; max_cell = cell; }
+
+            found = true;
+        }
+    }
+
+    if (!found) return false;
+
+    // scegli l'estremo più vicino al robot
+    double robot_lateral = nav_state.strip_axis_x ? cur_pos.y : cur_pos.x;
+    *start_cell = (fabs(robot_lateral - min_lateral) <= fabs(robot_lateral - max_lateral)) ? min_cell : max_cell;
+
+    return true;
 }
 
 // job del task
@@ -1557,6 +1946,13 @@ void job_navigation(void *arg) {
             close_cell(coord_to_nav_index(cur_pos.x, cur_pos.y));
         }
 
+        // durante il giro dei bordi un tentativo fallito chiude il bordo: segna come pulita la mezza cella sotto il
+        // robot, altrimenti la ricerca lo rimanderebbe sempre nello stesso punto
+        if (nav_state.mission == NAV_STATE_FOLLOW_BORDERS && nav_state.is_axis) {
+            uint16_t alarm_cell = coord_to_nav_index(cur_pos.x, cur_pos.y);
+            set_half_cell_clean(alarm_cell, get_robot_half_cell(cur_pos, alarm_cell));
+        }
+
         // imposta lo stato corrente a sblocco
         set_state(NAV_STATE_UNLOCK);
 
@@ -1612,8 +2008,8 @@ void job_navigation(void *arg) {
 
             if (dist == 0) {        // se dist == 0, l'esplorazione è finita
                 
-                // passa allo stato di pulizia
-                set_state(NAV_STATE_CLEAN); 
+                // passa al giro dei bordi
+                set_state(NAV_STATE_FOLLOW_BORDERS); 
 
             } else { // Se esiste un percorso verso la frontiera
 
@@ -1649,6 +2045,19 @@ void job_navigation(void *arg) {
             if (!is_nav_cell_free(robot_cell)) {
                 go_to_nearest_free_cell(cur_alarm, cur_pos, robot_cell);
                 break;
+            }
+
+            // la prima striscia parte da un estremo della stanza, le altre proseguono corsia dopo corsia
+            if (!nav_state.is_clean_started) {
+
+                nav_state.is_clean_started = true;
+
+                uint16_t clean_start_cell;
+
+                if (find_clean_start_cell(robot_cell, cur_pos, &clean_start_cell) && search_cell(robot_cell, GOAL_CELL, clean_start_cell) != 0) {
+                    start_following_path(cur_alarm, cur_pos, 0, false);
+                    break;
+                }
             }
 
             // calcola la metà della cella in cui si trova il robot
@@ -1701,7 +2110,116 @@ void job_navigation(void *arg) {
             break;
         }
         case NAV_STATE_FOLLOW_BORDERS: {
-            /* code */
+
+            // per prima cosa calcoliamo l'asse se non è già stato calcolato, deve venire prima di
+            // ogni altra ricerca perchè usa la coda lasciata dall'ultima ricerca dell'esplorazione
+            if (!nav_state.is_axis) {
+                calc_strip_axis();
+                break;
+            }
+
+            // calcola la cella del robot
+            uint16_t robot_cell = coord_to_nav_index(cur_pos.x, cur_pos.y);
+
+            // se la cella del robot non è libera, vai alla cella libera più vicina ed esci
+            if (!is_nav_cell_free(robot_cell)) {
+                go_to_nearest_free_cell(cur_alarm, cur_pos, robot_cell);
+                break;
+            }
+
+            // se il robot si trova già su un bordo da pulire, inizia il giro
+            if (cell_is_goal(GOAL_EDGE, robot_cell, 0)) {
+                start_border_lap(cur_pos);
+                break;
+            }
+
+            // cerca il bordo da pulire più vicino
+            if (search_cell(robot_cell, GOAL_EDGE, 0) == 0) {
+                // se non ce ne sono più, il giro dei bordi è finito: passa alla pulizia
+                set_state(NAV_STATE_CLEAN);
+            } else {
+                // altrimenti vai al bordo: alla fine del percorso si torna qui e parte il giro
+                start_following_path(cur_alarm, cur_pos, 0, false);
+            }
+
+            break;
+        }
+        case NAV_STATE_BORDER_LAP: {
+
+            // segna come pulito quello che il robot ha sotto, viene prima di tutto il resto
+            // così il punto di arrivo risulta pulito anche se il giro finisce subito
+            bool new_clean = set_border_band_clean(cur_pos);
+
+            // aggiorna la strada percorsa
+            nav_state.border_no_new_dist += hypot(cur_pos.x - nav_state.border_last_x, cur_pos.y - nav_state.border_last_y);
+            nav_state.border_last_x = cur_pos.x;
+            nav_state.border_last_y = cur_pos.y;
+
+            // se il robot sta pulendo qualcosa di nuovo, azzera la strada e i tentativi di sblocco
+            if (new_clean) {
+                nav_state.border_no_new_dist = 0;
+                nav_state.unlock_attempt = 0;
+            }
+
+            // rete di sicurezza contro i giri infiniti
+            if (elapsed_time(nav_state.state_start) >= BORDER_LAP_TIMEOUT) {
+                end_border_lap();
+                break;
+            }
+
+            // leggi i dati del lidar e di quanto ha ruotato il robot da quella scansione
+            lidar_scan_data_t scan = read_lidar();
+            double turn = calc_turn_since_scan(scan.scan_end_t, cur_pos);
+
+            // se il robot non è ancora agganciato, ruota sul posto finché ha l'ostacolo a destra
+            if (!nav_state.is_border_hooked) {
+
+                // se non c'è niente da seguire il giro finisce
+                if (!scan.valid || !scan.nearest_border) {
+                    end_border_lap();
+                    break;
+                }
+
+                // quanto manca per avere l'ostacolo a destra (a -90 gradi)
+                double hook_error = wrap_angle(scan.nearest_angle - turn + M_PI / 2);
+
+                if (fabs(hook_error) < BORDER_HOOK_TOLERANCE) {
+                    nav_state.is_border_hooked = true;
+                } else {
+                    send_objective(OBJ_CONST_SPEED, calc_border_omega(hook_error), 0, 0, 0, 0);
+                }
+
+                break;
+            }
+
+            // se il robot non vede più l'ostacolo si ferma, e dopo BORDER_LOST_TIME il giro finisce
+            if (!scan.valid || !scan.border_found) {
+
+                send_objective(OBJ_CONST_SPEED, 0, 0, 0, 0, 0);
+
+                if (nav_state.border_lost_start == 0) nav_state.border_lost_start = rt_adesso();
+
+                if (elapsed_time(nav_state.border_lost_start) >= BORDER_LOST_TIME) end_border_lap();
+
+                break;
+            }
+
+            nav_state.border_lost_start = 0;
+
+            // calcola l'errore tra la direzione in cui andare e quella attuale
+            double dir_error = wrap_angle(scan.border_heading - turn);
+
+            // più l'errore è grande meno il robot avanza, da BORDER_SLOW_ANGLE in su ruota soltanto
+            double next_v = MAX(BORDER_SPEED * (1 - fabs(dir_error) / BORDER_SLOW_ANGLE), 0);
+
+            // manda velocità e rotazione, senza superare la velocità massima decisa dalla sicurezza
+            send_objective(OBJ_CONST_SPEED, calc_border_omega(dir_error), 0, MIN(next_v, cur_alarm.max_v_forw), 0, 0);
+
+            // il giro finisce se il robot non pulisce più niente di nuovo, o se la sicurezza lo sta trattenendo
+            if (nav_state.border_no_new_dist >= BORDER_NO_NEW_DISTANCE || is_stalled(cur_alarm, cur_pos)) {
+                end_border_lap();
+            }
+
             break;
         }
         case NAV_STATE_FOLLOW_PATH: {
@@ -1712,21 +2230,32 @@ void job_navigation(void *arg) {
             // pubblica la velocità aggiornata
             write_objective(&nav_state.cur_obj);
 
+            // alle estremità di una striscia il robot può fermarsi prima di arrivare al punto
+            bool strip_end_reached = is_strip_end_reached(cur_alarm, cur_pos);
+
             // Controlla se l'obiettivo è stato raggiunto
-            if (is_objective_achieved(cur_pos)) {
+            if (is_objective_achieved(cur_pos) || strip_end_reached) {
 
                 // Salva il prossimo punto di svolta
                 int next_turn_pt = next_turning_point();
 
                 // Controlla se il percorso è finito
                 if (next_turn_pt == nav_state.path_idx) {
+
                     // Azzera i tentativi di sblocco
                     nav_state.unlock_attempt = 0;
+
                     // Azzera center_to_center, da adesso si può tagliare di nuovo il percorso
                     nav_state.center_to_center = false;
+
+                    // se la striscia è finita prima dell'ultimo punto ferma il robot, l'obiettivo è ancora attivo
+                    if (strip_end_reached) send_objective(OBJ_STOP, 0, 0, 0, 0, 0);
+
                     // torna all'esplorazione
                     set_state(nav_state.mission);
+
                     break;
+
                 } else {    // Se il percorso da seguire non è ancora finito
                     
                     // imposta il prossimo punto di svolta come obiettivo

@@ -248,12 +248,14 @@ static void sporca_meta(int x, int y, int h) {
     nav_state.clean_cell_mask[b / 8] &= (uint8_t)~(1u << (b % 8));
 }
 /* controlla lunghezza restituita, lunghezza salvata, prima e ultima cella e che le celle siano in fila */
-static void controlla_striscia(const char *cosa, int x, int y, int h, uint32_t elen, int ex, int ey) {
+static void controlla_striscia(const char *cosa, int x, int y, int h, int fx, int fy, uint32_t elen, int ex, int ey) {
     char m[200]; uint32_t len = plan_strip(I(x, y), h); uint16_t *p = nav_state.path.cells;
-    snprintf(m, sizeof m, "%s: lunghezza", cosa); controlla(m, (int)len, (int)elen);
-    snprintf(m, sizeof m, "%s: lunghezza salvata nel percorso", cosa); controlla(m, (int)nav_state.path.length, (int)elen);
-    snprintf(m, sizeof m, "%s: prima cella", cosa); controlla(m, p[0] == I(x, y), 1);
-    snprintf(m, sizeof m, "%s: ultima cella (%d,%d)", cosa, ex, ey); controlla(m, len && p[len - 1] == I(ex, ey), 1);
+    /* il percorso è: eventuale punto indietro, celle della striscia dal capo (fx, fy) al capo (ex, ey), eventuale punto oltre la fine */
+    int dietro = nav_state.strip_has_back, oltre = nav_state.strip_has_end;
+    snprintf(m, sizeof m, "%s: lunghezza", cosa); controlla(m, (int)len, (int)elen + dietro + oltre);
+    snprintf(m, sizeof m, "%s: lunghezza salvata nel percorso", cosa); controlla(m, (int)nav_state.path.length, (int)len);
+    snprintf(m, sizeof m, "%s: prima cella (%d,%d)", cosa, fx, fy); controlla(m, p[dietro] == I(fx, fy), 1);
+    snprintf(m, sizeof m, "%s: ultima cella (%d,%d)", cosa, ex, ey); controlla(m, p[len - 1 - oltre] == I(ex, ey), 1);
     int fila = 1;
     for (uint32_t i = 1; i < len; i++) if (abs((p[i] & 0xFF) - (p[i-1] & 0xFF)) + abs((p[i] >> 8) - (p[i-1] >> 8)) != 1) fila = 0;
     snprintf(m, sizeof m, "%s: celle una dopo l'altra", cosa); controlla(m, fila, 1);
@@ -261,34 +263,34 @@ static void controlla_striscia(const char *cosa, int x, int y, int h, uint32_t e
 static void prova_gruppo_b(void) {
     nav_state.strip_axis_x = false;                 /* strisce lungo y: nord = y+1 */
     stanza(); for (int y = 122; y <= 130; y++) sporca_meta(125, y, 0);
-    controlla_striscia("verso nord fino alla metà pulita", 125, 125, 0, 6, 125, 130);
+    controlla_striscia("la corsia intera, dal capo più vicino", 125, 125, 0, 125, 122, 9, 125, 130);
     controlla("la metà 1, pulita, non c'entra", is_half_cell_free_dirty(I(125, 126), 1), 0);
 
     stanza(); for (int y = 122; y <= 128; y++) sporca_meta(125, y, 0);
-    controlla_striscia("nord preferito a sud", 125, 125, 0, 4, 125, 128);
+    controlla_striscia("a pari distanza parte da sud", 125, 125, 0, 125, 122, 7, 125, 128);
 
     stanza(); for (int y = 120; y <= 125; y++) sporca_meta(125, y, 1);
-    controlla_striscia("sud quando a nord è pulito", 125, 125, 1, 6, 125, 120);
+    controlla_striscia("parte da nord quando a nord è pulito", 125, 125, 1, 125, 125, 6, 125, 120);
 
     stanza(); for (int y = 125; y <= 139; y++) sporca_meta(125, y, 0);
-    controlla_striscia("fino al muro", 125, 125, 0, 15, 125, 139);
+    controlla_striscia("fino al muro", 125, 125, 0, 125, 125, 15, 125, 139);
 
     stanza(); for (int y = 125; y <= 135; y++) sporca_meta(125, y, 0);
     nav_state.map[I(124, 130)] = NAV_CELL_BLOCKED;  /* la vicina bloccata non ferma più la striscia */
-    controlla_striscia("la vicina bloccata non conta", 125, 125, 0, 11, 125, 135);
+    controlla_striscia("la vicina bloccata non conta", 125, 125, 0, 125, 125, 11, 125, 135);
     nav_state.map[I(125, 130)] = NAV_CELL_FREE | NAV_CELL_BOTTOM_LEFT;  /* corsia della metà 0 bloccata a y=130 */
-    controlla_striscia("si ferma prima della corsia bloccata", 125, 125, 0, 5, 125, 129);
-    controlla_striscia("riparte dopo la corsia bloccata", 125, 131, 0, 5, 125, 135);
+    controlla_striscia("si ferma prima della corsia bloccata", 125, 125, 0, 125, 125, 5, 125, 129);
+    controlla_striscia("riparte dopo la corsia bloccata", 125, 131, 0, 125, 131, 5, 125, 135);
 
     stanza(); sporca_meta(125, 125, 0);
-    controlla_striscia("una cella sola", 125, 125, 0, 1, 125, 125);
+    controlla_striscia("una cella sola", 125, 125, 0, 125, 125, 1, 125, 125);
 
     stanza(); sporca_meta(125, 125, 0); nav_state.map[I(125, 126)] = NAV_CELL_TOO_NARROW; sporca_meta(125, 124, 1);
-    controlla_striscia("vicine non libere o sull'altra metà: una cella", 125, 125, 0, 1, 125, 125);
+    controlla_striscia("vicine non libere o sull'altra metà: una cella", 125, 125, 0, 125, 125, 1, 125, 125);
 
     nav_state.strip_axis_x = true;                  /* strisce lungo x: nord = x+1 */
     stanza(); for (int x = 125; x <= 133; x++) sporca_meta(x, 125, 0);
-    controlla_striscia("strisce lungo x, verso nord (x crescente)", 125, 125, 0, 9, 133, 125);
+    controlla_striscia("strisce lungo x, verso nord (x crescente)", 125, 125, 0, 125, 125, 9, 133, 125);
     nav_state.strip_axis_x = false;
 }
 
