@@ -38,5 +38,5 @@ fi
 # per provare una modifica senza toccare tasks/: MODIFICA=script.py, chiamato con la cartella della copia
 if [ -n "$MODIFICA" ]; then python3 -I "$MODIFICA" $D/vac; fi
 gcc -std=gnu11 -O2 -g -Wall -Wextra -pthread -I. -o $D/vacdbg $D/vac/*.c driver/driver.c driver/scambio.c \
-    driver/batteria.c driver/lidar_giro.c driver/contatti.c spia/registro.c rt/rt.c gd32/gd32.c gd32/sicurezza.c \
+    driver/batteria.c driver/lidar_giro.c driver/contatti.c driver/aggancio.c spia/registro.c rt/rt.c gd32/gd32.c gd32/sicurezza.c \
     gd32/descrizione.c lidar/lidar.c -lm

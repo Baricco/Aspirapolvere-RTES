@@ -342,6 +342,7 @@ meno di 1 ms) e il GD32 ~29 ms dopo.
 | `drv_led(modo)` | 0..18 | tabella sotto |
 | `drv_lidar(acceso, giri_s)` | 0/1, giri al secondo (0 = default 6) | il driver regola da solo la velocità |
 | `drv_esci_dalla_base(si)` | 0/1 | sulla base i motori sono fermi; con 1 il robot può muoversi piano (0,1 m/s, 0,5 rad/s) per uscire, in avanti |
+| `drv_aggancia(si)` | 0/1 | messa in carica (`driver/aggancio.h`): con il robot in (0,30; 0) e angolo 0, sull'asse della base e di spalle (tolleranza 10 cm e 15°), 1 fa partire la manovra e 0 la annulla. Il driver ignora `drv_velocita` finché dura. Esito in `st.aggancio`: `AGG_IN_CORSO`, `AGG_FATTO`, `AGG_FALLITO`. Prima: `drv_esci_dalla_base(0)`, spazzole e aspirazione spente |
 | `drv_incastro(si)` | 0/1 | dal task di sicurezza, a ogni frame: 1 finché il robot è incastrato andando avanti. Il driver ne fa un evento `CONTATTO_INCASTRO` nel registro dei contatti (`drv_contatti`), con la posizione del primo frame, come un bumper; niente eventi sulla base, con i sensori spenti o con il robot sollevato. La deve chiamare un solo task |
 | `drv_suono(nome)` | nome del file senza `.mp3` | sul robot; nel simulatore niente. Es. `sound_beep_beep`, `sound_test`, `sound_auto_clean_start`, `sound_auto_clean_finish`, `sound_start_go_charge`, `sound_erro_bumper_sensor` (elenco: `/usr/share/audio/english` sul robot) |
 | `drv_azzera_guasto()` | | esce dallo stato di guasto se la causa non c'è più; 0 = riuscito |

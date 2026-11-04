@@ -105,6 +105,8 @@ static int esegui(const char *riga)
 		drv_lidar(i, a);
 	else if (sscanf(riga, "lidar %d", &i) == 1)
 		drv_lidar(i, 0);
+	else if (sscanf(riga, "aggancia %d", &i) == 1)
+		drv_aggancia(i);
 	else if (sscanf(riga, "esci_base %d", &i) == 1)
 		drv_esci_dalla_base(i);
 	else if (!strncmp(riga, "azzera", 6))

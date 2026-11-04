@@ -401,7 +401,7 @@ Il modello è in `sim/gd32sim.c` (`fasci_base`, `calcola_ir_base`), con un ricev
 **Prova di aggancio alla base** (dock1, da soli): trovata la faccia della base con il lidar (punti scuri), il robot si è
 messo sul suo asse a 0,455 m, di spalle, con 1,6 cm di errore laterale e ~7° di inclinazione (corretta a metà), ed è
 andato indietro a 5 cm/s. Ha toccato la base storto ed è ruotato di ~30° (gli encoder non segnano rotazione: l'ha
-girato il contatto), senza chiudere i contatti. Agganciarsi richiede l'avvicinamento guidato dall'IR durante la
+girato il contatto), senza chiudere i contatti. **Corretto il 2026-11-04 rileggendo la registrazione: è ruotato prima di toccare, con la schiena ancora a ~20 cm dalla base (vedi `PIANO.md`, "base, uscita e rientro").** Agganciarsi richiede l'avvicinamento guidato dall'IR durante la
 retromarcia, come fa l'originale: è un compito per i task (fase 4 o 5). Il robot è rimasto a terra, vicino alla base.
 
 **`Script/trova-robot.sh`**: se la voce ARP del robot è vecchia (STALE) e il robot risponde lento all'ARP, ora prova un

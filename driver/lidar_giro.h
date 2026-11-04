@@ -49,6 +49,9 @@ typedef struct {
 	uint8_t intensita;
 } lidar_punto_t;
 
+/* Punto nel sistema del robot: origine al CENTRO del robot, x in avanti, y a sinistra, in metri (è drv_punto_xy). */
+void lidar_punto_xy(const lidar_punto_t *p, double *x, double *y);
+
 typedef struct {
 	uint32_t numero;         /* progressivo dei giri consegnati */
 	int64_t t_inizio_ns, t_fine_ns;   /* arrivo del primo e dell'ultimo pacchetto del giro */

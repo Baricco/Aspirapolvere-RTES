@@ -45,6 +45,7 @@
 
 #include "../gd32/gd32.h"
 #include "../rt/rt.h"
+#include "aggancio.h"
 #include "batteria.h"
 #include "contatti.h"
 #include "lidar_giro.h"
@@ -121,6 +122,8 @@ typedef struct {
 	int limiti;                  /* SIC_LIM_* | DRV_LIM_*: perché v, w sono diversi dal comando (0 = nessun limite) */
 	int spazzola_laterale, spazzola_centrale, aspirazione_giri, led;
 	int aspirazione_limiti;      /* perché l'aspirazione chiesta non va (SIC_LIM_* | DRV_LIM_*; 0 = va, o non chiesta) */
+	int aggancio;                /* AGG_FERMO, AGG_IN_CORSO, AGG_FATTO, AGG_FALLITO (aggancio.h, drv_aggancia) */
+	int aggancio_fase, aggancio_tentativo;
 
 	/* lidar */
 	int lidar_acceso, lidar_potenza, lidar_ok;
@@ -173,6 +176,10 @@ void drv_esci_dalla_base(int si);                   /* 1 = permette di muoversi 
  * Va chiamata a ogni frame, come un sensore: il driver ne fa un evento CONTATTO_INCASTRO nel registro dei contatti,
  * con la posizione del primo frame. La deve chiamare UN SOLO task. */
 void drv_incastro(int si);
+/* Messa in carica (driver/aggancio.h): con il robot in (AGG_PUNTO_X_M, 0) e angolo 0, cioè sull'asse della base e di
+ * spalle, 1 fa partire la manovra e 0 la annulla. Da quel momento il driver ignora drv_velocita e i task leggono
+ * l'esito in drv_stato_t.aggancio. Prima di chiamarla: drv_esci_dalla_base(0), e spazzole e aspirazione spente. */
+void drv_aggancia(int si);
 void drv_suono(const char *nome);                   /* es. "sound_beep_beep" (file in /usr/share/audio/english) */
 
 /* Prova a uscire dallo stato di guasto (solo se la causa non c'è più). Ritorna 0 se ci riesce. */

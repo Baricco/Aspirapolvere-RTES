@@ -2,6 +2,7 @@
 # porta stretta da 60 cm a destra (prova i passaggi stretti), una cassettiera e una poltrona
 stanza nome=corridoio larghezza=6 profondita=4
 robot x=1.2 y=2 angolo=0
+base x=1.2 y=0.22 angolo=90
 muro da=0,0.05 a=6,0.05 spessore=0.1
 muro da=0,3.95 a=6,3.95 spessore=0.1
 muro da=0.05,0.1 a=0.05,3.9 spessore=0.1

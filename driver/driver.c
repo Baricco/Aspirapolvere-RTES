@@ -49,6 +49,7 @@ static struct {
 	_Atomic int spazzola_lat, spazzola_cen, aspirazione, led, lidar_acceso, lidar_cgiri, uscita_base;
 	_Atomic int azzera_guasto;
 	_Atomic int incastro;                  /* incastro in avanti, dalla sicurezza (drv_incastro) */
+	_Atomic int aggancia;                  /* 1 = parti, -1 = annulla, 0 = niente: lo azzera il driver (drv_aggancia) */
 	_Atomic(const char *) suono;
 } cmd;
 
@@ -98,6 +99,8 @@ static struct {
 	batteria_t bat;
 	sicurezza_t sic;                      /* solo banco di prova */
 	contatti_t contatti;                  /* scatti di anti-caduta e bumper (contatti.h) */
+	aggancio_t agg;                       /* messa in carica in retromarcia (aggancio.h) */
+	int agg_fase_prec, agg_esito_prec;    /* per scrivere un evento quando cambiano */
 
 	int fase;
 	char guasto[96];
@@ -417,6 +420,9 @@ static void pubblica_stato(int64_t t)
 	s.spazzola_centrale = d.cen_inv;
 	s.aspirazione_giri = d.asp_inv;
 	s.aspirazione_limiti = d.asp_limiti;
+	s.aggancio = d.agg.esito;
+	s.aggancio_fase = (int)d.agg.fase;
+	s.aggancio_tentativo = d.agg.tentativo;
 	s.led = d.led_inv;
 	s.lidar_acceso = d.lidar_inv > 0;
 	s.lidar_potenza = d.lidar_inv > 0 ? d.pot_inv : 0;
@@ -466,6 +472,12 @@ static int limita_velocita(int64_t t, int32_t *v, int32_t *w)
 	int64_t vw = atomic_load(&cmd.vw);
 	*v = (int32_t)(vw >> 32);
 	*w = (int32_t)(uint32_t)vw;
+	/* durante l'aggancio comanda lui, non i task; i limiti qui sotto restano (al contatto le ruote si fermano da sole) */
+	int aggancio = aggancio_attivo(&d.agg);
+	if (aggancio) {
+		*v = (int32_t)lround(d.agg.v * SCALA_V);
+		*w = (int32_t)lround(d.agg.w * SCALA_W);
+	}
 	int lim = limiti_generali(t);
 	if (lim) {
 		*v = *w = 0;
@@ -483,7 +495,7 @@ static int limita_velocita(int64_t t, int32_t *v, int32_t *w)
 		}
 		return 0;
 	}
-	return sic_terra_limita(&d.s, atomic_load(&cmd.uscita_base), v, w);
+	return sic_terra_limita(&d.s, aggancio ? aggancio_stacco(&d.agg) : atomic_load(&cmd.uscita_base), v, w);
 }
 
 /* Spazzole e aspirazione: niente se il robot è sollevato o sulla base (a terra), o se il banco non lo permette.
@@ -622,6 +634,25 @@ static void aggiorna_lidar(int64_t t)
 
 /* ------------------------------------------------------------------------------------ frame in arrivo --- */
 
+/* A ogni frame dei sensori: comandi dei task per l'aggancio, un passo della guida, eventi quando cambia qualcosa. */
+static void aggiorna_aggancio(int64_t t)
+{
+	int c = atomic_exchange(&cmd.aggancia, 0);
+	if (c > 0)
+		aggancio_avvia(&d.agg, t);
+	else if (c < 0)
+		aggancio_annulla(&d.agg);
+	if (aggancio_attivo(&d.agg))
+		aggancio_frame(&d.agg, &d.s, t);
+	if ((int)d.agg.fase != d.agg_fase_prec || d.agg.esito != d.agg_esito_prec) {
+		evento("aggancio: esito %d, fase %d, tentativo %d, distanza %.3f, scarto %+.3f, angolo %+.1f°%s%s", d.agg.esito,
+		       d.agg.fase, d.agg.tentativo, d.agg.distanza, d.agg.scarto, d.agg.angolo * 180 / M_PI,
+		       d.agg.motivo ? ", " : "", d.agg.motivo ? d.agg.motivo : "");
+		d.agg_fase_prec = (int)d.agg.fase;
+		d.agg_esito_prec = d.agg.esito;
+	}
+}
+
 static void frame_gd32(const gd32_frame_t *f, void *ctx)
 {
 	int64_t t = *(const int64_t *)ctx;
@@ -665,6 +696,7 @@ static void frame_gd32(const gd32_frame_t *f, void *ctx)
 			if (k)
 				rt_task_sveglia(k, t);
 		}
+		aggiorna_aggancio(t);
 		/* reazione immediata: se i nuovi sensori cambiano il comando permesso (bumper, vuoto), lo si manda ora */
 		aggiorna_ruote(t, 0);
 		return;
@@ -701,8 +733,10 @@ static void frame_gd32(const gd32_frame_t *f, void *ctx)
 static void pacchetto_lidar(const lidar_pacchetto_t *p, void *ctx)
 {
 	int64_t t = *(const int64_t *)ctx;
-	if (lidar_assembla(&d.ass, p, t, &d.giro))
+	if (lidar_assembla(&d.ass, p, t, &d.giro)) {
 		scambio_scrivi(&sc_giro, &d.giro);
+		aggancio_giro(&d.agg, &d.giro, t);
+	}
 }
 
 /* ------------------------------------------------------------------------------------------ ogni 20 ms --- */
@@ -1017,6 +1051,8 @@ int drv_avvia(const drv_config_t *c)
 	lidar_regolatore_init(&d.reg, 0);
 	batteria_init(&d.bat);
 	contatti_init(&d.contatti);
+	aggancio_init(&d.agg);
+	atomic_store(&cmd.aggancia, 0);
 	sic_init(&d.sic, 1, SENSORI_VECCHI_NS);
 	if (c->cliff_atteso >= 0)
 		sic_cliff_atteso(&d.sic, (uint8_t)c->cliff_atteso);
@@ -1136,12 +1172,7 @@ uint32_t drv_contatti(drv_contatti_t *out) { return scambio_leggi(&sc_contatti, 
 
 void drv_punto_xy(const lidar_punto_t *p, double *x, double *y)
 {
-	/* angolo del lidar: 0 = dietro, ORARIO; nel sistema del robot b = 180° - angolo (0 = davanti, antiorario) */
-	double b = (180.0 - p->angolo_cdeg / 100.0) * M_PI / 180.0;
-	double r = p->distanza_mm / 1000.0;
-	/* il punto è a distanza r lungo b, spostato di LIDAR_OTTICO_M a destra del raggio (triangolatore) */
-	*x = LIDAR_X_M + r * cos(b) + LIDAR_OTTICO_M * sin(b);
-	*y = LIDAR_Y_M + r * sin(b) - LIDAR_OTTICO_M * cos(b);
+	lidar_punto_xy(p, x, y);
 }
 
 void drv_posa(double x, double y, double theta)
@@ -1192,6 +1223,11 @@ void drv_esci_dalla_base(int si)
 {
 	atomic_store(&cmd.uscita_base, si ? 1 : 0);
 	sveglia_driver();
+}
+
+void drv_aggancia(int si)
+{
+	atomic_store(&cmd.aggancia, si ? 1 : -1);      /* lo legge il prossimo frame: niente risveglio */
 }
 
 void drv_incastro(int si)

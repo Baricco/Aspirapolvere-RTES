@@ -2,6 +2,7 @@
 # (tante gambe sottili, che il lidar vede appena)
 stanza nome=cucina larghezza=4 profondita=3.5
 robot x=0.6 y=0.6 angolo=0
+base x=0.8 y=0.22 angolo=90
 muro da=0,0.05 a=4,0.05 spessore=0.1
 muro da=0,3.45 a=4,3.45 spessore=0.1
 muro da=0.05,0.1 a=0.05,3.4 spessore=0.1

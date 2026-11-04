@@ -1,7 +1,7 @@
 /*
  * Test della logica del driver che non usa Linux: scambio senza mutex (anche con più thread), batteria,
  * giri del lidar (con un pacchetto vero del robot), regolatore della velocità del lidar, limiti "a terra",
- * registro dei contatti (anti-caduta e bumper).
+ * registro dei contatti (anti-caduta e bumper), aggancio alla base.
  */
 #include <math.h>
 #include <pthread.h>
@@ -10,6 +10,7 @@
 #include <unistd.h>
 
 #include "test.h"
+#include "../driver/aggancio.h"
 #include "../driver/batteria.h"
 #include "../driver/contatti.h"
 #include "../driver/lidar_giro.h"
@@ -17,6 +18,7 @@
 #include "../gd32/gd32.h"
 #include "../gd32/sicurezza.h"
 #include "../rt/rt_tempo.h"
+#include "dati_aggancio.h"
 
 /* ---------------------------------------------------------------------------------------- scambio --- */
 
@@ -548,6 +550,178 @@ static void contatti(void)
 	s.bumper_dx = 0;
 }
 
+/* --------------------------------------------------------------------------------------------- aggancio --- */
+
+/* La faccia si trova nel giro vero: 28,4 cm di faccia a ~46 cm dal centro, robot ruotato di ~5°. Il centro della base è
+ * a +1,7 cm nel sistema del robot, ma a -2,6 cm rispetto alla normale della faccia, che è quello che conta. */
+static void aggancio_giro_vero(void)
+{
+	static lidar_giro_t g;
+	memset(&g, 0, sizeof g);
+	g.n = sizeof GIRO_VERO_BASE / sizeof GIRO_VERO_BASE[0];
+	for (int i = 0; i < g.n; i++) {
+		g.p[i].angolo_cdeg = GIRO_VERO_BASE[i][0];
+		g.p[i].distanza_mm = GIRO_VERO_BASE[i][1];
+	}
+	agg_faccia_t f = aggancio_trova_faccia(&g, AGG_CENTRO_INIZIO_M, AGG_TOLLERANZA_M);
+	CONTROLLA(f.valida);
+	CONTROLLA(f.ha_centro);
+	CONTROLLA(fabs(f.distanza - 0.455) < 0.015);
+	CONTROLLA(fabs(f.larghezza - 0.30) < 0.04);
+	CONTROLLA(fabs(f.angolo * 180 / M_PI - 5.4) < 1.5);
+	CONTROLLA(fabs(f.scarto + 0.026) < 0.015);
+	/* il giro può cominciare da un punto qualsiasi, anche in mezzo alla faccia */
+	for (int inizio = 0; inizio < g.n; inizio += 7) {
+		static lidar_giro_t h;
+		memset(&h, 0, sizeof h);
+		h.n = g.n;
+		for (int i = 0; i < g.n; i++)
+			h.p[i] = g.p[(i + inizio) % g.n];
+		agg_faccia_t f2 = aggancio_trova_faccia(&h, AGG_CENTRO_INIZIO_M, AGG_TOLLERANZA_M);
+		CONTROLLA(f2.valida && f2.ha_centro && fabs(f2.distanza - f.distanza) < 1e-9);
+	}
+}
+
+/* Modello del robot davanti alla base: faccia sulla retta X = 0 (|Y| <= 15 cm), muro 12 cm dietro; il robot ha X > 0 e
+ * guarda verso +X con angolo th = 0. */
+typedef struct {
+	double x, y, th;
+	int sulla_base, toccata_storta;
+	double y_contatto, th_contatto;
+} modello_agg_t;
+
+/* Distanza letta dal lidar con quell'angolo (centesimi di grado), 0 = nessuna eco; ostacolo = 0 toglie la base. */
+static uint16_t raggio_modello(const modello_agg_t *m, int cdeg, int con_base, unsigned *caso)
+{
+	double b = (180.0 - cdeg / 100.0) * M_PI / 180.0;
+	/* partenza del raggio nel sistema del robot (driver/lidar_giro.h, posizione e scostamento ottico) */
+	double ox = LIDAR_X_M + LIDAR_OTTICO_M * sin(b), oy = LIDAR_Y_M - LIDAR_OTTICO_M * cos(b);
+	double c = cos(m->th), s = sin(m->th);
+	double wx = m->x + ox * c - oy * s, wy = m->y + ox * s + oy * c;
+	double dx = cos(b + m->th), dy = sin(b + m->th);
+	double r = -1;
+	if (dx < -1e-6) {
+		if (con_base) {
+			double rf = -wx / dx, yf = wy + rf * dy;
+			if (fabs(yf) <= 0.15)
+				r = rf;
+		}
+		if (r < 0)
+			r = (-0.12 - wx) / dx;                 /* il muro dietro la base */
+	}
+	if (r < 0.11 || r > 6)
+		return 0;                                  /* sotto ~11 cm il lidar non misura (min visto nella prova: 108 mm) */
+	*caso = *caso * 1103515245u + 12345u;
+	double rumore = ((int)((*caso >> 16) % 9) - 4) * 0.001;
+	return (uint16_t)lround((r + rumore) * 1000);
+}
+
+/* Fa la manovra nel modello. ruota_a > 0: alla distanza ruota_a il robot gira da solo di ruota_rad in 3 s, come nella prova
+ * dock1, con gli encoder che non segnano niente. Ritorna l'esito. */
+static int simula_aggancio(modello_agg_t *m, int con_base, double ruota_a, double ruota_rad, unsigned seme)
+{
+	static aggancio_t a;
+	static lidar_giro_t g;
+	gd32_sensori_t s;
+	memset(&s, 0, sizeof s);
+	aggancio_avvia(&a, MS(1));
+	int64_t t = MS(1);
+	double enc_sx = 0, enc_dx = 0, imu = 0, ruotato = 0;
+	int attivo_giro = 0, passo = 0;
+	const double dt = 0.02;
+	while (aggancio_attivo(&a) && t < MS(600000)) {
+		t += MS(20);
+		passo++;
+		s.angolo[0] = (int16_t)lround(fmod(imu, 2 * M_PI) * 18000 / M_PI / 1.0285);
+		s.encoder_sx = (int32_t)lround(enc_sx);
+		s.encoder_dx = (int32_t)lround(enc_dx);
+		s.sulla_base = m->sulla_base;
+		s.in_carica = m->sulla_base && t > MS(600000);
+		if (passo % 8 == 0) {                          /* un giro ogni 160 ms */
+			g.n = 336;
+			for (int i = 0; i < g.n; i++) {
+				g.p[i].angolo_cdeg = (uint16_t)(i * 36000 / g.n);
+				g.p[i].distanza_mm = raggio_modello(m, g.p[i].angolo_cdeg, con_base, &seme);
+			}
+			aggancio_giro(&a, &g, t);
+		}
+		aggancio_frame(&a, &s, t);
+		double v = a.v, w = a.w;
+		/* i limiti del driver: sui contatti ruote ferme, salvo quando si stacca */
+		if (m->sulla_base && !aggancio_stacco(&a))
+			v = w = 0;
+		/* odometria e IMU */
+		double ds = v * dt, dth = w * dt;
+		enc_sx += (ds - dth * GD32_CARREGGIATA / 2) * GD32_SCALA_V;
+		enc_dx += (ds + dth * GD32_CARREGGIATA / 2) * GD32_SCALA_V;
+		/* la rotazione di disturbo: la vede l'IMU e il lidar, non gli encoder */
+		if (ruota_a > 0 && m->x < ruota_a && fabs(ruotato) < fabs(ruota_rad)) {
+			double d = ruota_rad / 3 * dt;
+			dth += d;
+			ruotato += d;
+			attivo_giro = 1;
+		}
+		imu += dth;
+		m->th += dth;
+		m->x += ds * cos(m->th);
+		m->y += ds * sin(m->th);
+		/* contatto, con la stessa tolleranza del simulatore: 3 cm e 15° */
+		const double R = 0.1745;
+		if (m->x <= R + 0.001) {
+			if (fabs(m->y) <= 0.03 && fabs(m->th) <= 0.26) {
+				if (!m->sulla_base) {
+					m->y_contatto = m->y;
+					m->th_contatto = m->th;
+				}
+				m->sulla_base = 1;
+			} else {
+				m->toccata_storta = 1;
+			}
+			m->x = fmax(m->x, R);
+		} else {
+			m->sulla_base = 0;
+		}
+	}
+	(void)attivo_giro;
+	return a.esito;
+}
+
+static void aggancio_retromarcia(void)
+{
+	/* partenze entro la tolleranza con cui ci arrivano i task (scarto ed errore di direzione); th = angolo */
+	static const struct { double y, th; } P[] = {
+		{ 0, 0 }, { 0.05, 0 }, { -0.05, 0 }, { 0, 0.15 }, { 0, -0.15 }, { 0.07, 0.17 }, { -0.07, -0.17 }, { 0.07, -0.17 },
+		{ -0.07, 0.17 }, { 0.10, 0.26 }, { -0.10, -0.26 }, { 0.10, -0.26 }, { -0.10, 0.26 },
+	};
+	for (unsigned i = 0; i < sizeof P / sizeof P[0]; i++) {
+		modello_agg_t m = { .x = AGG_CENTRO_INIZIO_M, .y = P[i].y, .th = P[i].th };
+		int e = simula_aggancio(&m, 1, 0, 0, i + 1);
+		CONTROLLA(e == AGG_FATTO);
+		CONTROLLA(m.sulla_base);
+		CONTROLLA(!m.toccata_storta);
+		CONTROLLA(fabs(m.y_contatto) < 0.025);
+		CONTROLLA(fabs(m.th_contatto) < 0.10);
+	}
+	/* la rotazione improvvisa di 28° della prova dock1: va corretta, a qualunque distanza capiti */
+	static const double DOVE[] = { 0.44, 0.38, 0.32, 0.26 };
+	for (unsigned i = 0; i < 4; i++) {
+		for (int verso = -1; verso <= 1; verso += 2) {
+			modello_agg_t m = { .x = AGG_CENTRO_INIZIO_M };
+			int e = simula_aggancio(&m, 1, DOVE[i], verso * 28 * M_PI / 180, i + 10);
+			CONTROLLA(e == AGG_FATTO);
+			CONTROLLA(!m.toccata_storta);
+		}
+	}
+	/* niente base: non si muove, fallisce */
+	modello_agg_t m = { .x = AGG_CENTRO_INIZIO_M };
+	CONTROLLA(simula_aggancio(&m, 0, 0, 0, 3) == AGG_FALLITO);
+	CONTROLLA(fabs(m.x - AGG_CENTRO_INIZIO_M) < 1e-9);
+	/* troppo lontano dall'asse per farcela: non la tocca mai storta */
+	modello_agg_t m2 = { .x = AGG_CENTRO_INIZIO_M, .y = 0.22, .th = 0.26 };
+	simula_aggancio(&m2, 1, 0, 0, 4);
+	CONTROLLA(!m2.toccata_storta);
+}
+
 int main(void)
 {
 	ESEGUI(scambio_base);
@@ -557,5 +731,7 @@ int main(void)
 	ESEGUI(lidar_regolatore);
 	ESEGUI(a_terra);
 	ESEGUI(contatti);
+	ESEGUI(aggancio_giro_vero);
+	ESEGUI(aggancio_retromarcia);
 	return TEST_FINE();
 }

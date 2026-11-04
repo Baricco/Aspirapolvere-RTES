@@ -1,25 +1,35 @@
 # Una prova della navigazione: simulatore (stanza, seme del rumore, partenza) + build/prove-nav/vacdbg.
-# Uso (dalla cartella del progetto): python3 tools/prove-nav/prova.py [--pulizia] stanza.txt seme durata_s [x y angolo]
+# Uso (dalla cartella del progetto): python3 tools/prove-nav/prova.py [--pulizia] [--missione] [--dalla-base] stanza.txt seme durata_s [x y angolo]
+# --dalla-base: il robot parte agganciato alla base della stanza. --missione: va avanti fino al riposo o al guasto, passando dal
+# ritorno alla base, e alla fine dice se il robot è sui contatti e in carica.
 # Si ferma quando la navigazione finisce l'esplorazione (arriva al giro dei bordi) o al guasto, o alla durata. Con --pulizia va avanti fino al
 # riposo o al ritorno alla base (fine della pulizia) o al guasto, e stampa anche strisce, trasferimenti e metà pulite (righe PERCORSO e
 # PULIZIA di costruisci.sh). Stampa un riassunto; i registri restano in build/prove-nav/, compreso il percorso vero
 # del robot nel simulatore (vero_<prova>.csv: orologio monotono, t del simulatore, x, y, dir, contatti), che
 # tools/prove-nav/disegna.py mette a confronto con quello che crede il robot (righe POSA).
-import json, os, re, signal, subprocess, sys, time, urllib.request
+import json, math, os, re, signal, subprocess, sys, time, urllib.request
 REPO = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..'))
 D = os.path.join(REPO, 'build', 'prove-nav')
-NOMI = ['WAIT', 'EXPLORE', 'CLEAN', 'BORDERS', 'HOME', 'HOOK', 'FOLLOW', 'UNLOCK', 'SLEEP', 'ALIGN', 'FAILURE', 'LAP']
+NOMI = ['WAIT', 'EXPLORE', 'CLEAN', 'BORDERS', 'HOME', 'HOOK', 'FOLLOW', 'UNLOCK', 'SLEEP', 'ALIGN', 'FAILURE', 'LAP', 'LEAVE']
 CLEAN, FAILURE, SLEEP, HOME = NOMI.index('CLEAN'), NOMI.index('FAILURE'), NOMI.index('SLEEP'), NOMI.index('HOME')
 BORDERS, LAP = NOMI.index('BORDERS'), NOMI.index('LAP')
 LAP_TIMEOUT = 1800   # BORDER_LAP_TIMEOUT di navigation.c: la rete di sicurezza, non deve mai scattare
 a = sys.argv[1:]
 PULIZIA = '--pulizia' in a
-a = [x for x in a if x != '--pulizia']
-FINE = (SLEEP, HOME, FAILURE) if PULIZIA else (BORDERS, FAILURE)
+MISSIONE = '--missione' in a
+DALLA_BASE = '--dalla-base' in a
+if MISSIONE: PULIZIA = True
+a = [x for x in a if x not in ('--pulizia', '--missione', '--dalla-base')]
+FINE = (SLEEP, FAILURE) if MISSIONE else (SLEEP, HOME, FAILURE) if PULIZIA else (BORDERS, FAILURE)
 stanza, seme, durata = a[0], a[1], float(a[2])
 testo = open(os.path.join(REPO, stanza)).read()
 if len(a) >= 6:
     testo = re.sub(r'^robot .*$', f'robot x={a[3]} y={a[4]} angolo={a[5]}', testo, flags=re.M)
+if DALLA_BASE:   # il centro del robot a un raggio dalla faccia della base, di spalle (sim/robot.h: ROBOT_RAGGIO)
+    b = re.search(r'^base x=(\S+) y=(\S+) angolo=(\S+)', testo, flags=re.M)
+    bx, by, bd = map(float, b.groups())
+    rx, ry = bx + 0.1745 * math.cos(math.radians(bd)), by + 0.1745 * math.sin(math.radians(bd))
+    testo = re.sub(r'^robot .*$', f'robot x={rx:.4f} y={ry:.4f} angolo={bd}', testo, flags=re.M)
 tag = f"{os.path.basename(stanza)[:-4]}_s{seme}" + (f"_{a[3]}_{a[4]}_{a[5]}" if len(a) >= 6 else '') + ('_pulizia' if PULIZIA else '')
 fst = os.path.join(D, f'stanza_{tag}.txt'); open(fst, 'w').write(testo)
 os.chdir(REPO)
@@ -83,6 +93,7 @@ if os.path.exists('build/sim/mappa_robot'):
 mancate = re.findall(r'(task_\w+).*\n\s+job \d+, deadline mancate (\d+)', open(fout, errors='replace').read())
 fin = nav[-1] if nav else None
 print(f"== {tag}: {esito}" + (f" in {float(fin[1]) - t_start:.1f}s" if fin and t_start and esito != 'TIMEOUT' else '') + f"  | mappa: {cont}")
+if ultimo and MISSIONE: print(f"   sulla base: contatto {ultimo['contatto_base']}, in carica {ultimo['in_carica']}")
 if ultimo: print(f"   posizione finale nel simulatore: x={ultimo['robot']['x']:.2f} y={ultimo['robot']['y']:.2f} dir={ultimo['robot']['dir']:.0f}")
 print(f"   riallineamenti: {sum(1 for n in nav if NOMI[int(n[3])] == 'ALIGN')}, sblocchi: {sum(1 for n in nav if NOMI[int(n[3])] == 'UNLOCK')}, "
       f"celle chiuse: {fin[10] if fin else 0}, deadline mancate: {[m for m in mancate if m[1] != '0'] or 'nessuna'}")

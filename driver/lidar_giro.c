@@ -1,4 +1,6 @@
 /* lidar_giro.c - Giri completi del lidar e regolazione della velocità: vedi lidar_giro.h. */
+#include <math.h>
+
 #include "lidar_giro.h"
 
 #include <string.h>
@@ -84,4 +86,14 @@ int lidar_regola(lidar_regolatore_t *r, double misurata)
 		p = 0;
 	r->potenza = p < 0 ? 0 : p > 100 ? 100 : (int)(p + 0.5);
 	return r->potenza;
+}
+
+void lidar_punto_xy(const lidar_punto_t *p, double *x, double *y)
+{
+	/* angolo del lidar: 0 = dietro, ORARIO; nel sistema del robot b = 180° - angolo (0 = davanti, antiorario) */
+	double b = (180.0 - p->angolo_cdeg / 100.0) * M_PI / 180.0;
+	double r = p->distanza_mm / 1000.0;
+	/* il punto è a distanza r lungo b, spostato di LIDAR_OTTICO_M a destra del raggio (triangolatore) */
+	*x = LIDAR_X_M + r * cos(b) + LIDAR_OTTICO_M * sin(b);
+	*y = LIDAR_Y_M + r * sin(b) - LIDAR_OTTICO_M * cos(b);
 }

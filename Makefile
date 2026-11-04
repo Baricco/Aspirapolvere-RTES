@@ -36,8 +36,8 @@ SPIA_SRC = spia/spia.c spia/registro.c spia/everest.c
 SPIA_HDR = spia/registro.h spia/everest.h
 
 # Driver (driver/): il nostro sostituto di AuxCtrl. rtes-driver è il programma per provarlo da solo.
-DRIVER_SRC = driver/driver.c driver/scambio.c driver/batteria.c driver/lidar_giro.c driver/contatti.c spia/registro.c
-DRIVER_HDR = driver/driver.h driver/scambio.h driver/batteria.h driver/lidar_giro.h driver/contatti.h spia/registro.h
+DRIVER_SRC = driver/driver.c driver/scambio.c driver/batteria.c driver/lidar_giro.c driver/contatti.c driver/aggancio.c spia/registro.c
+DRIVER_HDR = driver/driver.h driver/scambio.h driver/batteria.h driver/lidar_giro.h driver/contatti.h driver/aggancio.h spia/registro.h
 
 # Simulatore (sim/): GD32 e lidar finti su pseudo-seriali, pagina web con la stanza. Solo per il PC.
 SIM_LIB = sim/mondo.c sim/gd32sim.c sim/lidarsim.c sim/parametri.c
@@ -111,7 +111,7 @@ build/host/osserva: sim/osserva.c
 	$(CC_HOST) $(CFLAGS_HOST) -o $@ sim/osserva.c
 
 # Ogni test si collega a tutte le librerie (sono piccole): protocolli, rt, driver (senza il thread) e simulatore.
-TEST_LIB = $(RT_SRC) $(PROTO_SRC) spia/registro.c driver/scambio.c driver/batteria.c driver/lidar_giro.c driver/contatti.c $(SIM_LIB)
+TEST_LIB = $(RT_SRC) $(PROTO_SRC) spia/registro.c driver/scambio.c driver/batteria.c driver/lidar_giro.c driver/contatti.c driver/aggancio.c $(SIM_LIB)
 TEST_HDR = $(RT_HDR) $(PROTO_HDR) $(SPIA_HDR) $(DRIVER_HDR) $(SIM_HDR) test/test.h
 
 build/host/test_%: test/test_%.c $(TEST_LIB) $(TEST_HDR)
