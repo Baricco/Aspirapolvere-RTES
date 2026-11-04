@@ -221,7 +221,7 @@ static void riga_stato(double t, const drv_stato_t *st, const drv_sensori_t *s, 
 int main(int argc, char **argv)
 {
 	drv_config_t c;
-	drv_config_default(&c);
+	drv_config_prova(&c);
 	int durata = 0, task = 0, silenzioso = 0, ogni_ms = 1000;
 	const char *fifo = NULL, *file_csv = NULL;
 	static const struct option opz[] = {

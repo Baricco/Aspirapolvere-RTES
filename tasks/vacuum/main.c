@@ -11,6 +11,8 @@
 #include "safety.h"
 #include "mapping.h"
 
+#define SLEEP_TIME 1                      // il main contiene un loop infinito che serve solo ad aspettare di ricevere il segnale di arresto, dentro al loop aspetta 1 secondo per non mandare la CPU al 100%
+
 // Gestione Graceful Exit dei segnali CTRL + C 
 static volatile sig_atomic_t fine;
 static void a_fine(int sig) { (void)sig; fine = 1; }
@@ -84,12 +86,13 @@ int main(void) {
 	 * Il driver: sul robot usa /dev/ttyS3 e /dev/ttyS1, 
 	 * nel simulatore le pseudo-seriali (./rtes.sh sim). 
 	*/
+
 	drv_config_t c;
-	drv_config_default(&c);
+	
+       drv_config_default(&c);
 	if (drv_avvia(&c)) return 1;
 
 	rt_consenti_senza_privilegi(c.senza_rt);   /* sul PC senza permessi per SCHED_FIFO i task partono lo stesso */
-	drv_esci_dalla_base(1);                    /* se parte sulla base può uscire (piano, in avanti) */
 
 
 	// Avvia i task
@@ -245,7 +248,7 @@ int main(void) {
 	// e stampa i dati eventualmente
        
 	while (!fine) {
-
+              sleep(SLEEP_TIME);
        }
 
        // Spegni il Watchdog dei task

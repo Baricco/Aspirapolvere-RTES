@@ -48,6 +48,7 @@
 
 #define QUAD_CROSSED_FLAG 128           // se questo flag è attivo dentro al contatore num_occupied_fine_cells, significa che quella cella fine è attraversabile dal robot
 #define QUAD_CROSSED_DISTANCE 0.02      // quanto il centro del robot deve passare vicino al centro del quadrante per attivarne il flag
+#define BASE_CHECK_JOBS 5               // numero di job in cui si controlla se il robot è sulla base all'avvio, corrispondono a circa 1 s
 #define QUAD_CROSSED_MAX_STEP 0.15      // se il robot si sposta di una distanza superiore a questa tra due job, non si considerano le celle in mezzo come attraversate
 
 // canale di scambio del doppio buffer delle zone proibite
@@ -152,10 +153,16 @@ typedef struct {
         bool is_valid;              // indica se esiste un ultima posizione
     } last_mark;
 
+    uint32_t base_check_jobs;       // numero di job in cui è stato controllato se il robot è sulla base
+    bool base_seen;                 // indica se durante il controllo il robot è risultato sulla base
+
 } mapping_state_t;
 
 // stato del task di mappatura
 static mapping_state_t map_state;
+
+// indica se il robot è partito dalla base di ricarica, è atomico perché lo legge il task di navigazione
+static _Atomic bool started_on_base;
 
 
 
@@ -430,6 +437,11 @@ mapping_correction_t read_mapping_correction(void) {
 
 }
 
+
+// funzione di lettura del risultato del controllo sulla partenza dalla base
+bool read_started_on_base(void) {
+    return atomic_load(&started_on_base);
+}
 
 // funzione di scrittura dei dati del task (le zone proibite)
 void write_forbidden_zone_list(const mapping_forbidden_zone_list_t *forbidden_zones) {
@@ -1005,6 +1017,77 @@ bool is_nav_cell_invisible_obstacle(uint16_t cell) {
     return false;
 }
 
+// Funzione helper che segna come proibite le celle di navigazione in cui il centro del robot
+// farebbe entrare il corpo nella zona: quelle che toccano la zona allargata del raggio del robot.
+// Lo stato proibito poi resta da solo, perché quando ricalcola gli stati la mappatura lo conserva
+static void mark_forbidden_cells(const mapping_forbidden_zone_t zone) {
+
+    const double radius = ROBOT_RADIUS / 1000.0;
+
+    // calcola le celle dei due vertici opposti della zona allargata
+    uint16_t cell_min = coord_to_nav_index(zone.x - radius, zone.y - radius);
+    uint16_t cell_max = coord_to_nav_index(zone.x + zone.w + radius, zone.y + zone.h + radius);
+
+    pthread_mutex_lock(&navigation_map_data.mutex);
+
+    // scorri il rettangolo di celle: l'indice ha la y nel byte alto e la x in quello basso
+    for (int cur_y = cell_min >> 8; cur_y <= cell_max >> 8; cur_y++) {
+        for (int cur_x = cell_min & 0xFF; cur_x <= (cell_max & 0xFF); cur_x++) {
+
+            int cur_index = cur_y << 8 | cur_x;
+
+            // cambia solo lo stato, i bit dei quadranti restano quelli di prima
+            navigation_map_data.navigation_grid[cur_index] = set_nav_cell_state(navigation_map_data.navigation_grid[cur_index], NAV_CELL_FORBIDDEN);
+        }
+    }
+
+    // la navigazione deve prendere la mappa nuova
+    navigation_map_data.version_number++;
+
+    pthread_mutex_unlock(&navigation_map_data.mutex);
+}
+
+// Funzione helper che inserisce la zona proibita della base di ricarica nella lista
+// delle zone proibite per il task di sicurezza e nelle celle della mappa per il task di navigazione
+static void publish_base_zone(void) {
+
+    mapping_forbidden_zone_list_t zone_list = {0};
+
+    zone_list.forbidden_zones[0].x = RECHARGING_STATION_ZONE_X;
+    zone_list.forbidden_zones[0].y = RECHARGING_STATION_ZONE_Y;
+    zone_list.forbidden_zones[0].w = RECHARGING_STATION_ZONE_W;
+    zone_list.forbidden_zones[0].h = RECHARGING_STATION_ZONE_H;
+    zone_list.num_zones = 1;
+
+    write_forbidden_zone_list(&zone_list);
+
+    mark_forbidden_cells(zone_list.forbidden_zones[0]);
+}
+
+// Funzione helper che nei primi job controlla se il robot è partito dalla base di ricarica.
+static void check_start_on_base(void) {
+
+    // se il controllo è già finito esci
+    if (map_state.base_check_jobs >= BASE_CHECK_JOBS) return;
+
+    drv_stato_t cur_drv_state = {0};
+    drv_stato(&cur_drv_state);
+
+    // finché il driver non è pronto sulla_base non vale ancora niente
+    if (cur_drv_state.fase != DRV_PRONTO) return;
+
+    if (cur_drv_state.sulla_base) map_state.base_seen = true;
+
+    map_state.base_check_jobs++;
+
+    // se il controllo è finito e il robot è partito dalla base inserisci la zona proibita
+    // il risultato va pubblicato dopo, così chi legge true trova la zona già pronta
+    if (map_state.base_check_jobs == BASE_CHECK_JOBS && map_state.base_seen) {
+        publish_base_zone();
+        atomic_store(&started_on_base, true);
+    }
+}
+
 // job del task
 void job_mapping(void *arg) {
     
@@ -1025,6 +1108,9 @@ void job_mapping(void *arg) {
 
     // Se la posizione attuale non è valida (il robot è sollevato), esci
     if (!cur_pos.valid) return;
+
+    // Controlla se il robot è partito dalla base di ricarica
+    check_start_on_base();
 
     // Leggi lo storico delle pose dell'odometria: serve a sapere dov'era il robot quando è stato misurato ogni punto
     read_odom_history(&map_state.odom_history);

@@ -1027,12 +1027,19 @@ void drv_config_default(drv_config_t *c)
 	c->cpu = 0;
 	c->priorita = RT_PRIO_DRIVER;
 	c->motori = 1;
-	c->aspirazione = 0;
+	c->aspirazione = 1;
 	c->cliff_atteso = -1;
 	c->lidar_giri_s = 6.0;
 	c->scarto_lidar_cdeg = LIDAR_SCARTO_CDEG;
 	c->cmd_suono = access("/bin/tinyplayer", X_OK) == 0 ? "tinyplayer /usr/share/audio/english/%s.mp3 >/dev/null 2>&1"
 	                                                     : NULL;
+														 
+}
+
+void drv_config_prova(drv_config_t *c)
+{
+	drv_config_default(c);
+	c->aspirazione = 0;
 }
 
 int drv_avvia(const drv_config_t *c)

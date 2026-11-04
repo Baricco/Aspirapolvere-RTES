@@ -2,6 +2,8 @@
 # Uso (dalla cartella del progetto): python3 tools/prove-nav/prova.py [--pulizia] [--missione] [--dalla-base] stanza.txt seme durata_s [x y angolo]
 # --dalla-base: il robot parte agganciato alla base della stanza. --missione: va avanti fino al riposo o al guasto, passando dal
 # ritorno alla base, e alla fine dice se il robot è sui contatti e in carica.
+# --batteria T (con --missione): dopo T s porta la batteria del simulatore al 25% (14,3 V a vuoto: con la ventola accesa la tensione scende sotto 14,2, senza arrivare ai 13,8 che fermano i motori); quando il robot arriva in riposo la ricarica di colpo
+# (la vera ricarica durerebbe ore) e la prova continua fino al riposo successivo.
 # Si ferma quando la navigazione finisce l'esplorazione (arriva al giro dei bordi) o al guasto, o alla durata. Con --pulizia va avanti fino al
 # riposo o al ritorno alla base (fine della pulizia) o al guasto, e stampa anche strisce, trasferimenti e metà pulite (righe PERCORSO e
 # PULIZIA di costruisci.sh). Stampa un riassunto; i registri restano in build/prove-nav/, compreso il percorso vero
@@ -20,6 +22,9 @@ MISSIONE = '--missione' in a
 DALLA_BASE = '--dalla-base' in a
 if MISSIONE: PULIZIA = True
 a = [x for x in a if x not in ('--pulizia', '--missione', '--dalla-base')]
+BATTERIA = None
+if '--batteria' in a:
+    i = a.index('--batteria'); BATTERIA = float(a[i + 1]); del a[i:i + 2]
 FINE = (SLEEP, FAILURE) if MISSIONE else (SLEEP, HOME, FAILURE) if PULIZIA else (BORDERS, FAILURE)
 stanza, seme, durata = a[0], a[1], float(a[2])
 testo = open(os.path.join(REPO, stanza)).read()
@@ -48,6 +53,9 @@ fout = os.path.join(D, f'prog_{tag}.log')
 prog = subprocess.Popen(['build/host/osserva', '--uscita', 'build/sim/mappa_robot', '--', 'taskset', '-c', '0-3',
                          os.path.join(D, 'vacdbg')], env=env, stdout=open(fout, 'w'), stderr=subprocess.STDOUT,
                         start_new_session=True)
+def comando_sim(testo):
+    urllib.request.urlopen(urllib.request.Request('http://127.0.0.1:8080/comando', data=testo.encode(), method='POST'), timeout=2).read()
+fase_batt, righe_a_riposo = 0, 0
 def righe_nav():
     return [l.split() for l in open(fout, errors='replace') if l.startswith('NAV ')]
 eventi, prec, t0, fine, ultimo = [], {}, time.time(), None, None
@@ -65,7 +73,13 @@ while time.time() - t0 < durata:
         vero.write(f"{time.monotonic():.3f},{d['t']:.3f},{r['x']:.4f},{r['y']:.4f},{r['dir']:.1f},"
                    f"{int(any(d['bumper']))},{int(bool(d['bloccato']))},{int(bool(d['incastrato']))}\n")
     nav = righe_nav()
-    if nav and int(nav[-1][3]) in FINE and fine is None: fine = time.time()
+    if BATTERIA is not None:
+        if fase_batt == 0 and time.time() - t0 >= BATTERIA:
+            comando_sim('batteria 25'); fase_batt = 1; print(f"batteria scaricata a {time.time() - t0:.0f} s", flush=True)
+        elif fase_batt == 1 and nav and int(nav[-1][3]) == SLEEP:
+            time.sleep(1); comando_sim('batteria 95'); fase_batt = 2; righe_a_riposo = len(nav); print(f"batteria ricaricata a {time.time() - t0:.0f} s", flush=True)
+    finita = nav and int(nav[-1][3]) in FINE and (BATTERIA is None or int(nav[-1][3]) == FAILURE or (fase_batt == 2 and len(nav) > righe_a_riposo))
+    if finita and fine is None: fine = time.time()
     if fine and time.time() - fine > 1.5: break
     time.sleep(0.1)
 for l in subprocess.run(['pgrep', '-f', '^' + os.path.join(D, 'vacdbg')], capture_output=True, text=True).stdout.split():

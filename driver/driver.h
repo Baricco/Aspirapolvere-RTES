@@ -58,7 +58,7 @@ typedef struct {
 	int cpu;                     /* core del driver (default 0) */
 	int priorita;                /* default RT_PRIO_DRIVER (99) */
 	int motori;                  /* 0 = rifiuta TUTTI i comandi ai motori: ruote, spazzole, aspirazione (default 1) */
-	int aspirazione;             /* 1 = aspirazione permessa (default 0) */
+	int aspirazione;             /* 1 = aspirazione permessa (default 1; 0 con drv_config_prova) */
 	int banco;                   /* 1 = banco di prova: motori solo se il robot è SOLLEVATO (gd32/sicurezza.h) */
 	int cliff_atteso;            /* solo banco: anti-caduta che valgono "sollevato" (-1 = 0x0f, la regola normale) */
 	double lidar_giri_s;         /* velocità del lidar quando è acceso (default 6, come AuxCtrl) */
@@ -76,6 +76,10 @@ typedef struct {
  * (simulatore) e sul robot senza cambiare una riga. Il suono usa tinyplayer se c'è (sul robot), altrimenti niente.
  */
 void drv_config_default(drv_config_t *c);
+
+/* Come drv_config_default, ma con l'aspirazione vietata: per i programmi di prova, che non devono accendere la ventola
+ * se non lo chiede chi li lancia (rtes-driver: --aspirazione). */
+void drv_config_prova(drv_config_t *c);
 
 /* Apre le seriali e avvia il thread del driver. Ritorna 0 oppure un codice errno (con un messaggio su stderr). */
 int drv_avvia(const drv_config_t *c);

@@ -558,8 +558,8 @@ Cose da sapere:
 - **Dati condivisi fra task**: mutex con priority inheritance (`rt_mutex_init`). Fra task e driver niente mutex:
   `drv_*()` non si bloccano mai.
 - **Mai** dentro un job: `printf`, `malloc`, file, `sleep`. Per i log usa un buffer e un thread non RT.
-- **Comandi**: `drv_velocita(v, w)` (m/s, rad/s), `drv_spazzole(lat, cen)`, `drv_aspirazione(giri)` (serve
-  `c.aspirazione = 1`), `drv_led(modo)`, `drv_lidar(acceso, giri_s)`, `drv_esci_dalla_base(1)`, `drv_suono(nome)`.
+- **Comandi**: `drv_velocita(v, w)` (m/s, rad/s), `drv_spazzole(lat, cen)`, `drv_aspirazione(giri)` (permessa con
+  `drv_config_default`, vietata con `drv_config_prova`), `drv_led(modo)`, `drv_lidar(acceso, giri_s)`, `drv_esci_dalla_base(1)`, `drv_suono(nome)`.
   Il driver applica sempre i limiti: guarda `drv_stato().limiti` per sapere perché un comando non passa.
 - **Unità dei sensori** (`gd32_sensori_t` in `gd32/gd32.h`): encoder in tick (~4580 per metro, `GD32_SCALA_V`),
   imbardata in 0,01° (positiva in senso antiorario, deriva), velocità angolare in 0,01 °/s, tensione in decimi di volt.

@@ -16,8 +16,10 @@
 #define ESCAPE_MAX_CELLS 3
 #define WAIT_TIME RT_MS(3000)
 #define CRUISING_SPEED 0.35                  // velocità di crociera del robot, m/s
-#define MAX_ROTATION_SPEED  1.2             // massima velocità di rotazione, per stare sotto al soglia oltre il quale la mappatura scarta i giri (1,5) con un certo margine, rad/s
-#define UNKNOWN_SPEED_FACTOR 0.5            // fattore da moltiplicare alla velocità quando il robot si muove in territorio sconosciuto
+#define LEAVE_BASE_SPEED 0.1                 // velocità con cui il robot esce dalla base, espressa in m/s
+#define LEAVE_BASE_TIMEOUT RT_MS(15000)      // tempo massimo per uscire dalla base, scaduto il quale il robot va in guasto
+#define MAX_ROTATION_SPEED  1.2              // massima velocità di rotazione, per stare sotto al soglia oltre il quale la mappatura scarta i giri (1,5) con un certo margine, rad/s
+#define UNKNOWN_SPEED_FACTOR 0.5             // fattore da moltiplicare alla velocità quando il robot si muove in territorio sconosciuto
 
 
 #define STALL_SPEED 0.02                // velocità massima in avanti sotto la quale la sicurezza sta trattenendo il robot, espressa in m/s
@@ -40,7 +42,7 @@
 #define BORDER_CLEAN_LEFT 0.05              // a sinistra del centro: il lato verso la stanza, dove arriva il rullo
 #define BORDER_CLEAN_RIGHT 0.1745           // a destra del centro: tutto il lato della spazzola laterale, fino al bordo del robot
 #define BORDER_CLEAN_ALONG 0.10             // avanti e indietro rispetto al centro: i centri delle metà distano fino a 20 cm lungo le strisce
-#define BORDER_DONE_DISTANCE 0.16           // distanza entro cui una metà pulita fa considerare pulito un quadrante, espressa in metri
+#define BORDER_DONE_DISTANCE 0.16           // distanza entdrv_segnala_guastoro cui una metà pulita fa considerare pulito un quadrante, espressa in metri
 
 #define BORDER_SPEED 0.15                   // velocità massima lungo il bordo, espressa in m/s
 #define BORDER_ROTATION_GAIN 2.5            // guadagno usato per calcolare la velocità di rotazione dall'errore di direzione, espresso in 1/secondi
@@ -58,6 +60,23 @@
 
 #define NAV_PATH_NO_QUAD 0                  // valore da restituire se non si trova nessun quadrante nelle funzioni di ricerca    
 #define NAV_PATH_CENTER 1                   // valore per indicare di raggiungere il centro di una cella, non un quadrante specifico
+
+// costanti di velocità delle spazzole, espresse in percentuale
+#define BRUSH_SPEED_OFF 0
+#define BRUSH_SPEED_NORMAL 60
+#define BRUSH_SPEED_MAX 100
+
+// costanti di potenza di aspirazione, espressa in giri al minuto
+#define SUCTION_POWER_OFF 0
+#define SUCTION_POWER_NORMAL 15500
+#define SUCTION_POWER_MAX 19500
+
+#define CHARGING_STATION_CELL coord_to_nav_index(AGG_PUNTO_X_M, 0)          // cella che si trova davanti alla base di ricarica 
+#define HOOK_UP_TIMEOUT RT_MS(30000)            // tempo massimo che può impiegare il robot ad agganciarsi alla base di ricarica prima che vada in stato di guasto
+
+#define BATTERY_RESUME_PERCENT 90               // percentuale di carica della batteria che deve raggiungere il robot prima che ricominci a pulire
+
+#define ALIGN_TIMEOUT RT_MS(15000)              // tempo massimo che può durare l'allineamento al centro di una cella, prima che il robot vada in guasto
 
 typedef enum {
     UNLOCK_PHASE_BACK,
@@ -143,6 +162,7 @@ typedef enum {
     NAV_STATE_ALIGN,            // robot in allineamento, dopo un arresto, porta il robot al centro della cella di navigazione
     NAV_STATE_FAILURE,          // robot fermo, qualcosa è andato storto
     NAV_STATE_BORDER_LAP,       // il robot segue un ostacolo tenendolo a destra, fino alla fine del giro
+    NAV_STATE_LEAVE_BASE,       // il robot esce dalla base di ricarica
 } nav_state_t;
 
 // definizione dello stato interno del task di navigazione
@@ -190,8 +210,12 @@ typedef struct {
     int64_t border_lost_start;              // istante in cui il robot ha smesso di vedere l'ostacolo, 0 se lo vede
 
     bool strip_has_back;                    // indica se nella striscia di pulizia attuale c'è un punto dietro all'inizio
+    bool has_left_base;                     // true se il robot è già uscito dalla base di ricarica
     bool is_clean_started;                  // true se la pulizia a strisce è già iniziata, la prima striscia parte da un estremo della stanza
     bool strip_has_end;                     // indica se nella striscia di pulizia attuale c'è un punto oltre alla fine
+    bool hook_has_started;                  // indica se sia già stato richiesto al driver di agganciarsi alla base di ricarica
+
+    nav_state_t interrupted_mission;        // la missione che aveva il robot prima che venisse interrotta per via della batteria scarica. se 0, significa che il robot non si è interrotto per la batteria scarica.
 
 } navigation_state_t;
 
@@ -349,7 +373,8 @@ static inline bool is_active_cleaning(void) {
             nav_state.state != NAV_STATE_UNLOCK &&
             nav_state.state != NAV_STATE_FAILURE &&
             nav_state.state != NAV_STATE_WAIT &&
-            nav_state.state != NAV_STATE_SLEEP
+            nav_state.state != NAV_STATE_SLEEP &&
+            nav_state.state != NAV_STATE_LEAVE_BASE
         )
     );
 }
@@ -518,6 +543,24 @@ static void set_state(nav_state_t next_state) {
 
 }
 
+// funzione helper che verifica se il robot debba tornare a caricare prima di terminare la missione attuale
+static bool is_battery_dead() {
+
+    // leggi lo stato attuale del driver
+    drv_stato_t cur_state = {0};
+
+    drv_stato(&cur_state);
+
+    // se la batteria è scarica e la missione attuale è di esplorazione o pulizia (interna o bordi) 
+    // e lo stato attuale non è sblocco, attesa, guasto, riposo, uscita o aggancio alla base
+    // ritorna il segnale che la batteria è scarica e bisogna interrompere la missione per andare a ricaricarla
+    return (
+        cur_state.batteria != BAT_OK &&
+        (nav_state.mission == NAV_STATE_EXPLORE || nav_state.mission == NAV_STATE_FOLLOW_BORDERS || nav_state.mission == NAV_STATE_CLEAN) &&
+        (nav_state.state != NAV_STATE_UNLOCK && nav_state.state != NAV_STATE_WAIT && nav_state.state != NAV_STATE_FAILURE && nav_state.state != NAV_STATE_SLEEP && nav_state.state != NAV_STATE_LEAVE_BASE && nav_state.state != NAV_STATE_HOOK_UP)
+    );
+}
+
 // Funzione helper per impostare una cella della mappa come troppo stretta (NAV_CELL_TOO_NARROW)
 // al task di mappatura, aggiornando anche la copia locale della mappa di navigazione
 static void close_cell(uint16_t cell) {
@@ -558,7 +601,6 @@ static bool is_stalled(safety_alarm_t cur_alarm, movement_position_data_t cur_po
 
 
 }
-
 
 // funzioni helper per la coda
 static inline void search_queue_push(uint16_t next_elem) {
@@ -670,8 +712,8 @@ static inline void coord_to_lattice(const double x, const double y, int *lattice
 }
 
 // Funzione helper che prende le coordinate di un punto in una cella di navigazione
-// e restituisce true se quel punto si trova in un quadrante bloccato, false altrimenti
-static bool is_lattice_point_blocked(const double x, const double y) {
+// e restituisce true se quel punto si trova in una cella che genera un bordo, false altrimenti
+static bool is_lattice_point_edge_source(const double x, const double y) {
 
     // calcola il punto del reticolo dei quadranti in cui cade il punto
     int lattice_x, lattice_y;
@@ -688,8 +730,11 @@ static bool is_lattice_point_blocked(const double x, const double y) {
     if (lattice_y % 2 == 1) quad = (lattice_x % 2 == 1) ? NAV_CELL_TOP_RIGHT : NAV_CELL_TOP_LEFT;
     else quad = (lattice_x % 2 == 1) ? NAV_CELL_BOTTOM_RIGHT : NAV_CELL_BOTTOM_LEFT;
 
+    // se lo stato della cella è NAV_CELL_FORBIDDEN restituisci false perchè quella zona non genera bordi da pulire
+    if (get_nav_cell_state(nav_state.map[cell]) == NAV_CELL_FORBIDDEN) return false;
+
     // conta solo il bit del quadrante, non lo stato della cella: il bit a 1 vuol dire che lì c'è un ostacolo vero,
-    // quindi le zone proibite, le celle troppo strette e quelle sconosciute da sole non generano bordi
+    // quindi le celle troppo strette e quelle sconosciute da sole non generano bordi
     return (nav_state.map[cell] & quad) != 0;
 }
 
@@ -710,10 +755,10 @@ static bool is_quad_border(const uint16_t cell, const uint8_t quad) {
 
     // il quadrante è di bordo se almeno uno dei 4 vicini è bloccato, le diagonali non contano
     return (
-        is_lattice_point_blocked(x + quad_size, y) ||
-        is_lattice_point_blocked(x - quad_size, y) ||
-        is_lattice_point_blocked(x, y + quad_size) ||
-        is_lattice_point_blocked(x, y - quad_size)
+        is_lattice_point_edge_source(x + quad_size, y) ||
+        is_lattice_point_edge_source(x - quad_size, y) ||
+        is_lattice_point_edge_source(x, y + quad_size) ||
+        is_lattice_point_edge_source(x, y - quad_size)
     );
 }
 
@@ -841,12 +886,18 @@ static bool cell_can_enter(const uint16_t cur_cell, const uint16_t next_cell, co
     // se next_cell è libera, può entrare
     if (is_nav_cell_free(next_cell) && (!is_nav_cell_free(cur_cell) || get_contact_quads(cur_cell, next_cell, &quad_corridor1, &quad_corridor2))) return true;
 
-    // se siamo qui significa che next_cl, ferell è proibita, bloccata o sconosciuta
+    // se siamo qui significa che next_cell è proibita, bloccata o sconosciuta
     // in questo caso si può passare solo se:
     // 1. next_cell non è sconosciuta
     // 2. cur_cell è bloccata o proibita (da una cella libera non puoi passare per una bloccata)
     // 3. se next_cell si trova entro ESCAPE_MAX_CELLS da start_cell
-    if (get_nav_cell_state(nav_state.map[next_cell]) != NAV_CELL_UNKNOWN && !is_nav_cell_free(cur_cell) && get_nav_cell_state(nav_state.map[next_cell]) != NAV_CELL_TOO_NARROW) {
+    // 4. se next_cell è proibita, anche start_cell dev'essere proibita (il robot è già dentro la zona e deve uscirne)
+    if (
+        get_nav_cell_state(nav_state.map[next_cell]) != NAV_CELL_UNKNOWN &&
+        !is_nav_cell_free(cur_cell) &&
+        get_nav_cell_state(nav_state.map[next_cell]) != NAV_CELL_TOO_NARROW &&
+        (get_nav_cell_state(nav_state.map[next_cell]) != NAV_CELL_FORBIDDEN || get_nav_cell_state(nav_state.map[start_cell]) == NAV_CELL_FORBIDDEN)
+    ) {
         
         // ricava x e y di start_cell dall'indice
         uint16_t start_cell_y = start_cell >> 8;
@@ -1628,6 +1679,25 @@ static void start_following_path(const safety_alarm_t cur_alarm, const movement_
 }
 
 
+// Funzione helper che fa partire l'uscita dalla base, questo p l'ultimo momento in cui il robot ha il permesso di muoversi con i contatti chiusi
+static void start_leaving_base(void) {
+    drv_esci_dalla_base(1);
+    set_state(NAV_STATE_LEAVE_BASE);
+}
+
+// Funzione helper che fa partire l'ultimo tratto del rientro: il percorso arriva solo al centro
+// della cella, che è fuori dall'asse della base, quindi il robot deve andare proprio sul punto
+static void start_hook_up(const safety_alarm_t cur_alarm) {
+
+    // azzera questo flag, perchè il flag indica che la fase di aggancio è stata demandata al driver
+    // mentre in questo momento dobbiamo ancora metterci nelle condizioni di chiedere al driver l'aggancio
+    nav_state.hook_has_started = false;
+
+    send_objective(OBJ_MOVE, MAX_ROTATION_SPEED, 0, MIN(cur_alarm.max_v_forw, CRUISING_SPEED), AGG_PUNTO_X_M, 0);
+
+    set_state(NAV_STATE_HOOK_UP);
+}
+
 // funzione helper, autoesplicativa
 static void go_to_nearest_free_cell(const safety_alarm_t cur_alarm, const movement_position_data_t cur_pos, const uint16_t robot_index) {
 
@@ -1880,6 +1950,23 @@ static bool find_clean_start_cell(const uint16_t robot_cell, const movement_posi
     return true;
 }
 
+
+// funzione helper che restitusice true se bisogna attivare spazzole e aspirazione, false altrimenti
+// l'aspirazione si attiva se stiamo pulendo (bordi o interno della stanza) e non siamo in stato di 
+// guasto, sblocco, attesa o riposo
+static bool should_activate_brushes() {
+    return (
+        (nav_state.mission == NAV_STATE_CLEAN || nav_state.mission == NAV_STATE_FOLLOW_BORDERS) &&
+        (
+            nav_state.state != NAV_STATE_UNLOCK &&
+            nav_state.state != NAV_STATE_FAILURE &&
+            nav_state.state != NAV_STATE_WAIT &&
+            nav_state.state != NAV_STATE_SLEEP &&
+            nav_state.state != NAV_STATE_LEAVE_BASE
+        )
+    );
+}
+
 // job del task
 void job_navigation(void *arg) {
     
@@ -1899,6 +1986,15 @@ void job_navigation(void *arg) {
 
     // leggi la posizione corrente dal task di movimento
     movement_position_data_t cur_pos = read_movement();
+
+    // se bisogna attivare spazzole e aspirazione attivali, altrimenti disattivali
+    if (should_activate_brushes()) {
+        drv_aspirazione(SUCTION_POWER_NORMAL);
+        drv_spazzole(BRUSH_SPEED_NORMAL, BRUSH_SPEED_NORMAL);
+    } else {
+        drv_aspirazione(SUCTION_POWER_OFF);
+        drv_spazzole(BRUSH_SPEED_OFF, BRUSH_SPEED_OFF);
+    }
 
     // se la posizione corrente non è valida
     if (!cur_pos.valid) {
@@ -1938,7 +2034,9 @@ void job_navigation(void *arg) {
         nav_state.state != NAV_STATE_SLEEP &&
         nav_state.state != NAV_STATE_UNLOCK &&
         nav_state.state != NAV_STATE_WAIT &&
-        nav_state.state != NAV_STATE_FAILURE) {
+        nav_state.state != NAV_STATE_FAILURE &&
+        nav_state.state != NAV_STATE_HOOK_UP &&
+        nav_state.state != NAV_STATE_LEAVE_BASE) {
         
         // se non c'è l'errore SAFETY_ERROR_CONTACT segna la cella del robot come ostacolo,
         //  per non incappare nello stesso allarme successivamente 
@@ -1962,6 +2060,21 @@ void job_navigation(void *arg) {
         return;
     }
 
+    // controlla se la batteria è scarica
+    if (is_battery_dead()) {
+        
+        // salva la missione attuale
+        nav_state.interrupted_mission = nav_state.mission;
+
+        // ferma il robot
+        send_objective(OBJ_STOP, 0, 0, 0, 0, 0);
+
+        // manda il robot alla base di ricarica
+        set_state(NAV_STATE_RETURN_HOME);
+
+        return;
+    }
+
     // Switch della macchina a stati
     switch (nav_state.state) {
         case NAV_STATE_WAIT: {
@@ -1975,8 +2088,10 @@ void job_navigation(void *arg) {
 
             // se il robot è stato fermo per più di WAIT_TIME
             if (elapsed_time(nav_state.state_start)>= WAIT_TIME) {
-                // passa al prossimo stato
-                set_state(nav_state.mission);
+                // se il robot è partito dalla base e non ne è ancora uscito, esce per prima cosa
+                if (read_started_on_base() && !nav_state.has_left_base) start_leaving_base();
+                // altrimenti passa al prossimo stato
+                else set_state(nav_state.mission);
             }
             
             break;
@@ -2290,16 +2405,150 @@ void job_navigation(void *arg) {
             
             break;
         }
+        case NAV_STATE_LEAVE_BASE: {
+
+            // se il robot è arrivato al punto davanti alla base
+            if (cur_pos.x >= AGG_PUNTO_X_M) {
+
+                send_objective(OBJ_STOP, 0, 0, 0, 0, 0);
+
+                // da adesso il permesso di muoversi con i contatti chiusi non serve più, quindi lo revochiamo
+                drv_esci_dalla_base(0);
+
+                // segna che il robot è uscito dalla base
+                nav_state.has_left_base = true;
+
+                // svuota la scia, così uno sblocco subito dopo non arretra verso la base
+                nav_state.trail.len = 0;
+
+                // la missione non è cambiata
+                set_state(nav_state.mission);
+
+            } else if (elapsed_time(nav_state.state_start) >= LEAVE_BASE_TIMEOUT) {     // se è passato troppo tempo da quando ha provato a uscire dalla base
+
+                // revoca il permesso di muoversi al robot
+                drv_esci_dalla_base(0);
+
+                stop_and_fail();
+
+            } else {
+
+                // il movimento è sempre dritto, il robot non deve mai ruotare con i contatti chiusi
+                // questo è importante per evitare che il robot sposti la base per sbaglio
+                // se qualcosa lo blocca il driver tiene ferme le ruote, e riparte quando l'ostacolo sparisce
+                send_objective(OBJ_CONST_SPEED, 0, 0, MIN(LEAVE_BASE_SPEED, cur_alarm.max_v_forw), 0, 0);
+            }
+
+            break;
+        }
         case NAV_STATE_HOOK_UP: {
-            /* code */
+
+            // se il driver sta già facendo la manovra, aspetta l'esito
+            if (nav_state.hook_has_started) {
+
+                drv_stato_t cur_drv_state = {0};
+                drv_stato(&cur_drv_state);
+
+                if (cur_drv_state.aggancio == AGG_FATTO) set_state(NAV_STATE_SLEEP);
+                else if (cur_drv_state.aggancio == AGG_FALLITO) stop_and_fail();
+
+                break;
+            }
+
+            // rete di sicurezza: qui gli sblocchi sono disattivati, il robot potrebbe restare bloccato
+            if (elapsed_time(nav_state.state_start) >= HOOK_UP_TIMEOUT) {
+                stop_and_fail();
+                break;
+            }
+
+            // il tipo dell'obiettivo corrente dice a che punto siamo
+            if (nav_state.cur_obj.obj_type == OBJ_MOVE) {
+
+                // aggiorna la velocità come la più piccola tra velocità di crociera e cur_alarm.max_v_forw
+                nav_state.cur_obj.v = MIN(cur_alarm.max_v_forw, CRUISING_SPEED);
+
+                // pubblica la velocità aggiornata
+                write_objective(&nav_state.cur_obj);
+
+                // arrivato sul punto, il robot si gira di 180°
+                if (is_objective_achieved(cur_pos)) send_objective(OBJ_ROTATE, MAX_ROTATION_SPEED, 0, 0, 0, 0);
+
+            } else if (nav_state.cur_obj.obj_type == OBJ_ROTATE && is_objective_achieved(cur_pos)) {
+
+                send_objective(OBJ_STOP, 0, 0, 0, 0, 0);
+
+                // al contatto le ruote si devono fermare
+                drv_esci_dalla_base(0);
+
+                // da qui in poi comanda il driver
+                drv_aggancia(1);
+
+                nav_state.hook_has_started = true;
+            }
+
             break;
         }
         case NAV_STATE_RETURN_HOME: {
-            /* code */
+
+            // se il robot non è partito dalla base non sa dove si trovi, quindi si ferma dove si trova
+            if (!read_started_on_base()) {
+                send_objective(OBJ_STOP, 0, 0, 0, 0, 0);
+                set_state(NAV_STATE_SLEEP);
+                break;
+            }
+
+            // calcola la cella del robot
+            uint16_t robot_cell = coord_to_nav_index(cur_pos.x, cur_pos.y);
+
+            // se la cella del robot non è libera, vai alla cella libera più vicina ed esci
+            if (!is_nav_cell_free(robot_cell)) {
+                go_to_nearest_free_cell(cur_alarm, cur_pos, robot_cell);
+                break;
+            }
+
+            // se il robot è già nella cella davanti alla base, inizia l'ultimo tratto
+            if (robot_cell == CHARGING_STATION_CELL) {
+                start_hook_up(cur_alarm);
+                break;
+            }
+
+            // cerca il percorso, alla fine si torna qui
+            if (search_cell(robot_cell, GOAL_CELL, CHARGING_STATION_CELL) == 0) {
+                // non c'è una strada per tornare alla base
+                stop_and_fail();
+            } else {
+                start_following_path(cur_alarm, cur_pos, 0, false);
+            }
+
             break;
         }
         case NAV_STATE_SLEEP: {
-            /* code */
+
+            // se l'obiettivo non è di stare fermo, manda l'obiettivo di fermarsi
+            if (nav_state.cur_obj.obj_type != OBJ_STOP) send_objective(OBJ_STOP, 0, 0, 0, 0, 0);
+
+            // leggi lo stato attuale del driver
+            drv_stato_t cur_state = {0};
+
+            drv_stato(&cur_state);
+
+            // controlla se quando è andato a caricarsi era stata interrotta una missione
+            // e adesso si trova sulla base di ricarica
+            // e la batteria è a percentuale maggiore della soglia per ripartire
+            if (nav_state.interrupted_mission != 0 && cur_state.sulla_base && cur_state.percentuale >= BATTERY_RESUME_PERCENT) {
+                
+                // imposta la missione alla missione precedente all'interruzione dovuta alla batteria
+                nav_state.mission = nav_state.interrupted_mission;
+
+                // azzera interrupted_mission
+                nav_state.interrupted_mission = 0;
+
+                nav_state.has_left_base = false;
+
+                start_leaving_base();
+
+            }
+
             break;
         }
         case NAV_STATE_UNLOCK: {
@@ -2368,7 +2617,7 @@ void job_navigation(void *arg) {
                 // rimetti l'obiettivo originale prima dell'allineamento
                 set_state(nav_state.mission);
 
-            } else if (is_stalled(cur_alarm, cur_pos)) {  // se l'obiettivo non è stato ancora raggiunto e il robot è in stallo
+            } else if (is_stalled(cur_alarm, cur_pos) || elapsed_time(nav_state.state_start) >= ALIGN_TIMEOUT) {  // se l'obiettivo non è stato ancora raggiunto e il robot è in stallo, oppure se si supera l'ALIGN_TIMEOUT
 
                 // imposta lo stato attuale di sblocco
                 set_state(NAV_STATE_UNLOCK);

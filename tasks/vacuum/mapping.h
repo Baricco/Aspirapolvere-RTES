@@ -45,6 +45,15 @@ static const uint8_t NAV_CELL_QUAD[4] = { NAV_CELL_TOP_LEFT, NAV_CELL_TOP_RIGHT,
 // distanza di ogni quadrante dal centro di una cella della mappa di navigazione
 #define NAV_CELL_QUAD_DIST_FROM_CENTER (NAV_MAP_CELL_SIZE / 4)
 
+
+// Costanti della zona proibita messa in automatico sulla base di ricarica, espresse in metri.
+// Quando il robot parte sui contatti si trova nell'origine con angolo 0, e la base è attaccata alla sua schiena: la faccia
+// sta a x = -0,1745. La base (30 x 12 cm) più un margine di 7 cm per lato dà questo rettangolo
+#define RECHARGING_STATION_ZONE_X -0.365        // vertice con x minima
+#define RECHARGING_STATION_ZONE_Y -0.22         // vertice con y minima
+#define RECHARGING_STATION_ZONE_W 0.26          // dimensione lungo x
+#define RECHARGING_STATION_ZONE_H 0.44          // dimensione lungo y
+
 // Enum degli stati delle celle di navigazione
 typedef enum {
     NAV_CELL_UNKNOWN,                    // Cella Sconosciuta: la cella non è ancora stata esplorata
@@ -179,6 +188,9 @@ bool is_nav_cell_invisible_obstacle(uint16_t cell);
 int init_mapping(void);
 mapping_forbidden_zone_list_t read_forbidden_zone_list(void);
 mapping_correction_t read_mapping_correction(void);
+// funzione per sapere se il robot è partito dalla base di ricarica (lo leggerà il task navigation), è false anche finché
+// il controllo non è finito, quindi circa per il primo secondo dopo che il driver è pronto
+bool read_started_on_base(void);
 // funzione per pubblicare la lista di zone proibite (lo leggerà task navigation e safety)
 void write_forbidden_zone_list(const mapping_forbidden_zone_list_t *new_forbidden_zones);
 uint32_t read_nav_map_version_number(void);
