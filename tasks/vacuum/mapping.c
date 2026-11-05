@@ -740,8 +740,10 @@ static void exec_bresenham_algorithm(const int x_coord_start, const int y_coord_
             break;
         } else {    // Se non siamo ancora arrivati alla fine
 
-            // Aggiungi il pass_score
-            add_score_to_fine_cell(cur_cell_y << 10 | cur_cell_x, LIDAR_PASS_SCORE);
+            // Aggiungi il pass_score, escludendo le ultime due celle perchè se no
+            // ci sono problemi con l'allineamento per ostacoli che si trovano
+            // a cavallo tra due celle
+            if (abs(x_coord_end - cur_cell_x) + abs(y_coord_end - cur_cell_y) > 2) add_score_to_fine_cell(cur_cell_y << 10 | cur_cell_x, LIDAR_PASS_SCORE);
 
             // raddoppia errore e salvatelo in una variabile per fare i confronti
             int e2 = 2 * err;

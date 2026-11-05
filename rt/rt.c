@@ -51,7 +51,14 @@ void rt_consenti_senza_privilegi(int si)
 	consenti_senza_rt = si;
 }
 
-static void stats_aggiorna(rt_task_t *t, int64_t rilascio, int64_t inizio, int64_t fine)
+static int64_t cpu_del_thread(void)
+{
+	struct timespec ts;
+	clock_gettime(CLOCK_THREAD_CPUTIME_ID, &ts);
+	return ts.tv_sec * RT_NS_PER_S + ts.tv_nsec;
+}
+
+static void stats_aggiorna(rt_task_t *t, int64_t rilascio, int64_t inizio, int64_t fine, int64_t cpu)
 {
 	rt_stats_t *s = &t->stats;
 	int64_t latenza = inizio - rilascio;
@@ -61,6 +68,13 @@ static void stats_aggiorna(rt_task_t *t, int64_t rilascio, int64_t inizio, int64
 	s->job++;
 	if (risposta > t->cfg.deadline_ns) {
 		s->deadline_mancate++;
+		if (s->deadline_mancate == 1) {
+			t->prima_mancata.job = s->job;
+			t->prima_mancata.latenza_ns = latenza;
+			t->prima_mancata.esecuzione_ns = esecuzione;
+			t->prima_mancata.cpu_ns = cpu;
+			t->prima_mancata.risposta_ns = risposta;
+		}
 		atomic_fetch_add(&t->mancate_di_fila, 1);
 		atomic_fetch_add(&t->mancate_totali, 1);
 	} else {
@@ -76,6 +90,7 @@ static void stats_aggiorna(rt_task_t *t, int64_t rilascio, int64_t inizio, int64
 	s->esec_somma_ns += esecuzione;
 
 	if (risposta > s->risposta_max_ns) s->risposta_max_ns = risposta;
+	if (cpu > s->cpu_max_ns) s->cpu_max_ns = cpu;
 
 	if (t->cfg.campioni && s->n_campioni < t->cfg.max_campioni) {
 		t->cfg.campioni[s->n_campioni].latenza_ns = latenza;
@@ -122,11 +137,13 @@ static void *ciclo_task(void *arg)
 		}
 		int64_t inizio = rt_adesso();
 		atomic_store(&t->job_iniziato_ns, inizio);
+		int64_t cpu_inizio = cpu_del_thread();
 		t->cfg.job(t->cfg.arg);
+		int64_t cpu = cpu_del_thread() - cpu_inizio;
 		int64_t fine = rt_adesso();
 		atomic_store(&t->job_iniziato_ns, 0);
 		atomic_store(&t->battito_ns, fine);
-		stats_aggiorna(t, rilascio, inizio, fine);
+		stats_aggiorna(t, rilascio, inizio, fine, cpu);
 
 		if (t->cfg.max_job && t->stats.job >= t->cfg.max_job)
 			break;
@@ -289,5 +306,5 @@ void rt_stats_stampa(const rt_task_t *t)
 	printf("  esecuzione min %8.1f  media %8.1f  max %8.1f us\n",
 	       s->esec_min_ns / 1e3, (double)s->esec_somma_ns / s->job / 1e3,
 	       s->esec_max_ns / 1e3);
-	printf("  risposta max %.1f us\n", s->risposta_max_ns / 1e3);
+	printf("  risposta max %.1f us, CPU max di un job %.1f us\n", s->risposta_max_ns / 1e3, s->cpu_max_ns / 1e3);
 }

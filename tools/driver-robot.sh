@@ -12,6 +12,10 @@
 #   tools/driver-robot.sh programma PROG NOME [argomenti...]
 #        come avvia, ma con un TUO programma (tasks/PROG.c -> build/arm/PROG): uscita in NOME.out, e quando termina
 #        riparte il custode. Il programma deve fermarsi con SIGTERM (tools/driver-robot.sh ferma lo manda).
+#   tools/driver-robot.sh missione NOME [VAR=valore...]
+#        la missione vera: tasks/vacuum come è, con i byte grezzi delle seriali in NOME.reg e, da fuori, stato della
+#        navigazione e mappa in NOME.oss e NOME.map (tools/osserva-robot.c). IL ROBOT PARTE SUBITO: deve stare sulla base.
+#        Esempio, per provare il rientro: tools/driver-robot.sh missione r1 RTES_PROVA_RIENTRO_DOPO_S=45
 #   tools/driver-robot.sh comando TESTO   manda un comando al driver (es. "lidar 1", "led 3", "blocca", "fine")
 #   tools/driver-robot.sh stato           ultime righe dell'uscita, processi attivi, tensione
 #   tools/driver-robot.sh segui           segue l'uscita in diretta (Ctrl-C smette di seguire, la prova continua)
@@ -28,8 +32,9 @@ FERMA_STACK='/etc/init.d/robotManager stop; kill $(pidof Monitor RobotApp AuxCtr
 CUSTODE="start-stop-daemon -S -b -m -p $D/custode.pid -x $D/spia -- guida --comandi $D/comandi"
 
 copia() {   # copia NOME: build/arm/NOME -> /tmp/rtes/NOME (rinomina alla fine: un programma in esecuzione non si rovina)
-  make -C "$DIR" --no-print-directory "build/arm/$1" >/dev/null
-  robot "mkdir -p $D && cat > $D/.$1 && chmod +x $D/.$1 && mv $D/.$1 $D/$1" < "$DIR/build/arm/$1"
+  local bin="$DIR/build/arm/$1"
+  if [ "$1" = vacuum ] && [ -n "${VACUUM_BIN:-}" ]; then bin=$VACUUM_BIN; else make -C "$DIR" --no-print-directory "build/arm/$1" >/dev/null; fi
+  robot "mkdir -p $D && cat > $D/.$1 && chmod +x $D/.$1 && mv $D/.$1 $D/$1" < "$bin"
 }
 
 avvia() {   # avvia PROGRAMMA NOME argomenti...
@@ -43,9 +48,9 @@ avvia() {   # avvia PROGRAMMA NOME argomenti...
       start-stop-daemon -K -q -p $D/custode.pid; i=0
       while pidof spia >/dev/null && [ \$i -lt 5 ]; do sleep 1; i=\$((i+1)); done
       pidof spia >/dev/null && { echo 'il custode non si ferma'; exit 1; }
-      cd $D; rm -f $nome.out $nome.csv
+      cd $D; rm -f $nome.out $nome.csv $nome.reg $nome.oss $nome.map
       start-stop-daemon -S -b -m -p $D/driver.pid -x /bin/sh -- -c '
-        cd $D; ./$prog $* > $nome.out 2>&1
+        cd $D; ${AMBIENTE:-} ./$prog $* > $nome.out 2>&1
         echo \"uscita \$?\" >> $nome.out
         $CUSTODE'
       sleep 2; tail -n 8 $nome.out"
@@ -55,11 +60,28 @@ case "${1:-}" in
   avvia)
     shift
     nome=${1:?"serve un nome, es. tools/driver-robot.sh avvia d1 --senza-motori"}; shift
-    avvia rtes-driver "$nome" --comandi $D/comandi --csv "$nome.csv" "$@" ;;
+    avvia rtes-driver "$nome" --comandi $D/comandi --csv "$nome.csv" "$@" ;;   # AMBIENTE="VAR=valore" passa variabili al programma
   programma)
     shift
     prog=${1:?"serve il programma, es. tools/driver-robot.sh programma pulizia p1"}; nome=${2:?"serve un nome"}; shift 2
     avvia "$prog" "$nome" "$@" ;;
+  missione)
+    nome=${2:?"serve un nome, es. tools/driver-robot.sh missione m1"}
+    make -C "$DIR" --no-print-directory build/arm/vacuum build/arm/osserva-robot >/dev/null
+    B="$DIR/toolchain/bin/arm-linux" EXE="${VACUUM_BIN:-$DIR/build/arm/vacuum}"   # VACUUM_BIN: un eseguibile di prova al posto di quello dei task
+    simbolo() { "$B-nm" "$EXE" | awk -v s="$1" '$3 == s { print $1 }'; }
+    campo() {   # posizione di un campo di nav_state, dalle informazioni di debug
+      LC_ALL=C "$B-readelf" --debug-dump=info "$EXE" | awk -v s="$1" '
+        /DW_AT_name/ { n = $NF; next }
+        /DW_AT_data_member_location/ && n == s { v = $NF } END { print v }'
+    }
+    nav=$((16#$(simbolo nav_state)))
+    ind() { printf %x $((nav + $(campo "$1"))); }
+    arg="$(simbolo navigation_map_data) $(ind state) $(ind mission) $(ind clean_cell_mask) $(ind strip_axis_x) $(simbolo sc_posa) $(simbolo buf_posa)"
+    copia osserva-robot
+    AMBIENTE="RTES_REGISTRA=$nome.reg ${*:3}" avvia vacuum "$nome"
+    robot "cd $D; start-stop-daemon -S -b -m -p $D/osserva.pid -x $D/osserva-robot -- \$(pidof vacuum) $nome $arg; sleep 1; tail -n 2 $nome.oss"
+    ;;
   comando)
     shift
     robot "pidof rtes-driver >/dev/null || { echo 'rtes-driver non gira'; exit 1; }; echo '$*' > $D/comandi; sleep 2;
@@ -87,8 +109,8 @@ case "${1:-}" in
     nome=${2:?"serve il nome della prova"}
     dest="$DIR/build/robot/fase3/$nome"
     mkdir -p "$dest"
-    for f in out csv reg; do robot "cat $D/$nome.$f 2>/dev/null" > "$dest/$nome.$f" || true; done
-    [ -s "$dest/$nome.reg" ] || rm -f "$dest/$nome.reg"
+    for f in out csv reg oss map; do robot "cat $D/$nome.$f 2>/dev/null" > "$dest/$nome.$f" || true; done
+    for f in reg oss map; do [ -s "$dest/$nome.$f" ] || rm -f "$dest/$nome.$f"; done
     ls -la "$dest" ;;
   *) sed -n '2,20p' "$0"; exit 2 ;;
 esac

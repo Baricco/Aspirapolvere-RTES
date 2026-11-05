@@ -34,6 +34,9 @@
 #define MAX_ISCRITTI      8
 #define MAX_SORVEGLIATI   16
 #define MAX_EVENTI        64
+#define RIPOSO_CARICA_NS     RT_S(5)   /* a carica attiva da tanto si va a riposo */
+#define RIPOSO_CONTATTO_NS   RT_S(20)  /* senza carica (batteria piena): contatto stabile da tanto */
+#define SVEGLIA_LIDAR_MAX_NS RT_S(6)
 #define LED_NORMALE       1
 #define LED_BATTERIA      6
 #define LED_CARICA        4
@@ -71,6 +74,7 @@ static struct {
 	int critico;
 	int64_t soglia_ns;
 	int segnalato;                          /* solo il driver lo usa */
+	uint64_t mancate_viste;                 /* solo il driver: scadenze mancate già trattate (azzerando il guasto) */
 } sorvegliati[MAX_SORVEGLIATI];
 static _Atomic uint64_t giri_driver;       /* risvegli completati: drv_dimentica aspetta che avanzi */
 
@@ -100,6 +104,10 @@ static struct {
 	sicurezza_t sic;                      /* solo banco di prova */
 	contatti_t contatti;                  /* scatti di anti-caduta e bumper (contatti.h) */
 	aggancio_t agg;                       /* messa in carica in retromarcia (aggancio.h) */
+	int sulla_base_prec, in_carica_prec;
+	int64_t t_cambio_base, t_cambio_carica;
+	int riposo;                           /* 0 sveglio, 1 motori spenti, 2 anche sensori e lidar spenti */
+	int64_t t_riposo, t_sveglia, t_sensori_accesi;
 	int agg_fase_prec, agg_esito_prec;    /* per scrivere un evento quando cambiano */
 
 	int fase;
@@ -122,8 +130,6 @@ static struct {
 	int lat_inv, cen_inv, asp_inv, led_inv, lidar_inv, pot_inv, sensori_inv;
 	int asp_limiti;              /* perché l'aspirazione chiesta non va (drv_stato_t.aspirazione_limiti) */
 	int64_t t_rinfresca, t_potenza;
-	int sulla_base_prec;
-	int64_t t_cambio_base;
 	int lidar_ok;
 	int64_t t_lidar_acceso;
 	int bat_prec;
@@ -394,8 +400,12 @@ static void prova_ad_azzerare_guasto(int64_t t)
 	d.fase = DRV_PRONTO;
 	d.guasto[0] = 0;
 	d.led_inv = -1;                       /* rimanda il LED giusto al prossimo ciclo */
-	for (int i = 0; i < MAX_SORVEGLIATI; i++)
+	for (int i = 0; i < MAX_SORVEGLIATI; i++) {
+		rt_task_t *k = atomic_load(&sorvegliati[i].t);
 		sorvegliati[i].segnalato = 0;
+		if (k)
+			sorvegliati[i].mancate_viste = atomic_load(&k->mancate_totali);
+	}
 	evento("guasto azzerato");
 }
 
@@ -410,6 +420,14 @@ static void pubblica_stato(int64_t t)
 	s.volt = batteria_volt(&d.bat);
 	s.percentuale = batteria_percentuale(&d.bat);
 	s.batteria = d.bat.livello;
+	if (d.cfg.prova_rientro_s > 0 && (double)(t - d.t0) / RT_NS_PER_S >= d.cfg.prova_rientro_s) {
+		static int detto;
+		if (!detto++)
+			evento("PROVA: da adesso i task leggono una batteria bassa (quella vera non cambia)");
+		s.batteria = BAT_BASSA;
+		if (s.percentuale > 50)
+			s.percentuale = 50;          /* sotto la soglia per ripartire: una volta agganciato resta sulla base */
+	}
 	s.in_carica = d.s.in_carica;
 	s.sulla_base = d.s.sulla_base;
 	s.temperatura_c = d.s.temperatura_c;
@@ -495,7 +513,18 @@ static int limita_velocita(int64_t t, int32_t *v, int32_t *w)
 		}
 		return 0;
 	}
-	return sic_terra_limita(&d.s, aggancio ? aggancio_stacco(&d.agg) : atomic_load(&cmd.uscita_base), v, w);
+	int lim_terra = sic_terra_limita(&d.s, aggancio ? aggancio_stacco(&d.agg) : atomic_load(&cmd.uscita_base), v, w);
+	/* si parte solo con gli encoder che contano: vedi l'alimentazione dei sensori più sotto */
+	if (!(d.s.controllo & GD32_CONTROLLO_SENSORI_ACCESI) || t - d.t_sensori_accesi < RT_MS(200) || d.riposo) {
+		*v = *w = 0;
+		lim_terra |= SIC_LIM_SENSORI;
+	}
+	/* dopo il riposo si parte con la mappa che funziona: si aspetta il primo giro del lidar, al massimo qualche secondo */
+	if (d.t_sveglia && atomic_load(&cmd.lidar_acceso) && d.giro.t_fine_ns < d.t_sveglia && t - d.t_sveglia < SVEGLIA_LIDAR_MAX_NS) {
+		*v = *w = 0;
+		lim_terra |= SIC_LIM_SENSORI;
+	}
+	return lim_terra;
 }
 
 /* Spazzole e aspirazione: niente se il robot è sollevato o sulla base (a terra), o se il banco non lo permette.
@@ -575,17 +604,53 @@ static void aggiorna_attuatori(int64_t t)
 		d.led_inv = led;
 	}
 
-	/* alimentazione dei sensori: spenti sulla base, accesi fuori (come everest), dopo 0,5 s di stato stabile */
+	/* Riposo sulla base: a carica stabile lidar, motori e sensori si spengono; prima di uscire si riaccendono.
+	   Spegnere i sensori (0x9d 00) ferma gli encoder, e il GD32 regola la velocità proprio con quelli: nelle prove del 5/11
+	   lo spegnimento dava a volte una lettura falsa dell'encoder sinistro (r2, r10) con il robot che scattava in avanti di
+	   ~12 cm staccandosi dai contatti, e uscendo con i sensori spenti spariva dall'odometria un tratto di ~11 cm (o1, o2).
+	   Per questo si spengono prima i motori (0x65 00, come freeMotorControl dell'originale), e si esce solo a sensori accesi. */
 	if (d.ha_sensori) {
 		if (d.s.sulla_base != d.sulla_base_prec) {
 			d.sulla_base_prec = d.s.sulla_base;
 			d.t_cambio_base = t;
 		}
-		int voluto = !d.s.sulla_base;
-		if (voluto != d.sensori_inv && t - d.t_cambio_base > RT_MS(500)) {
-			invia1(GD32_ALIMENTAZIONE_SENSORI, (uint8_t)voluto);
-			d.sensori_inv = voluto;
-			evento("sensori %s (%s)", voluto ? "accesi" : "spenti", voluto ? "fuori dalla base" : "sulla base");
+		if (d.s.in_carica != d.in_carica_prec) {
+			d.in_carica_prec = d.s.in_carica;
+			d.t_cambio_carica = t;
+		}
+		int esce = atomic_load(&cmd.uscita_base) || aggancio_attivo(&d.agg);
+		int stabile = d.s.sulla_base && !esce &&
+		              ((d.s.in_carica && t - d.t_cambio_carica > RIPOSO_CARICA_NS) || t - d.t_cambio_base > RIPOSO_CONTATTO_NS);
+		int sveglia = esce || (!d.s.sulla_base && t - d.t_cambio_base > RT_MS(500));
+		if (d.riposo == 0) {
+			if (d.sensori_inv != 1) {
+				invia1(GD32_ALIMENTAZIONE_SENSORI, 1);
+				d.sensori_inv = 1;
+				d.t_sensori_accesi = t;
+				evento("sensori accesi");
+			} else if (stabile) {
+				invia1(GD32_TIPO_CONTROLLO, 0);
+				d.riposo = 1;
+				d.t_riposo = t;
+			}
+		} else if (d.riposo == 1) {
+			if (sveglia) {
+				invia1(GD32_TIPO_CONTROLLO, 2);
+				d.riposo = 0;
+			} else if (t - d.t_riposo > RT_MS(200)) {
+				invia1(GD32_ALIMENTAZIONE_SENSORI, 0);
+				d.sensori_inv = 0;
+				d.riposo = 2;
+				evento("riposo: motori, lidar e sensori spenti");
+			}
+		} else if (sveglia) {
+			invia1(GD32_ALIMENTAZIONE_SENSORI, 1);
+			invia1(GD32_TIPO_CONTROLLO, 2);
+			d.sensori_inv = 1;
+			d.t_sensori_accesi = t;
+			d.t_sveglia = t;
+			d.riposo = 0;
+			evento("sveglia: sensori, motori e lidar accesi");
 		}
 	}
 }
@@ -594,7 +659,7 @@ static void aggiorna_lidar(int64_t t)
 {
 	if (d.fd_lidar < 0)
 		return;
-	int acceso = atomic_load(&cmd.lidar_acceso);
+	int acceso = atomic_load(&cmd.lidar_acceso) && !d.riposo;
 	if (acceso != d.lidar_inv) {
 		invia1(GD32_ALIMENTAZIONE_LIDAR, (uint8_t)acceso);
 		d.lidar_inv = acceso;
@@ -645,8 +710,8 @@ static void aggiorna_aggancio(int64_t t)
 	if (aggancio_attivo(&d.agg))
 		aggancio_frame(&d.agg, &d.s, t);
 	if ((int)d.agg.fase != d.agg_fase_prec || d.agg.esito != d.agg_esito_prec) {
-		evento("aggancio: esito %d, fase %d, tentativo %d, distanza %.3f, scarto %+.3f, angolo %+.1f°%s%s", d.agg.esito,
-		       d.agg.fase, d.agg.tentativo, d.agg.distanza, d.agg.scarto, d.agg.angolo * 180 / M_PI,
+		evento("aggancio: esito %d, fase %d, tentativo %d, ir %02x, davanti %.3f m, angolo %+.1f°%s%s", d.agg.esito,
+		       d.agg.fase, d.agg.tentativo, (d.s.ir_base_a << 4) | d.s.ir_base_b, d.agg.dist_davanti, d.agg.yaw * 180 / M_PI,
 		       d.agg.motivo ? ", " : "", d.agg.motivo ? d.agg.motivo : "");
 		d.agg_fase_prec = (int)d.agg.fase;
 		d.agg_esito_prec = d.agg.esito;
@@ -779,14 +844,23 @@ static void tick(int64_t t)
 			continue;
 		const char *nome = k->cfg.nome ? k->cfg.nome : "?";
 		char motivo[96] = "";
-		if (rt_task_bloccato(k, t, sorvegliati[i].soglia_ns))
+		/* Sul robot una sola scadenza mancata, di qualsiasi task, è un guasto (decisione del 2026-11-04). Nel
+		   simulatore, dove lo scheduling è quello normale del PC, restano solo contate. */
+		int scadenza = !d.cfg.senza_rt && atomic_load(&k->mancate_totali) > sorvegliati[i].mancate_viste;
+		if (scadenza) {
+			snprintf(motivo, sizeof motivo, "il task %s ha mancato una scadenza", nome);
+			evento("PRIMA SCADENZA MANCATA %s job %llu: risposta %.3f ms su %.3f (attesa %.3f, esecuzione %.3f, di cui CPU %.3f)",
+			       nome, (unsigned long long)k->prima_mancata.job, k->prima_mancata.risposta_ns / 1e6,
+			       k->cfg.deadline_ns / 1e6, k->prima_mancata.latenza_ns / 1e6,
+			       k->prima_mancata.esecuzione_ns / 1e6, k->prima_mancata.cpu_ns / 1e6);
+		} else if (rt_task_bloccato(k, t, sorvegliati[i].soglia_ns))
 			snprintf(motivo, sizeof motivo, "il task %s è bloccato", nome);
 		else if (atomic_load(&k->mancate_di_fila) >= 3)
 			snprintf(motivo, sizeof motivo, "il task %s ha mancato 3 scadenze di fila", nome);
 		if (!motivo[0])
 			continue;
 		sorvegliati[i].segnalato = 1;
-		if (sorvegliati[i].critico)
+		if (sorvegliati[i].critico || scadenza)
 			entra_in_guasto(motivo);
 		else
 			evento("ATTENZIONE: %s (non critico)", motivo);
@@ -1024,6 +1098,8 @@ void drv_config_default(drv_config_t *c)
 	c->dev_gd32 = getenv("RTES_GD32") ? getenv("RTES_GD32") : "/dev/ttyS3";
 	c->dev_lidar = getenv("RTES_LIDAR") ? getenv("RTES_LIDAR") : "/dev/ttyS1";
 	c->senza_rt = getenv("RTES_GD32") != NULL;   /* nel simulatore si parte anche senza permessi per SCHED_FIFO */
+	c->registra = getenv("RTES_REGISTRA");       /* i programmi dei task non hanno opzioni: la registrazione si chiede così */
+	c->prova_rientro_s = getenv("RTES_PROVA_RIENTRO_DOPO_S") ? atof(getenv("RTES_PROVA_RIENTRO_DOPO_S")) : 0;
 	c->cpu = 0;
 	c->priorita = RT_PRIO_DRIVER;
 	c->motori = 1;
@@ -1279,6 +1355,7 @@ int drv_sorveglia(rt_task_t *t, int critico, int64_t soglia_ns)
 		sorvegliati[i].critico = critico;
 		sorvegliati[i].soglia_ns = soglia_ns > 0 ? soglia_ns : 3 * t->cfg.periodo_ns;
 		sorvegliati[i].segnalato = 0;
+		sorvegliati[i].mancate_viste = 0;   /* conta anche quelle di prima: il task parte prima di essere sorvegliato */
 		rt_task_t *vuoto = NULL;
 		if (atomic_compare_exchange_strong(&sorvegliati[i].t, &vuoto, t))
 			return 0;

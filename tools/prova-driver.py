@@ -12,7 +12,7 @@ simulatore (GET /stato) e le righe di stato del driver.
   3. bumper: il robot va contro il muro, si ferma (bumper), poi torna indietro;
   4. vuoto: il robot va verso una scala, si ferma prima del bordo e non cade;
   5. sollevato: nessun movimento;
-  6. base: sulla base niente ruote e sensori spenti; con esci_base 1 si allontana e i sensori si riaccendono;
+  6. base: sulla base niente ruote, sensori sempre accesi; con esci_base 1 si allontana e i sensori si riaccendono;
   7. batteria critica: motori fermi e LED 6;
   8. watchdog: un task critico si blocca -> guasto, LED 8, motori fermi, codice d'uscita 4;
   9. aspirazione: la ventola gira solo se permessa (--aspirazione) e si ferma senza il cassetto della polvere o con il
@@ -220,12 +220,14 @@ def s_base(sim, drv):
     time.sleep(1.0)
     st = sim.stato()
     controlla(ok and st["contatto_base"], "il driver vede la base")
-    controlla(st["gd32"]["sensori_accesi"] == 0, "sensori spenti sulla base (0x9d 00, come everest)")
+    controlla(st["gd32"]["sensori_accesi"] == 1, "sulla base i sensori restano accesi")
     drv.manda("v -0.1 0")
     time.sleep(1)
     st = sim.stato()
     controlla(st["contatto_base"] and abs(st["v"]) < 0.01, "sulla base le ruote non si muovono")
     drv.manda("esci_base 1")
+    time.sleep(0.2)
+    controlla(sim.stato()["gd32"]["sensori_accesi"] == 1, "per uscire i sensori sono accesi: gli encoder devono contare")
     drv.manda("v 0.1 0")                            # si esce IN AVANTI
     time.sleep(2.5)
     st = sim.stato()

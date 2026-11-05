@@ -354,8 +354,9 @@ static uint8_t fasci_base(const mondo_t *m, double x, double y)
 	double dx = x - m->base_x, dy = y - m->base_y, d = hypot(dx, dy);
 	double fi = angolo_norm(atan2(dy, dx) - m->base_dir) * 180 / M_PI;
 	uint8_t f = 0;
-	if (fabs(fi - 5) < 20 && d > 0.5 && d < 2.5) f |= 1;
-	if ((fabs(fi + 12) < 20 && d < 1.3) || (fabs(fi) < 35 && d < 0.7)) f |= 2;
+	/* da vicino l'asse è il confine fra i due fasci: il ricevitore sinistro (y < 0 guardando la base) vede il 2, il destro l'1 */
+	if ((fabs(fi - 5) < 20 && d >= 0.8 && d < 2.5) || (fi >= 0 && fi < 40 && d < 0.8)) f |= 1;
+	if ((fabs(fi + 12) < 20 && d >= 0.8 && d < 1.3) || (fi < 0 && fi > -40 && d < 0.8)) f |= 2;
 	if (fi > 8 && fi < 45 && d > 0.7 && d < 2.0) f |= 4;
 	if (fi > -60 && fi < -25 && d < 2.0) f |= 8;
 	return f;
@@ -532,7 +533,7 @@ static void passo(gd32sim_t *g, const mondo_t *m, double t, double dt)
 		g->t_contatto = t;
 	g->contatto_base = contatto;
 	if (contatto)
-		cliff = 0x0f;                 /* sulla base gli anti-caduta leggono 0f (fase 2, C5) */
+		cliff = g->sensori_accesi ? 0 : 0x0f;   /* spenti leggono 0f (fase 2, C5); accesi vedono il pavimento (prova o2) */
 	g->cliff = cliff;
 	g->ir_base = g->acceso ? calcola_ir_base(g, m) : 0;
 	g->in_carica = contatto && g->acceso && t - g->t_contatto > 12 && g->soc < 1.0;

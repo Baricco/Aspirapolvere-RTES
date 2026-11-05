@@ -93,6 +93,7 @@ typedef struct {
 	uint64_t deadline_mancate;  /* job finiti dopo rilascio + deadline */
 	int64_t latenza_min_ns, latenza_max_ns, latenza_somma_ns;
 	int64_t esec_min_ns, esec_max_ns, esec_somma_ns;
+	int64_t cpu_max_ns;         /* il tempo di CPU peggiore di un job: esecuzione meno il tempo passato senza girare */
 	int64_t risposta_max_ns;    /* max(fine - rilascio): il tempo di risposta peggiore osservato */
 	size_t n_campioni;          /* campioni effettivamente salvati */
 } rt_stats_t;
@@ -118,6 +119,13 @@ typedef struct {
 	_Atomic int64_t job_iniziato_ns;        /* inizio del job in corso, 0 se il task aspetta */
 	_Atomic uint64_t mancate_di_fila;       /* deadline mancate consecutive */
 	_Atomic uint64_t mancate_totali;
+	/* La PRIMA deadline mancata, per spiegarla: quelle dopo possono essere solo l'effetto del ritardo della prima. Scritta
+	 * dal task una volta sola, PRIMA di aumentare mancate_totali. Il tempo perso fra esecuzione e CPU è quello in cui il
+	 * job non girava (interrotto, o fermo su un mutex). */
+	struct {
+		uint64_t job;           /* numero del job, da 1 */
+		int64_t latenza_ns, esecuzione_ns, cpu_ns, risposta_ns;
+	} prima_mancata;
 } rt_task_t;
 
 /*

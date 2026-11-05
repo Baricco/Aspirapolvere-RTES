@@ -13,6 +13,7 @@
  *     azzera             prova a uscire dallo stato di guasto
  *     suono NOME         es. suono sound_beep_beep
  *     blocca             il task di prova (--task-prova) si blocca: il watchdog deve mandare il driver in guasto
+ *     sfora              un job del task di prova dura 60 ms, oltre la sua scadenza di 20: sul robot deve bastare per il guasto
  *     salva_giro FILE    scrive l'ultimo giro del lidar in FILE (CSV: angolo del lidar in gradi, x e y nel sistema
  *                        del robot in metri, distanza in mm, intensità)
  *     fine               esce
@@ -59,7 +60,7 @@ static void al_segnale(int s) { (void)s; fermati = 1; }
 
 /* ---- task di prova ---- */
 static rt_task_t t_sensori, t_lidar;
-static atomic_int blocca;
+static atomic_int blocca, sfora;
 static drv_sensori_t ultimo_s;
 static uint32_t visti_lidar, punti_lidar;
 
@@ -69,6 +70,9 @@ static void job_sensori(void *arg)
 	drv_sensori(&ultimo_s);
 	while (atomic_load(&blocca) && !atomic_load(&t_sensori.stop))
 		usleep(10000);                   /* "si blocca": per esempio un mutex mai rilasciato */
+	if (atomic_exchange(&sfora, 0))
+		for (int64_t fine = rt_adesso() + RT_MS(60); rt_adesso() < fine;)
+			;                        /* calcola per 60 ms: esecuzione e CPU devono coincidere */
 }
 
 static void job_lidar(void *arg)
@@ -132,6 +136,8 @@ static int esegui(const char *riga)
 		printf("giro %u (%u punti, %.2f giri/s) salvato in %s\n", g.numero, g.n, g.giri_s, nome);
 	} else if (!strncmp(riga, "blocca", 6))
 		atomic_store(&blocca, 1);
+	else if (!strncmp(riga, "sfora", 5))
+		atomic_store(&sfora, 1);
 	else if (!strncmp(riga, "fine", 4))
 		fermati = 1;
 	else {

@@ -66,6 +66,9 @@ typedef struct {
 	const char *cmd_suono;       /* comando per i suoni, %s = nome (es. "sound_beep_beep"); NULL = nessun suono */
 	const char *registra;        /* file dove registrare i byte grezzi delle seriali, nel formato della spia
 	                                (spia/registro.h: canali "gd32" e "lidar"); NULL = niente (default) */
+	double prova_rientro_s;      /* SOLO PROVE (env RTES_PROVA_RIENTRO_DOPO_S): dopo questi secondi i task leggono una batteria
+	                                bassa, così rientrano alla base senza finire la missione. Vale solo per drv_stato():
+	                                le protezioni del driver usano sempre la tensione vera. 0 = mai (default) */
 	int senza_rt;                /* 1 = se mancano i permessi per SCHED_FIFO parte lo stesso (solo per il PC) */
 	int forza;                   /* 1 = non controlla se un altro programma usa già le seriali */
 } drv_config_t;
@@ -197,6 +200,8 @@ int drv_sveglia_ai_sensori(rt_task_t *t);
 /*
  * Il driver sorveglia il task t: se sembra bloccato da più di soglia_ns (rt_task_bloccato; 0 = 3 periodi) o manca 3
  * scadenze di fila e critico = 1, il driver va nello stato di guasto. Per i task non critici scrive solo un evento.
+ * Sul robot (senza_rt = 0) basta invece UNA scadenza mancata, di qualsiasi task, critico o no: guasto, e un evento con
+ * job, risposta, attesa, esecuzione e tempo di CPU. Nel simulatore le scadenze mancate valgono solo con la regola di fila.
  */
 int drv_sorveglia(rt_task_t *t, int critico, int64_t soglia_ns);
 

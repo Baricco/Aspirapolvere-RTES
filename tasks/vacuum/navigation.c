@@ -2470,20 +2470,18 @@ void job_navigation(void *arg) {
                 // pubblica la velocità aggiornata
                 write_objective(&nav_state.cur_obj);
 
-                // arrivato sul punto, il robot si gira di 180°
-                if (is_objective_achieved(cur_pos)) send_objective(OBJ_ROTATE, MAX_ROTATION_SPEED, 0, 0, 0, 0);
+                // arrivato sul punto, da qui in poi comanda il driver, che trova la base con gli infrarossi e si gira da solo
+                if (is_objective_achieved(cur_pos)) {
 
-            } else if (nav_state.cur_obj.obj_type == OBJ_ROTATE && is_objective_achieved(cur_pos)) {
+                    send_objective(OBJ_STOP, 0, 0, 0, 0, 0);
 
-                send_objective(OBJ_STOP, 0, 0, 0, 0, 0);
+                    // al contatto le ruote si devono fermare
+                    drv_esci_dalla_base(0);
 
-                // al contatto le ruote si devono fermare
-                drv_esci_dalla_base(0);
+                    drv_aggancia(1);
 
-                // da qui in poi comanda il driver
-                drv_aggancia(1);
-
-                nav_state.hook_has_started = true;
+                    nav_state.hook_has_started = true;
+                }
             }
 
             break;

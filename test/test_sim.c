@@ -223,7 +223,7 @@ static void gd32_urti_e_base(void)
 	nuovo_robot(0.5, 0.22 + ROBOT_RAGGIO + 0.001, M_PI / 2, 0);
 	t = 0;
 	avanza(&g, &m, &t, 13.0, 1);
-	CONTROLLA(g.contatto_base && g.in_carica && g.cliff == 0x0f);
+	CONTROLLA(g.contatto_base && g.in_carica && g.cliff == (g.sensori_accesi ? 0 : 0x0f));
 	nuovo_robot(0.5, 0.22 + ROBOT_RAGGIO + 0.001, -M_PI / 2, 0);      /* girato al contrario: niente contatto */
 	t = 0;
 	avanza(&g, &m, &t, 1.0, 1);

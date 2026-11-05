@@ -105,6 +105,11 @@ build/host/sim: $(SIM_SRC) $(SIM_HDR) $(PROTO_SRC) $(PROTO_HDR)
 	@mkdir -p $(@D)
 	$(CC_HOST) $(CFLAGS_HOST) -o $@ $(SIM_SRC) $(PROTO_SRC) -lm
 
+# Sul robot: legge da fuori stato, posizione e mappa del programma dei task (tools/driver-robot.sh missione).
+build/arm/osserva-robot: tools/osserva-robot.c
+	@mkdir -p $(@D)
+	$(CC_ARM) $(CFLAGS_ARM) -o $@ tools/osserva-robot.c $(LDFLAGS_ARM)
+
 # Lancia un programma dei task e ne legge la griglia di navigazione per la pagina del simulatore (sim/osserva.c).
 build/host/osserva: sim/osserva.c
 	@mkdir -p $(@D)
