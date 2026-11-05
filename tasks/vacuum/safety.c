@@ -136,9 +136,6 @@ void job_safety(void *arg) {
 
     }
 
-    // Controlla se il robot è incastrato ed eventualmente  segnala l'incastro
-    drv_incastro((cur_error_mask & SAFETY_ERROR_STUCK) && expected_v >= THRESHOLD_STUCK_MIN_V);
-
     // Controllo dello slittamento
     {       // Istanzio queste variabili in un blocco di codice separato perchè le devo usare solo qui
 

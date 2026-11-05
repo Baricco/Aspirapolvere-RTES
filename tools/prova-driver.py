@@ -289,6 +289,10 @@ def s_aspirazione(sim, drv, permessa):
     sim.comando("solleva")
     time.sleep(2)
     controlla(sim.stato()["ventola"] < 1000 and "sollevato" in drv.ultima(), "sollevato: ferma")
+    controlla("lidar off" in drv.ultima(), "sollevato: lidar spento")
+    sim.comando("posa")
+    ok = drv.aspetta(lambda: "sollevato" not in drv.ultima(), 3)
+    controlla(ok, "riappoggiato: il driver riparte da solo")
 
 
 def main():

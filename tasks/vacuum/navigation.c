@@ -15,6 +15,9 @@
 #define CELL_NOT_VISITED 0xFFFF
 #define ESCAPE_MAX_CELLS 3
 #define WAIT_TIME RT_MS(3000)
+#define PASS_MAX_TURN DEG_TO_RAD(30)        // un punto del percorso si attraversa senza fermarsi se la svolta è sotto questo angolo
+#define CROSS_ANGLE DEG_TO_RAD(30)          // attraversamento di tappeti e cavi: di quanto il robot si mette di traverso rispetto alla direzione di partenza, così una ruota sale prima dell'altra
+#define CROSS_PUSH_TIME RT_MS(3000)         // attraversamento: per quanto il robot spinge dritto da ognuna delle due parti
 #define CRUISING_SPEED 0.35                  // velocità di crociera del robot, m/s
 #define LEAVE_BASE_SPEED 0.1                 // velocità con cui il robot esce dalla base, espressa in m/s
 #define LEAVE_BASE_TIMEOUT RT_MS(15000)      // tempo massimo per uscire dalla base, scaduto il quale il robot va in guasto
@@ -163,6 +166,7 @@ typedef enum {
     NAV_STATE_FAILURE,          // robot fermo, qualcosa è andato storto
     NAV_STATE_BORDER_LAP,       // il robot segue un ostacolo tenendolo a destra, fino alla fine del giro
     NAV_STATE_LEAVE_BASE,       // il robot esce dalla base di ricarica
+    NAV_STATE_CROSS,            // il robot incastrato su un tappeto o un cavo avanza piano ruotando a turno a sinistra e a destra
 } nav_state_t;
 
 // definizione dello stato interno del task di navigazione
@@ -214,6 +218,8 @@ typedef struct {
     bool is_clean_started;                  // true se la pulizia a strisce è già iniziata, la prima striscia parte da un estremo della stanza
     bool strip_has_end;                     // indica se nella striscia di pulizia attuale c'è un punto oltre alla fine
     bool hook_has_started;                  // indica se sia già stato richiesto al driver di agganciarsi alla base di ricarica
+
+    double cross_theta;                     // attraversamento degli ostacoli bassi: direzione del robot quando si è incastrato
 
     nav_state_t interrupted_mission;        // la missione che aveva il robot prima che venisse interrotta per via della batteria scarica. se 0, significa che il robot non si è interrotto per la batteria scarica.
 
@@ -564,6 +570,9 @@ static bool is_battery_dead() {
 // Funzione helper per impostare una cella della mappa come troppo stretta (NAV_CELL_TOO_NARROW)
 // al task di mappatura, aggiornando anche la copia locale della mappa di navigazione
 static void close_cell(uint16_t cell) {
+
+    // la cella davanti alla base non si chiude mai: è quella a cui deve arrivare il ritorno alla base
+    if (cell == CHARGING_STATION_CELL) return;
     
     // aggiungi la cella alla lista di celle da mandare al task di mappatura
     nav_state.closed_cells.cells[nav_state.closed_cells.num % CLOSED_CELLS_MAX] = cell;
@@ -1653,6 +1662,102 @@ static void start_unlock_attempt(safety_alarm_t cur_alarm, movement_position_dat
 
 }
 
+// funzione helper che riporta un angolo tra -M_PI e M_PI
+static inline double wrap_angle(const double angle) {
+    return atan2(sin(angle), cos(angle));
+}
+
+
+// Funzione helper che dice se il punto del percorso idx si può attraversare senza fermarsi: serve un punto dopo,
+// e la svolta tra il tratto che arriva al punto e quello che riparte deve essere piccola
+static bool can_pass_through(const uint32_t idx, const movement_position_data_t cur_pos) {
+
+    // cerca il punto di svolta dopo idx, facendo finta di essere già lì
+    uint32_t saved_idx = nav_state.path_idx;
+    nav_state.path_idx = idx;
+    uint32_t next_idx = next_turning_point();
+    nav_state.path_idx = saved_idx;
+
+    // l'ultimo punto del percorso è sempre un arrivo
+    if (next_idx == idx) return false;
+
+    double point_x, point_y, next_x, next_y;
+    get_path_coord(idx, &point_x, &point_y);
+    get_path_coord(next_idx, &next_x, &next_y);
+
+    double turn = wrap_angle(atan2(next_y - point_y, next_x - point_x) - atan2(point_y - cur_pos.y, point_x - cur_pos.x));
+
+    return fabs(turn) < PASS_MAX_TURN;
+}
+
+// Funzione helper: dopo un allarme segna la cella del robot come ostacolo e fa partire lo sblocco
+static void start_unlock_after_alarm(const safety_alarm_t cur_alarm, const movement_position_data_t cur_pos) {
+
+    // l'incastro diventa un ostacolo sulla mappa solo adesso: se l'attraversamento riesce, il bordo del tappeto resta percorribile
+    if (cur_alarm.error_mask & SAFETY_ERROR_STUCK) drv_incastro(1);
+
+    // se non c'è l'errore SAFETY_ERROR_CONTACT segna la cella del robot come ostacolo,
+    // per non incappare nello stesso allarme successivamente 
+    if (!(cur_alarm.error_mask & SAFETY_ERROR_CONTACT)) {
+        close_cell(coord_to_nav_index(cur_pos.x, cur_pos.y));
+    }
+
+    // durante il giro dei bordi un tentativo fallito chiude il bordo: segna come pulita la mezza cella sotto il
+    // robot, altrimenti la ricerca lo rimanderebbe sempre nello stesso punto
+    if (nav_state.mission == NAV_STATE_FOLLOW_BORDERS && nav_state.is_axis) {
+        uint16_t alarm_cell = coord_to_nav_index(cur_pos.x, cur_pos.y);
+        set_half_cell_clean(alarm_cell, get_robot_half_cell(cur_pos, alarm_cell));
+    }
+
+    // imposta lo stato corrente a sblocco
+    set_state(NAV_STATE_UNLOCK);
+
+    // comincia a fare il primo sblocco
+    start_unlock_attempt(cur_alarm, cur_pos);
+}
+
+// Funzione helper che dice se provare ad attraversare l'ostacolo basso che tiene incastrato il robot: solo se va
+// avanti lungo un percorso o sta uscendo dalla base ed è già staccato dai contatti 
+static bool should_start_cross(const uint8_t error_mask) {
+
+    if (!(error_mask & SAFETY_ERROR_STUCK) || (error_mask & SAFETY_ERROR_CONTACT)) return false;
+
+    // se c'è già stato uno sblocco in questo tratto di percorso, l'attraversamento è già stato provato
+    if (nav_state.unlock_attempt != 0) return false;
+
+    if (nav_state.state == NAV_STATE_FOLLOW_PATH) return nav_state.cur_obj.v > 0;
+
+    if (nav_state.state == NAV_STATE_LEAVE_BASE) {
+        drv_stato_t cur_drv_state = {0};
+        drv_stato(&cur_drv_state);
+        return !cur_drv_state.sulla_base;
+    }
+
+    return false;
+}
+
+// Funzione helper che fa ruotare il robot sul posto, per mettersi di traverso rispetto alla direzione di partenza
+// questo perchè il robot riesce ad attraversare alcuni ostacoli se sale prima con una ruota e poi con l'altra
+static void start_cross_rotation(const double angle) {
+
+    send_objective(OBJ_ROTATE, MAX_ROTATION_SPEED, wrap_angle(nav_state.cross_theta + angle), 0, 0, 0);
+
+    nav_state.phase_start = rt_adesso();
+}
+
+// Funzione helper per quando l'attraversamento non riesce: dalla base non si arretra, altrove si passa allo sblocco
+static void end_cross_failed(const safety_alarm_t cur_alarm, const movement_position_data_t cur_pos) {
+
+    if (read_started_on_base() && !nav_state.has_left_base) {
+
+        // segna che l'attraversamento è stato provato: resta il tempo massimo dell'uscita dalla base
+        nav_state.unlock_attempt = 1;
+
+        set_state(NAV_STATE_LEAVE_BASE);
+
+    } else start_unlock_after_alarm(cur_alarm, cur_pos);
+}
+
 // Funzione per far partire il robot seguendo il percorso che ha nello stato
 static void start_following_path(const safety_alarm_t cur_alarm, const movement_position_data_t cur_pos, const double lat_shift, const bool is_first_point) {
 
@@ -1813,11 +1918,6 @@ static uint32_t plan_strip(const uint16_t lane_cell, const bool start_half) {
     nav_state.path.length = length;
 
     return length;
-}
-
-// funzione helper che riporta un angolo tra -M_PI e M_PI
-static inline double wrap_angle(const double angle) {
-    return atan2(sin(angle), cos(angle));
 }
 
 // funzione helper che calcola la velocità di rotazione del giro dei bordi dall'errore di direzione
@@ -2027,6 +2127,17 @@ void job_navigation(void *arg) {
     // leggi gli allarmi mandati dal task safety, serve per la velocità massima degli obiettivi
     safety_alarm_t cur_alarm = read_safety();
 
+    // l'incastro si segnala alla mappa solo quando parte lo sblocco
+    drv_incastro(0);
+
+    // se il robot è incastrato su qualcosa di basso, prima dello sblocco prova ad attraversarlo
+    if (should_start_cross(cur_alarm.error_mask)) {
+        nav_state.cross_theta = cur_pos.theta;
+        set_state(NAV_STATE_CROSS);
+        start_cross_rotation(CROSS_ANGLE);
+        return;
+    }
+
     // se ci sono degli allarmi (stuck, slip o motor overload) e lo stato non è 
     // attesa, sblocco, riposo o guasto, vai in sblocco
     // il primo controllo dentro l'if verifica se uno o più dei 3 bit meno significativi siano a 1
@@ -2036,26 +2147,10 @@ void job_navigation(void *arg) {
         nav_state.state != NAV_STATE_WAIT &&
         nav_state.state != NAV_STATE_FAILURE &&
         nav_state.state != NAV_STATE_HOOK_UP &&
-        nav_state.state != NAV_STATE_LEAVE_BASE) {
-        
-        // se non c'è l'errore SAFETY_ERROR_CONTACT segna la cella del robot come ostacolo,
-        //  per non incappare nello stesso allarme successivamente 
-        if (!(cur_alarm.error_mask & SAFETY_ERROR_CONTACT)) {
-            close_cell(coord_to_nav_index(cur_pos.x, cur_pos.y));
-        }
+        nav_state.state != NAV_STATE_LEAVE_BASE &&
+        nav_state.state != NAV_STATE_CROSS) {
 
-        // durante il giro dei bordi un tentativo fallito chiude il bordo: segna come pulita la mezza cella sotto il
-        // robot, altrimenti la ricerca lo rimanderebbe sempre nello stesso punto
-        if (nav_state.mission == NAV_STATE_FOLLOW_BORDERS && nav_state.is_axis) {
-            uint16_t alarm_cell = coord_to_nav_index(cur_pos.x, cur_pos.y);
-            set_half_cell_clean(alarm_cell, get_robot_half_cell(cur_pos, alarm_cell));
-        }
-
-        // imposta lo stato corrente a sblocco
-        set_state(NAV_STATE_UNLOCK);
-
-        // comincia a fare il primo sblocco
-        start_unlock_attempt(cur_alarm, cur_pos);
+        start_unlock_after_alarm(cur_alarm, cur_pos);
 
         return;
     }
@@ -2382,6 +2477,12 @@ void job_navigation(void *arg) {
 
                     // imposta come prossimo obiettivo di andare al prossimo punto di svolta
                     send_objective(OBJ_MOVE, MAX_ROTATION_SPEED, 0, calc_speed(cur_alarm.max_v_forw), next_x, next_y);
+
+                    // se la svolta dopo questo punto è piccola il robot lo attraversa senza fermarsi
+                    if (!strip_end_reached && can_pass_through(nav_state.path_idx, cur_pos)) {
+                        nav_state.cur_obj.pass_through = true;
+                        write_objective(&nav_state.cur_obj);
+                    }
                 }
             } else { // se l'obiettivo non è stato raggiunto, rimani in questo stato
                 if (is_stalled(cur_alarm, cur_pos)) {       // controlla se il robot è in stallo
@@ -2405,10 +2506,54 @@ void job_navigation(void *arg) {
             
             break;
         }
+        case NAV_STATE_CROSS: {
+
+            // se è un ostacolo vero o è passato troppo tempo, l'attraversamento è fallito
+            if ((cur_alarm.error_mask & SAFETY_ERROR_CONTACT) || elapsed_time(nav_state.state_start) >= 2 * (CROSS_PUSH_TIME + UNLOCK_PHASE_TIMEOUT)) {
+                end_cross_failed(cur_alarm, cur_pos);
+                break;
+            }
+
+            // il tipo dell'obiettivo corrente dice a che punto siamo
+            if (nav_state.cur_obj.obj_type == OBJ_ROTATE) {
+
+                // finita la rotazione spingi dritto
+                if (is_objective_achieved(cur_pos) || elapsed_time(nav_state.phase_start) >= UNLOCK_PHASE_TIMEOUT) {
+                    send_objective(OBJ_CONST_SPEED, 0, 0, MIN(CRUISING_SPEED, cur_alarm.max_v_forw), 0, 0);
+                    nav_state.phase_start = rt_adesso();
+                }
+
+                break;
+            }
+
+            // aggiorna la velocità della spinta
+            nav_state.cur_obj.v = MIN(CRUISING_SPEED, cur_alarm.max_v_forw);
+            write_objective(&nav_state.cur_obj);
+
+            // l'allarme di incastro guarda l'ultimo secondo e mezzo: prima di metà spinta non dice ancora niente.
+            // se dopo è spento il robot si è liberato, e torna a quello che stava facendo
+            if (elapsed_time(nav_state.phase_start) >= CROSS_PUSH_TIME / 2 && !(cur_alarm.error_mask & SAFETY_ERROR_STUCK)) {
+
+                if (read_started_on_base() && !nav_state.has_left_base) set_state(NAV_STATE_LEAVE_BASE);
+                else resume_after_stop(cur_alarm, cur_pos);
+
+                break;
+            }
+
+            // finita la spinta ancora incastrato: prova dall'altra parte, se è già l'altra parte ha fallito
+            if (elapsed_time(nav_state.phase_start) >= CROSS_PUSH_TIME) {
+
+                if (wrap_angle(cur_pos.theta - nav_state.cross_theta) >= 0) start_cross_rotation(-CROSS_ANGLE);
+                else end_cross_failed(cur_alarm, cur_pos);
+            }
+
+            break;
+        }
         case NAV_STATE_LEAVE_BASE: {
 
-            // se il robot è arrivato al punto davanti alla base
-            if (cur_pos.x >= AGG_PUNTO_X_M) {
+            // se il robot è arrivato al punto davanti alla base. la posizione è quella data dal lidar:
+            // se le ruote slittano l'odometria direbbe che il robot è uscito anche quando è fermo
+            if (read_mapping_correction().map_x >= AGG_PUNTO_X_M) {
 
                 send_objective(OBJ_STOP, 0, 0, 0, 0, 0);
 

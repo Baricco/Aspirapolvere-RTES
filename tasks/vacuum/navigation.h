@@ -35,6 +35,7 @@ typedef struct {
     double x, y;                // coordinate dell'obiettivo rispetto all'origine
     double theta;               // angolo verso il quale il robot deve girarsi rispetto all'asse x nell'origine
     objective_type_t obj_type;  // obiettivo attuale, indica quali campi di questa struttura dati contano
+    bool pass_through;          // serve solo se l'obiettivo è OBJ_MOVE: il punto corrente non è un arrivo, il robot lo attraversa senza fermarsi
 
 } navigation_objective_t;
 

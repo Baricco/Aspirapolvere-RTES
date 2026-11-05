@@ -99,6 +99,9 @@ void aggancio_avvia(aggancio_t *a, int64_t t);
 /* Si ferma subito, qualunque cosa stia facendo: esito AGG_FERMO. */
 void aggancio_annulla(aggancio_t *a);
 
+/* Si ferma con esito AGG_FALLITO: per chi aspetta l'esito (per esempio se il robot viene sollevato). */
+void aggancio_interrompi(aggancio_t *a, const char *motivo);
+
 /* 1 se in questo momento il comando alle ruote lo decide l'aggancio. */
 int aggancio_attivo(const aggancio_t *a);
 

@@ -144,6 +144,11 @@ static void fallisce(aggancio_t *a, const char *motivo)
 	a->v = a->w = 0;
 }
 
+void aggancio_interrompi(aggancio_t *a, const char *motivo)
+{
+	fallisce(a, motivo);
+}
+
 static void riesce(aggancio_t *a)
 {
 	a->esito = AGG_FATTO;

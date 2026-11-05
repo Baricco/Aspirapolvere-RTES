@@ -10,7 +10,14 @@
 #define MOVE_TOLERANCE_M        0.02    // OBJ_MOVE: 2 cm;
 #define STOP_V_TOLERANCE        0.005   // OBJ_STOP: m/s misurati
 #define STOP_OMEGA_TOLERANCE    0.02    // OBJ_STOP: rad/s misurati
-#define ALIGNMENT_THRESHOLD     0.17    // soglia di allineamneto in OBJ_MOVE: 0,17 rad, circa 10°
+#define PASS_TOLERANCE_M        0.10    // OBJ_MOVE: un punto da attraversare senza fermarsi conta come raggiunto a 10 cm
+#define PASS_HOLD_TIME          RT_MS(300) // quanto il robot continua ad andare dopo un punto da attraversare, aspettando il prossimo obiettivo
+#define MAX_ACCEL_V             0.5     // rampa: quanto può crescere la velocità, m/s^2
+#define MAX_DECEL_V             1.0     // rampa: quanto può scendere la velocità, m/s^2
+#define MAX_ACCEL_OMEGA         3.0     // rampa: quanto può cambiare la velocità di rotazione, rad/s^2
+#define ALIGNMENT_THRESHOLD     0.50    // soglia di allineamneto in OBJ_MOVE: 0,17 rad, circa 10°
+#define ALIGNMENT_THRESHOLD_NEAR 0.17   // come ALIGNMENT_THRESHOLD, ma vicino al punto da raggiungere, dove girando in corsa non ci si arriverebbe
+#define ALIGNMENT_NEAR_DIST_M   0.15    // sotto questa distanza dal punto vale ALIGNMENT_THRESHOLD_NEAR
 
 // Taratura dell'IMU: (l'IMU conta circa il 3% in meno), questa costante compensa l'errore
 #define YAW_SCALE               1.0285

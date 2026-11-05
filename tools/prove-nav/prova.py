@@ -12,7 +12,7 @@
 import json, math, os, re, signal, subprocess, sys, time, urllib.request
 REPO = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..'))
 D = os.path.join(REPO, 'build', 'prove-nav')
-NOMI = ['WAIT', 'EXPLORE', 'CLEAN', 'BORDERS', 'HOME', 'HOOK', 'FOLLOW', 'UNLOCK', 'SLEEP', 'ALIGN', 'FAILURE', 'LAP', 'LEAVE']
+NOMI = ['WAIT', 'EXPLORE', 'CLEAN', 'BORDERS', 'HOME', 'HOOK', 'FOLLOW', 'UNLOCK', 'SLEEP', 'ALIGN', 'FAILURE', 'LAP', 'LEAVE', 'CROSS']
 CLEAN, FAILURE, SLEEP, HOME = NOMI.index('CLEAN'), NOMI.index('FAILURE'), NOMI.index('SLEEP'), NOMI.index('HOME')
 BORDERS, LAP = NOMI.index('BORDERS'), NOMI.index('LAP')
 LAP_TIMEOUT = 1800   # BORDER_LAP_TIMEOUT di navigation.c: la rete di sicurezza, non deve mai scattare

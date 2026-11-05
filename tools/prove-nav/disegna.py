@@ -12,7 +12,7 @@ from matplotlib.patches import Polygon, Circle
 
 REPO = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..'))
 D = os.path.join(REPO, 'build', 'prove-nav')
-NOMI = ['WAIT', 'EXPLORE', 'CLEAN', 'BORDERS', 'HOME', 'HOOK', 'FOLLOW', 'UNLOCK', 'SLEEP', 'ALIGN', 'FAILURE']
+NOMI = ['WAIT', 'EXPLORE', 'CLEAN', 'BORDERS', 'HOME', 'HOOK', 'FOLLOW', 'UNLOCK', 'SLEEP', 'ALIGN', 'FAILURE', 'LAP', 'LEAVE', 'CROSS']
 
 a = sys.argv[1:]
 tag = a[0]

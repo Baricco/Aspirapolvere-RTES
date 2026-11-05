@@ -354,7 +354,9 @@ static uint8_t fasci_base(const mondo_t *m, double x, double y)
 	double dx = x - m->base_x, dy = y - m->base_y, d = hypot(dx, dy);
 	double fi = angolo_norm(atan2(dy, dx) - m->base_dir) * 180 / M_PI;
 	uint8_t f = 0;
-	/* da vicino l'asse è il confine fra i due fasci: il ricevitore sinistro (y < 0 guardando la base) vede il 2, il destro l'1 */
+	/* da vicino (misure r13 e r15, lidar a ~40 cm dalla faccia, cioè ricevitori a ~15 cm): sull'asse ogni ricevitore vede i
+	   fasci 1 e 2 insieme; più lontano l'asse è il confine fra i due (a ~60 cm: 11 o 22, a volte 33) */
+	if (d < 0.35 && fabs(fi) < 25) f |= 3;
 	if ((fabs(fi - 5) < 20 && d >= 0.8 && d < 2.5) || (fi >= 0 && fi < 40 && d < 0.8)) f |= 1;
 	if ((fabs(fi + 12) < 20 && d >= 0.8 && d < 1.3) || (fi < 0 && fi > -40 && d < 0.8)) f |= 2;
 	if (fi > 8 && fi < 45 && d > 0.7 && d < 2.0) f |= 4;

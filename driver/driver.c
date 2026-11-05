@@ -107,6 +107,8 @@ static struct {
 	int sulla_base_prec, in_carica_prec;
 	int64_t t_cambio_base, t_cambio_carica;
 	int riposo;                           /* 0 sveglio, 1 motori spenti, 2 anche sensori e lidar spenti */
+	int sollevato, frame_vuoto;           /* sollevato: resta attivo finché non rivede il pavimento */
+	int64_t t_pavimento;
 	int64_t t_riposo, t_sveglia, t_sensori_accesi;
 	int agg_fase_prec, agg_esito_prec;    /* per scrivere un evento quando cambiano */
 
@@ -429,6 +431,7 @@ static void pubblica_stato(int64_t t)
 			s.percentuale = 50;          /* sotto la soglia per ripartire: una volta agganciato resta sulla base */
 	}
 	s.in_carica = d.s.in_carica;
+	s.sollevato = d.sollevato;
 	s.sulla_base = d.s.sulla_base;
 	s.temperatura_c = d.s.temperatura_c;
 	s.v = d.v_inv / SCALA_V;
@@ -519,6 +522,10 @@ static int limita_velocita(int64_t t, int32_t *v, int32_t *w)
 		*v = *w = 0;
 		lim_terra |= SIC_LIM_SENSORI;
 	}
+	if (d.sollevato) {
+		*v = *w = 0;
+		lim_terra |= SIC_LIM_SOLLEVATO;
+	}
 	/* dopo il riposo si parte con la mappa che funziona: si aspetta il primo giro del lidar, al massimo qualche secondo */
 	if (d.t_sveglia && atomic_load(&cmd.lidar_acceso) && d.giro.t_fine_ns < d.t_sveglia && t - d.t_sveglia < SVEGLIA_LIDAR_MAX_NS) {
 		*v = *w = 0;
@@ -540,6 +547,8 @@ static int attuatori_limiti(int64_t t, uint8_t cmd_gd32, int valore)
 		uint8_t b = (uint8_t)valore;
 		return sic_permesso(&d.sic, cmd_gd32, &b, 1, t) == SIC_PERMESSO ? 0 : DRV_LIM_BANCO;
 	}
+	if (d.sollevato)
+		return SIC_LIM_SOLLEVATO;
 	int32_t v = 1, w = 0;
 	return sic_terra_limita(&d.s, 0, &v, &w) & (SIC_LIM_SOLLEVATO | SIC_LIM_BASE | SIC_LIM_SENSORI);
 }
@@ -604,6 +613,36 @@ static void aggiorna_attuatori(int64_t t)
 		d.led_inv = led;
 	}
 
+	/* Sollevamento: basta vedere una volta il vuoto sotto tutti e 4 gli anti-caduta, e resta attivo finché non rivedono TUTTI
+	   il pavimento per 0,5 s: tenendolo in mano un sensore può vedere la mano, e le ruote ripartivano in aria (prova m1).
+	   I motori si spengono (0x65 00), come fa l'originale ("free motor when wheel up"). Riappoggiato, si riprende a
+	   comandare solo dopo il primo giro del lidar: cosa fare poi lo decidono i task (drv_stato_t.sollevato). */
+	if (d.ha_sensori && !d.riposo && (d.s.controllo & GD32_CONTROLLO_SENSORI_ACCESI) && t - d.t_sensori_accesi > RT_MS(300) && !d.s.sulla_base) {
+		int tutti = d.s.cliff[0] && d.s.cliff[1] && d.s.cliff[2] && d.s.cliff[3];
+		int nessuno = !d.s.cliff[0] && !d.s.cliff[1] && !d.s.cliff[2] && !d.s.cliff[3];
+		d.frame_vuoto = tutti ? d.frame_vuoto + 1 : 0;
+		if (!d.sollevato) {
+			if (d.frame_vuoto >= 3) {
+				d.sollevato = 1;
+				d.t_pavimento = 0;
+				invia1(GD32_TIPO_CONTROLLO, 0);
+				if (aggancio_attivo(&d.agg))
+					aggancio_interrompi(&d.agg, "robot sollevato");
+				evento("sollevato: motori e lidar spenti");
+			}
+		} else if (!nessuno) {
+			d.t_pavimento = 0;
+		} else if (!d.t_pavimento) {
+			d.t_pavimento = t;
+		} else if (t - d.t_pavimento > RT_MS(500)) {
+			d.sollevato = 0;
+			d.frame_vuoto = 0;
+			invia1(GD32_TIPO_CONTROLLO, 2);
+			d.t_sveglia = t;
+			evento("riappoggiato: motori e lidar accesi");
+		}
+	}
+
 	/* Riposo sulla base: a carica stabile lidar, motori e sensori si spengono; prima di uscire si riaccendono.
 	   Spegnere i sensori (0x9d 00) ferma gli encoder, e il GD32 regola la velocità proprio con quelli: nelle prove del 5/11
 	   lo spegnimento dava a volte una lettura falsa dell'encoder sinistro (r2, r10) con il robot che scattava in avanti di
@@ -659,7 +698,7 @@ static void aggiorna_lidar(int64_t t)
 {
 	if (d.fd_lidar < 0)
 		return;
-	int acceso = atomic_load(&cmd.lidar_acceso) && !d.riposo;
+	int acceso = atomic_load(&cmd.lidar_acceso) && !d.riposo && !d.sollevato;
 	if (acceso != d.lidar_inv) {
 		invia1(GD32_ALIMENTAZIONE_LIDAR, (uint8_t)acceso);
 		d.lidar_inv = acceso;

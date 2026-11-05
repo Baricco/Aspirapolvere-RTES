@@ -123,6 +123,7 @@ typedef struct {
 	int percentuale;             /* stima come il software originale (batteria.h) */
 	int batteria;                /* BAT_OK, BAT_BASSA, BAT_CRITICA */
 	int in_carica, sulla_base, temperatura_c;
+	int sollevato;               /* 1 da quando sotto tutti e 4 gli anti-caduta c'è il vuoto a quando rivedono il pavimento per 0,5 s */
 
 	/* motori: quello che il driver sta mandando DAVVERO al GD32 (dopo i limiti) */
 	double v, w;                 /* m/s, rad/s */
@@ -179,7 +180,7 @@ void drv_lidar(int acceso, double giri_s);          /* giri_s <= 0: la velocità
 void drv_posa(double x, double y, double theta);
 void drv_esci_dalla_base(int si);                   /* 1 = permette di muoversi piano anche sulla base (i contatti
                                                        sono dietro: si esce IN AVANTI) */
-/* Incastro in avanti (lo riconosce il task di sicurezza): 1 finché il robot è incastrato andando avanti, 0 altrimenti.
+/* Incastro in avanti (lo decide il task di navigazione, quando parte lo sblocco): 1 finché va segnato, 0 altrimenti.
  * Va chiamata a ogni frame, come un sensore: il driver ne fa un evento CONTATTO_INCASTRO nel registro dei contatti,
  * con la posizione del primo frame. La deve chiamare UN SOLO task. */
 void drv_incastro(int si);

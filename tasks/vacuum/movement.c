@@ -25,6 +25,10 @@ typedef struct {
 
     double map_x, map_y, map_theta;     // posizione del robot sulla mappa
 
+    double last_cmd_v, last_cmd_omega;  // ultime velocità comandate, servono per la rampa
+    int64_t last_cmd_time;              // istante dell'ultimo comando di velocità
+    int64_t pass_achieved_time;         // istante in cui è stato raggiunto un punto da attraversare, 0 se non c'è
+
 } movement_state_t;
 
 
@@ -45,6 +49,20 @@ static movement_odom_history_t odom_history;
 
 // caratteristiche del task
 rt_task_t movement_task;
+
+// funzione helper per la rampa: avvicina value a target senza superare max_up se il modulo cresce e max_down se cala
+static double ramp_value(const double value, const double target, const double max_up, const double max_down) {
+
+    // se il modulo cresce e il segno non cambia usa il limite di salita, altrimenti quello di discesa
+    double max_step = (fabs(target) > fabs(value) && target * value >= 0) ? max_up : max_down;
+
+    double step = target - value;
+
+    if (step > max_step) step = max_step;
+    if (step < -max_step) step = -max_step;
+
+    return value + step;
+}
 
 // funzione di inizializzazione del task
 void init_movement(void) {
@@ -362,10 +380,23 @@ void job_movement(void *arg) {
 
         // Controlla se l'obiettivo è stato raggiunto
         if (mov_state.obj_achieved) {
-            // Se sì, ferma i motori
-            next_v = 0;
-            next_omega = 0;
+
+            // se è un punto da attraversare continua ad andare, in attesa che la navigazione mandi il prossimo.
+            // la navigazione gira ogni 100 ms: se tarda troppo il robot si ferma
+            if (cur_obj.obj_type == OBJ_MOVE && cur_obj.pass_through) {
+                if (mov_state.pass_achieved_time == 0) mov_state.pass_achieved_time = rt_adesso();
+                if (rt_adesso() - mov_state.pass_achieved_time < PASS_HOLD_TIME) {
+                    next_v = mov_state.last_cmd_v;
+                    next_omega = mov_state.last_cmd_omega;
+                }
+            } else {
+                // Se no, ferma i motori
+                next_v = 0;
+                next_omega = 0;
+            }
+
         } else {
+            mov_state.pass_achieved_time = 0;
             
             // Altrimenti controlla il tipo di obiettivo da raggiungere
             switch (cur_obj.obj_type) {
@@ -418,8 +449,8 @@ void job_movement(void *arg) {
                     // calcola la distanza tra il robot e l'obiettivo
                     double dist_error = hypot(dx, dy);
 
-                    // verifica se la distanza è <= della tolleranza
-                    if (dist_error <= MOVE_TOLERANCE_M) {
+                    // verifica se la distanza è <= della tolleranza (più larga per i punti da attraversare)
+                    if (dist_error <= (cur_obj.pass_through ? PASS_TOLERANCE_M : MOVE_TOLERANCE_M)) {
                         // se sì, imposta obj_achieved a true
                         mov_state.obj_achieved = true;
 
@@ -443,14 +474,14 @@ void job_movement(void *arg) {
                     // satura next_omega alla velocità massima di rotazione 
                     next_omega = saturate_value(cur_obj.omega, next_omega);
 
-                    // prima di modificare anche la velocità verifica
-                    // che l'errore di direzione sia sotto
-                    // una certa soglia
-                    if (fabs(dir_error) > ALIGNMENT_THRESHOLD) break;
+                    // prima di modificare anche la velocità verifica che l'errore di direzione sia sotto
+                    // una certa soglia, più stretta vicino al punto: lì girando in corsa ci si girerebbe attorno
+                    double align_threshold = (dist_error < ALIGNMENT_NEAR_DIST_M && !cur_obj.pass_through) ? ALIGNMENT_THRESHOLD_NEAR : ALIGNMENT_THRESHOLD;
+                    if (fabs(dir_error) > align_threshold) break;
 
-                    // la velocità di movimento sarà la distanza
-                    // moltiplicata per il guadagno di spostamento
-                    next_v = dist_error * MOVE_GAIN;
+                    // la velocità di movimento sarà la distanza moltiplicata per il guadagno di spostamento:
+                    // così il robot frena arrivando. i punti da attraversare non sono un arrivo, quindi lì non frena
+                    next_v = cur_obj.pass_through ? fabs(cur_obj.v) : dist_error * MOVE_GAIN;
 
                     // satura next_v alla velocità massima di spostamento
                     next_v = saturate_value(fabs(cur_obj.v), next_v);
@@ -460,6 +491,9 @@ void job_movement(void *arg) {
                     // la direzione è corretta, e sarà modulata dal coseno
                     // quando è sbagliata
                     next_v *= cos(dir_error);
+
+                    // più l'errore di direzione è grande più il robot rallenta, fino a girare soltanto alla soglia
+                    next_v *= 1 - fabs(dir_error) / align_threshold;
 
                     if (signbit(cur_obj.v)) next_v *= -1;
 
@@ -486,6 +520,20 @@ void job_movement(void *arg) {
             }
 
         }
+
+        if (cur_obj.obj_type != OBJ_STOP) {
+
+            // calcola il tempo trascorso dall'ultimo comando
+            double dt = (rt_adesso() - mov_state.last_cmd_time) / 1e9;
+            if (dt > 0.05) dt = 0.05;
+
+            next_v = ramp_value(mov_state.last_cmd_v, next_v, MAX_ACCEL_V * dt, MAX_DECEL_V * dt);
+            next_omega = ramp_value(mov_state.last_cmd_omega, next_omega, MAX_ACCEL_OMEGA * dt, MAX_ACCEL_OMEGA * dt);
+        }
+
+        mov_state.last_cmd_v = next_v;
+        mov_state.last_cmd_omega = next_omega;
+        mov_state.last_cmd_time = rt_adesso();
 
         // Imposta la velocità di movimento e rotazione a next_v e next_omega
         drv_velocita(next_v, next_omega);
