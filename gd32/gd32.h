@@ -202,7 +202,8 @@ typedef struct {
 /* Ritorna 0 se f è un frame dei sensori di 96 byte (decodificato in *out), -1 altrimenti. */
 int gd32_leggi_sensori(const gd32_frame_t *f, gd32_sensori_t *out);
 
-/* Bit del byte 3 (anti-caduta) quando il robot è sollevato: tutti i sensori vedono "vuoto". */
+/* Bit del byte 3 (anti-caduta) con tutti i sensori sul "vuoto". Sollevando il robot può NON succedere: tenuto in mano,
+   un sensore può vedere la mano (prova l1: 0e per 15 s); la regola completa è in aggiorna_sollevamento (driver.c). */
 #define GD32_CLIFF_TUTTI_VUOTO 0x0f
 
 /* Byte 64 bit 5: sensori alimentati (0 dopo 0x9d 00; everest ignora anti-caduta e bumper quando è 0). */

@@ -116,6 +116,7 @@ typedef struct {
 	int64_t t_ns;
 	int fase;                    /* DRV_AVVIO, DRV_PRONTO, DRV_GUASTO, DRV_FINE */
 	char guasto[96];             /* perché è in guasto ("" se non lo è) */
+	int task_fault;              /* drv_task_fault_t: why a task asked for the fault (DRV_FAULT_NONE if no task did) */
 	char versione_gd32[33];
 
 	/* batteria */
@@ -124,6 +125,12 @@ typedef struct {
 	int batteria;                /* BAT_OK, BAT_BASSA, BAT_CRITICA */
 	int in_carica, sulla_base, temperatura_c;
 	int sollevato;               /* 1 da quando sotto tutti e 4 gli anti-caduta c'è il vuoto a quando rivedono il pavimento per 0,5 s */
+
+	/* tasti: pressioni brevi (meno di DRV_TASTO_BREVE_MS), contate al rilascio. Un task confronta il numero con quello
+	 * dell'ultima lettura: se è cresciuto c'è stata una pressione. Una pressione azzera anche il guasto, prima di essere
+	 * contata: chi vede il numero crescere trova già il guasto azzerato (se la causa non c'è più). Le pressioni lunghe
+	 * non contano */
+	uint32_t pressioni_accensione, pressioni_casa;
 
 	/* motori: quello che il driver sta mandando DAVVERO al GD32 (dopo i limiti) */
 	double v, w;                 /* m/s, rad/s */
@@ -174,6 +181,12 @@ void drv_velocita(double v_m_s, double w_rad_s);    /* v in [-0,5, 0,5] m/s, ome
 void drv_spazzole(int laterale, int centrale);      /* -100..100; centrale < 0 = sblocco per ~4 s (lo ferma il GD32) */
 void drv_aspirazione(int giri_min);                 /* 0..30000; rifiutata se drv_config_t.aspirazione = 0 */
 void drv_led(int modo);                             /* 0x8d: 0 spento, 1 azzurro... (tabella in docs/RIEPILOGO.md) */
+/* Modi del LED che possono servire ai task (gli altri in docs/fase2.md). Guasto, batteria e carica li decide il driver e
+ * vincono su quello chiesto dai task */
+#define DRV_LED_AZZURRO          1   /* azzurro fisso: acceso, in riposo o al lavoro */
+#define DRV_LED_AZZURRO_RESPIRA  12  /* azzurro che respira: in pausa */
+/* Pressione breve di un tasto: rilasciato prima di questi millisecondi */
+#define DRV_TASTO_BREVE_MS       1000
 void drv_lidar(int acceso, double giri_s);          /* giri_s <= 0: la velocità della configurazione */
 /* La posizione del robot (metri e radianti nel sistema della mappa), dal task del moto a ogni frame quando è valida:
  * il driver la attacca agli eventi del registro dei contatti (contatti.h). La deve chiamare UN SOLO task. */
@@ -190,7 +203,32 @@ void drv_incastro(int si);
 void drv_aggancia(int si);
 void drv_suono(const char *nome);                   /* es. "sound_beep_beep" (file in /usr/share/audio/english) */
 
-/* Prova a uscire dallo stato di guasto (solo se la causa non c'è più). Ritorna 0 se ci riesce. */
+/* Why a task asks for the fault state. To add a reason: add a value here and its case in drv_task_fault_text
+ * (driver.c); if the case is missing the build stops with an error. */
+typedef enum {
+	DRV_FAULT_NONE = 0,                  /* no fault asked by a task */
+	DRV_FAULT_UNLOCK_ATTEMPTS_EXHAUSTED, /* navigation: all the unlock attempts failed */
+	DRV_FAULT_NO_ESCAPE_CELL,            /* navigation: no free cell reachable to escape to */
+	DRV_FAULT_LEAVE_BASE_TIMEOUT,        /* navigation: the robot could not leave the charging base in time */
+	DRV_FAULT_NO_PATH_HOME,              /* navigation: no path back to the charging base */
+	DRV_FAULT_DOCKING_FAILED,            /* navigation: the driver reported a failed docking */
+	DRV_FAULT_DOCKING_TIMEOUT,           /* navigation: docking took too long */
+	DRV_FAULT_INCONSISTENT_STATE,        /* navigation: inconsistent state machine (a bug) */
+	DRV_FAULT_UNKNOWN_OBJECTIVE,         /* movement: unknown objective type (a bug) */
+	DRV_FAULT_POSITION_NOT_FOUND,        /* mapping: position not found again after the robot was lifted */
+} drv_task_fault_t;
+
+/* A task puts the driver in the fault state: motors stopped, LED 8 and sound, like the driver's own faults. It happens
+ * at the next driver tick (within 20 ms); the reason goes to the log, to drv_stato_t.guasto (text) and to
+ * drv_stato_t.task_fault (code). The only way out is drv_azzera_guasto. */
+void drv_segnala_guasto(drv_task_fault_t reason);
+
+/* Readable text of a reason, for logs and app. Never NULL. */
+const char *drv_task_fault_text(drv_task_fault_t reason);
+
+/* Prova a uscire dallo stato di guasto (solo se la causa non c'è più). Ritorna 0 se ci riesce. ATTENZIONE: aspetta fino a 2
+ * tick (50 ms), quindi non va chiamata da un task real-time. Il guasto si azzera anche da solo, sempre se la causa non c'è
+ * più: con una pressione breve di un tasto e quando il robot viene rimesso sulla base dopo almeno 1 s fuori. */
 int drv_azzera_guasto(void);
 
 /* ------------------------------------------------------------------------------------------------ task --- */

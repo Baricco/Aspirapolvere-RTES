@@ -37,7 +37,7 @@
 #define RIPOSO_CARICA_NS     RT_S(5)   /* a carica attiva da tanto si va a riposo */
 #define RIPOSO_CONTATTO_NS   RT_S(20)  /* senza carica (batteria piena): contatto stabile da tanto */
 #define SVEGLIA_LIDAR_MAX_NS RT_S(6)
-#define LED_NORMALE       1
+#define LED_NORMALE       DRV_LED_AZZURRO
 #define LED_BATTERIA      6
 #define LED_CARICA        4
 #define LED_GUASTO        8
@@ -54,6 +54,7 @@ static struct {
 	_Atomic int incastro;                  /* incastro in avanti, dalla sicurezza (drv_incastro) */
 	_Atomic int aggancia;                  /* 1 = parti, -1 = annulla, 0 = niente: lo azzera il driver (drv_aggancia) */
 	_Atomic(const char *) suono;
+	_Atomic int task_fault;                /* drv_task_fault_t asked by a task (drv_segnala_guasto), DRV_FAULT_NONE = none */
 } cmd;
 
 /* Dati pubblicati: doppio buffer senza mutex (scambio.h). */
@@ -105,15 +106,22 @@ static struct {
 	contatti_t contatti;                  /* scatti di anti-caduta e bumper (contatti.h) */
 	aggancio_t agg;                       /* messa in carica in retromarcia (aggancio.h) */
 	int sulla_base_prec, in_carica_prec;
+	int tasto_max_ms[2];                  /* durata della pressione in corso (0 = tasto rilasciato): accensione, casa */
+	int tasti_in_attesa[2];               /* pressioni brevi viste dalla ricezione, da contare al prossimo tick */
+	uint32_t pressioni[2];                /* pressioni brevi contate (pubblicate in drv_stato_t) */
+	int64_t t_fuori_base;                 /* da quando il robot è fuori dalla base (0 = è sulla base) */
+	int base_rimessa;                     /* il robot è tornato sulla base dopo almeno 1 s fuori: da guardare al prossimo tick */
 	int64_t t_cambio_base, t_cambio_carica;
 	int riposo;                           /* 0 sveglio, 1 motori spenti, 2 anche sensori e lidar spenti */
-	int sollevato, frame_vuoto;           /* sollevato: resta attivo finché non rivede il pavimento */
-	int64_t t_pavimento;
+	int sollevato;                        /* resta attivo finché non rivede il pavimento (aggiorna_sollevamento) */
+	uint64_t vuoto_40;                    /* ultimi 40 frame: 1 = tutti e 4 gli anti-caduta sul vuoto */
+	int n_incrociati, n_anteriori, n_inclinato, n_pavimento;   /* frame di fila con la condizione vera */
 	int64_t t_riposo, t_sveglia, t_sensori_accesi;
 	int agg_fase_prec, agg_esito_prec;    /* per scrivere un evento quando cambiano */
 
 	int fase;
 	char guasto[96];
+	int task_fault;                       /* drv_task_fault_t of the current fault, if a task asked for it */
 	int ha_sensori;
 	gd32_sensori_t s;
 	int64_t t_sensori;
@@ -401,6 +409,7 @@ static void prova_ad_azzerare_guasto(int64_t t)
 	}
 	d.fase = DRV_PRONTO;
 	d.guasto[0] = 0;
+	d.task_fault = DRV_FAULT_NONE;
 	d.led_inv = -1;                       /* rimanda il LED giusto al prossimo ciclo */
 	for (int i = 0; i < MAX_SORVEGLIATI; i++) {
 		rt_task_t *k = atomic_load(&sorvegliati[i].t);
@@ -411,6 +420,42 @@ static void prova_ad_azzerare_guasto(int64_t t)
 	evento("guasto azzerato");
 }
 
+/* Every value of drv_task_fault_t needs its own case: -Wswitch-enum warns about an enum value without a case even when
+   there is a default, and the pragma turns that warning into an error for this function only, whatever the build
+   flags. The default is still needed for numbers that are not in the enum (for example a wrong cast). */
+#pragma GCC diagnostic push
+#pragma GCC diagnostic error "-Wswitch-enum"
+const char *drv_task_fault_text(drv_task_fault_t reason)
+{
+	switch (reason) {
+	case DRV_FAULT_NONE:                      return "no fault";
+	case DRV_FAULT_UNLOCK_ATTEMPTS_EXHAUSTED: return "all the unlock attempts failed";
+	case DRV_FAULT_NO_ESCAPE_CELL:            return "no free cell reachable to escape to";
+	case DRV_FAULT_LEAVE_BASE_TIMEOUT:        return "could not leave the charging base in time";
+	case DRV_FAULT_NO_PATH_HOME:              return "no path back to the charging base";
+	case DRV_FAULT_DOCKING_FAILED:            return "docking failed";
+	case DRV_FAULT_DOCKING_TIMEOUT:           return "docking took too long";
+	case DRV_FAULT_INCONSISTENT_STATE:        return "inconsistent navigation state";
+	case DRV_FAULT_UNKNOWN_OBJECTIVE:         return "unknown objective type";
+	case DRV_FAULT_POSITION_NOT_FOUND:        return "position not found after the robot was lifted";
+	default:                                  return "generic fault";
+	}
+}
+#pragma GCC diagnostic pop
+
+/* Fault asked by a task (drv_segnala_guasto). Checked after the reset request: if in the same tick one task asks for
+   the fault and another one for the reset, the fault wins. */
+static void guasto_chiesto_da_un_task(void)
+{
+	int reason = atomic_exchange(&cmd.task_fault, DRV_FAULT_NONE);
+	if (reason == DRV_FAULT_NONE || d.fase == DRV_GUASTO)
+		return;
+	char text[sizeof d.guasto];
+	snprintf(text, sizeof text, "task fault %d: %s", reason, drv_task_fault_text((drv_task_fault_t)reason));
+	entra_in_guasto(text);
+	d.task_fault = reason;
+}
+
 static void pubblica_stato(int64_t t)
 {
 	drv_stato_t s;
@@ -418,6 +463,7 @@ static void pubblica_stato(int64_t t)
 	s.t_ns = t;
 	s.fase = d.fase;
 	memcpy(s.guasto, d.guasto, sizeof s.guasto);
+	s.task_fault = d.task_fault;
 	memcpy(s.versione_gd32, d.versione, sizeof s.versione_gd32);
 	s.volt = batteria_volt(&d.bat);
 	s.percentuale = batteria_percentuale(&d.bat);
@@ -432,6 +478,8 @@ static void pubblica_stato(int64_t t)
 	}
 	s.in_carica = d.s.in_carica;
 	s.sollevato = d.sollevato;
+	s.pressioni_accensione = d.pressioni[0];
+	s.pressioni_casa = d.pressioni[1];
 	s.sulla_base = d.s.sulla_base;
 	s.temperatura_c = d.s.temperatura_c;
 	s.v = d.v_inv / SCALA_V;
@@ -613,36 +661,6 @@ static void aggiorna_attuatori(int64_t t)
 		d.led_inv = led;
 	}
 
-	/* Sollevamento: basta vedere una volta il vuoto sotto tutti e 4 gli anti-caduta, e resta attivo finché non rivedono TUTTI
-	   il pavimento per 0,5 s: tenendolo in mano un sensore può vedere la mano, e le ruote ripartivano in aria (prova m1).
-	   I motori si spengono (0x65 00), come fa l'originale ("free motor when wheel up"). Riappoggiato, si riprende a
-	   comandare solo dopo il primo giro del lidar: cosa fare poi lo decidono i task (drv_stato_t.sollevato). */
-	if (d.ha_sensori && !d.riposo && (d.s.controllo & GD32_CONTROLLO_SENSORI_ACCESI) && t - d.t_sensori_accesi > RT_MS(300) && !d.s.sulla_base) {
-		int tutti = d.s.cliff[0] && d.s.cliff[1] && d.s.cliff[2] && d.s.cliff[3];
-		int nessuno = !d.s.cliff[0] && !d.s.cliff[1] && !d.s.cliff[2] && !d.s.cliff[3];
-		d.frame_vuoto = tutti ? d.frame_vuoto + 1 : 0;
-		if (!d.sollevato) {
-			if (d.frame_vuoto >= 3) {
-				d.sollevato = 1;
-				d.t_pavimento = 0;
-				invia1(GD32_TIPO_CONTROLLO, 0);
-				if (aggancio_attivo(&d.agg))
-					aggancio_interrompi(&d.agg, "robot sollevato");
-				evento("sollevato: motori e lidar spenti");
-			}
-		} else if (!nessuno) {
-			d.t_pavimento = 0;
-		} else if (!d.t_pavimento) {
-			d.t_pavimento = t;
-		} else if (t - d.t_pavimento > RT_MS(500)) {
-			d.sollevato = 0;
-			d.frame_vuoto = 0;
-			invia1(GD32_TIPO_CONTROLLO, 2);
-			d.t_sveglia = t;
-			evento("riappoggiato: motori e lidar accesi");
-		}
-	}
-
 	/* Riposo sulla base: a carica stabile lidar, motori e sensori si spengono; prima di uscire si riaccendono.
 	   Spegnere i sensori (0x9d 00) ferma gli encoder, e il GD32 regola la velocità proprio con quelli: nelle prove del 5/11
 	   lo spegnimento dava a volte una lettura falsa dell'encoder sinistro (r2, r10) con il robot che scattava in avanti di
@@ -757,6 +775,107 @@ static void aggiorna_aggancio(int64_t t)
 	}
 }
 
+/* Sollevamento, a ogni frame dei sensori (50 al secondo), come CHwdriverExceptionDetect::detectWithCliffIRSensor
+   dell'originale. Il robot è sollevato quando una di queste condizioni vale per tutta la sua finestra:
+     - tutti e 4 gli anti-caduta sul vuoto, in almeno il 90% degli ultimi 40 frame (0,8 s);
+     - due anti-caduta "incrociati" sul vuoto (sx anteriore + dx laterale, dx anteriore + sx laterale, i due laterali)
+       per 50 frame (1 s): un bordo dritto, come un gradino, non li può dare;
+     - almeno un anti-caduta sul vuoto e beccheggio fuori da -16°..+14° per 10 frame (0,2 s);
+     - i due anteriori sul vuoto per 250 frame (5 s): davanti a un gradino il robot fa retromarcia molto prima
+       (retromarcia automatica del GD32 e task di sicurezza), quindi qui la finestra è lunga.
+   Con il robot in mano un sensore può vedere la mano o il braccio: nella prova l1 il laterale sinistro ha visto
+   "pavimento" per tutto il tempo, e "tutti e 4 sul vuoto" da sola non scattava mai. Riappoggiato quando tutti e 4
+   vedono il pavimento per 40 frame (0,8 s). Sollevato, i motori si spengono (0x65 00), come l'originale ("free motor
+   when wheel up"); riappoggiato, si riprende a comandare solo dopo il primo giro del lidar: cosa fare poi lo decidono
+   i task (drv_stato_t.sollevato). Sulla base non si entra in "sollevato"; a riposo o a sensori spenti (o accesi da
+   meno di 300 ms) non si guarda niente, perché gli anti-caduta non valgono. */
+static void aggiorna_sollevamento(int64_t t)
+{
+	if (d.riposo || !(d.s.controllo & GD32_CONTROLLO_SENSORI_ACCESI) || t - d.t_sensori_accesi <= RT_MS(300)) {
+		d.vuoto_40 = 0;
+		d.n_incrociati = d.n_anteriori = d.n_inclinato = d.n_pavimento = 0;
+		return;
+	}
+	const int *c = d.s.cliff;
+	int tutti = c[0] && c[1] && c[2] && c[3], nessuno = !c[0] && !c[1] && !c[2] && !c[3];
+	double beccheggio = d.s.angolo[1] / 100.0;
+	d.vuoto_40 = (d.vuoto_40 << 1 | (uint64_t)tutti) & ((1ULL << 40) - 1);
+	d.n_incrociati = (c[1] && c[3]) || (c[2] && c[0]) || (c[0] && c[3]) ? d.n_incrociati + 1 : 0;
+	d.n_anteriori = c[1] && c[2] ? d.n_anteriori + 1 : 0;
+	d.n_inclinato = !nessuno && (beccheggio < -16 || beccheggio > 14) ? d.n_inclinato + 1 : 0;
+	d.n_pavimento = nessuno ? d.n_pavimento + 1 : 0;
+	if (!d.sollevato) {
+		const char *motivo = d.s.sulla_base ? NULL
+		                   : __builtin_popcountll(d.vuoto_40) >= 36 ? "tutti e 4 gli anti-caduta sul vuoto"
+		                   : d.n_incrociati >= 50 ? "due anti-caduta incrociati sul vuoto"
+		                   : d.n_inclinato >= 10 ? "anti-caduta sul vuoto e robot inclinato"
+		                   : d.n_anteriori >= 250 ? "i due anti-caduta anteriori sul vuoto da 5 s" : NULL;
+		if (motivo) {
+			d.sollevato = 1;
+			invia1(GD32_TIPO_CONTROLLO, 0);
+			if (aggancio_attivo(&d.agg))
+				aggancio_interrompi(&d.agg, "robot sollevato");
+			evento("sollevato (%s, beccheggio %+.1f°): motori e lidar spenti", motivo, beccheggio);
+		}
+	} else if (d.n_pavimento >= 40) {
+		d.sollevato = 0;
+		d.vuoto_40 = 0;
+		d.n_incrociati = d.n_anteriori = d.n_inclinato = 0;
+		invia1(GD32_TIPO_CONTROLLO, 2);
+		d.t_sveglia = t;
+		evento("riappoggiato: motori e lidar accesi");
+	}
+}
+
+/* Tasti e base, a ogni frame dei sensori. Il GD32 manda da quanto è premuto ogni tasto (byte 58 e 62, 0 se rilasciato):
+   al rilascio, se la pressione è durata meno di DRV_TASTO_BREVE_MS, è una pressione breve. Il frame arriva ogni 20 ms,
+   quindi qui si vedono anche le pressioni brevissime, che un task da 100 ms potrebbe perdere. Le pressioni si contano al
+   tick, dopo l'azzeramento del guasto (vedi tasti_e_base). Lo stesso per il ritorno sulla base dopo almeno 1 s fuori */
+static void aggiorna_tasti_e_base(int64_t t)
+{
+	const int premuto_ms[2] = { d.s.tasto_accensione_ms, d.s.tasto_casa_ms };
+	static const char *nomi[2] = { "accensione", "casa" };
+	for (int k = 0; k < 2; k++) {
+		if (premuto_ms[k] > 0) {
+			if (premuto_ms[k] > d.tasto_max_ms[k])
+				d.tasto_max_ms[k] = premuto_ms[k];
+		} else if (d.tasto_max_ms[k] > 0) {
+			if (d.tasto_max_ms[k] < DRV_TASTO_BREVE_MS) {
+				d.tasti_in_attesa[k]++;
+				evento("tasto %s: pressione breve (%d ms)", nomi[k], d.tasto_max_ms[k]);
+			} else {
+				evento("tasto %s: pressione lunga (%d ms), non conta", nomi[k], d.tasto_max_ms[k]);
+			}
+			d.tasto_max_ms[k] = 0;
+		}
+	}
+	if (!d.s.sulla_base) {
+		if (!d.t_fuori_base)
+			d.t_fuori_base = t;
+	} else {
+		if (d.t_fuori_base && t - d.t_fuori_base >= RT_S(1))
+			d.base_rimessa = 1;
+		d.t_fuori_base = 0;
+	}
+}
+
+/* Al tick: una pressione breve o il ritorno sulla base azzerano il guasto (se la causa non c'è più), poi le pressioni si
+   contano. Così un task che vede crescere il numero trova già il guasto azzerato (decisione dell'utente, 2026-11-06) */
+static void tasti_e_base(int64_t t)
+{
+	int premuti = d.tasti_in_attesa[0] + d.tasti_in_attesa[1];
+	if (d.fase == DRV_GUASTO && (premuti || d.base_rimessa)) {
+		evento("guasto: provo ad azzerarlo (%s)", premuti ? "tasto premuto" : "robot rimesso sulla base");
+		atomic_store(&cmd.azzera_guasto, 1);
+	}
+	d.base_rimessa = 0;
+	prova_ad_azzerare_guasto(t);
+	for (int k = 0; k < 2; k++) {
+		d.pressioni[k] += (uint32_t)d.tasti_in_attesa[k];
+		d.tasti_in_attesa[k] = 0;
+	}
+}
+
 static void frame_gd32(const gd32_frame_t *f, void *ctx)
 {
 	int64_t t = *(const int64_t *)ctx;
@@ -776,6 +895,8 @@ static void frame_gd32(const gd32_frame_t *f, void *ctx)
 		d.t_sensori = t;
 		d.n_sensori++;
 		d.sensori_secondo[0]++;
+		aggiorna_sollevamento(t);
+		aggiorna_tasti_e_base(t);
 		/* "in movimento" come l'originale: v + |ω| misurati (byte 32 e 36) maggiori di zero */
 		int in_moto = d.s.vel_sx / SCALA_V + fabs(d.s.vel_dx / SCALA_W) > 0;
 		int liv = batteria_aggiorna(&d.bat, d.s.tensione_dv, d.s.in_carica, d.s.sulla_base, in_moto, d.s.byte69_x100);
@@ -904,7 +1025,8 @@ static void tick(int64_t t)
 		else
 			evento("ATTENZIONE: %s (non critico)", motivo);
 	}
-	prova_ad_azzerare_guasto(t);
+	tasti_e_base(t);
+	guasto_chiesto_da_un_task();
 
 	if (d.fase != DRV_AVVIO) {
 		aggiorna_ruote(t, 1);
@@ -1194,6 +1316,7 @@ int drv_avvia(const drv_config_t *c)
 	atomic_store(&cmd.uscita_base, 0);
 	atomic_store(&cmd.azzera_guasto, 0);
 	atomic_store(&cmd.suono, NULL);
+	atomic_store(&cmd.task_fault, DRV_FAULT_NONE);
 	atomic_store(&ev_testa, 0);
 	atomic_store(&ev_coda, 0);
 	atomic_init(&d.stop, 0);
@@ -1360,6 +1483,11 @@ void drv_incastro(int si)
 void drv_suono(const char *nome)
 {
 	atomic_store(&cmd.suono, nome);
+}
+
+void drv_segnala_guasto(drv_task_fault_t reason)
+{
+	atomic_store(&cmd.task_fault, (int)reason);   /* read at the next tick */
 }
 
 int drv_azzera_guasto(void)

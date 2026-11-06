@@ -28,6 +28,7 @@ typedef struct {
     double last_cmd_v, last_cmd_omega;  // ultime velocità comandate, servono per la rampa
     int64_t last_cmd_time;              // istante dell'ultimo comando di velocità
     int64_t pass_achieved_time;         // istante in cui è stato raggiunto un punto da attraversare, 0 se non c'è
+    bool is_position_lost;              // true se la mappatura dice che la posizione è persa o non è stata ritrovata
 
 } movement_state_t;
 
@@ -170,7 +171,8 @@ static movement_position_data_t get_cur_pos_data_from_cur_state(const movement_s
     next_mov_pos_data.v = cur_state->v;
     next_mov_pos_data.omega = cur_state->omega;
     
-    next_mov_pos_data.valid = true; // Questa è da modificare per gestire il sollevamento del robot
+    // la posizione non è valida solo quando la mappatura dice che è persa
+    next_mov_pos_data.valid = !cur_state->is_position_lost;
     next_mov_pos_data.num_obj = cur_state->cur_obj_num;
     next_mov_pos_data.obj_achieved = cur_state->obj_achieved;
 
@@ -360,6 +362,9 @@ void job_movement(void *arg) {
         // perché nel frattempo l'odometria è cambiata. Da qui in poi la guida usa solo la posizione sulla mappa
         apply_map_correction(&mov_state, &map_correction);
 
+        // salva se la posizione è persa, servirà quando si pubblica la posizione
+        mov_state.is_position_lost = map_correction.state == MAP_LOST || map_correction.state == MAP_NOT_FOUND;
+
         // Leggi l'obiettivo da raggiungere
         navigation_objective_t cur_obj = read_navigation();
 
@@ -510,10 +515,11 @@ void job_movement(void *arg) {
                 }
 
                 default: {
-                    // Qualcosa è andato storto, per adesso facciamo che si ferma 
-                    // e basta, in futuro deve anche andare in guasto
+                    // Qualcosa è andato storto: tipo di obiettivo sconosciuto. Il robot si ferma e va in guasto
                     next_v = 0;
                     next_omega = 0;
+
+                    drv_segnala_guasto(DRV_FAULT_UNKNOWN_OBJECTIVE);
 
                     break;
                 }

@@ -51,6 +51,34 @@
 #define BASE_CHECK_JOBS 5               // numero di job in cui si controlla se il robot è sulla base all'avvio, corrispondono a circa 1 s
 #define QUAD_CROSSED_MAX_STEP 0.15      // se il robot si sposta di una distanza superiore a questa tra due job, non si considerano le celle in mezzo come attraversate
 
+// Costanti riguardanti la routine di ricerca della posizione attuale del robot dopo il sollevamento
+#define SEARCH_POINT_SPACING        0.15        // distanza minima fra due punti della scansione usati nella ricerca, espressa in m
+#define SEARCH_MAX_RANGE            4.0         // i punti più lontani di così non si usano nella ricerca, espressa in m
+#define SEARCH_MAX_POINTS           128         // numero massimo di punti usati nella ricerca
+#define SEARCH_MIN_POINTS           30          // con meno punti di così la scansione non basta per cercare la posizione
+#define SEARCH_NUM_ANGLES           ((int)(2 * M_PI * SEARCH_MAX_RANGE / FINE_MAP_CELL_SIZE) + 1)  // numero di angoli provati (503): fra due angoli vicini un punto a SEARCH_MAX_RANGE si sposta al massimo di una cella fine
+#define SEARCH_LEVELS               6           // livello più alto della griglia della ricerca: blocchi da 2^6 = 64 celle fini per lato (3,2 m)
+#define SEARCH_MAX_CELLS            400         // lato massimo, in celle fini, della zona in cui si cerca (20 m)
+#define SEARCH_MIN_SCORE_PCT        70          // punteggio minimo per accettare una posizione, in percentuale del massimo (2 per punto).
+#define SEARCH_LOOKUPS_PER_JOB      300000      // numero di letture della griglia della ricerca in un job
+#define SEARCH_BUILD_CELLS_PER_JOB  100000      // celle della griglia della ricerca preparate in un job
+#define SEARCH_STACK_SIZE           128         // blocchi che possono aspettare nella pila per un angolo (al massimo 49 radici più 3 per livello)
+#define SEARCH_MAX_ATTEMPTS         3           // ricerche o conferme fallite dopo un sollevamento prima di arrendersi
+#define SEARCH_REFINE_ANGLE         (0.4 * M_PI / 180)  // la rifinitura prova gli angoli entro questa distanza da quello trovato, espressa in radianti
+#define SEARCH_REFINE_ANGLE_STEP    (0.1 * M_PI / 180)  // passo degli angoli provati dalla rifinitura, espresso in radianti
+#define CONFIRM_DISTANCE            1.0         // strada da percorrere con la posizione che regge, prima di confermarla, espressa in m
+#define CONFIRM_MAX_BAD_SCANS       5           // scansioni di fila sotto SEARCH_MIN_SCORE_PCT che fanno scartare la posizione trovata
+#define CONFIRM_MAX_OMEGA           0.5         // durante la conferma le scansioni fatte ruotando più veloce di così non si controllano (sono deformate), espressa in rad/s
+
+// Ogni cella della griglia della ricerca è un uint16_t con 3 numeri da 3 bit: il primo livello a cui il blocco che parte dalla cella
+// contiene la vicina di un ostacolo, un ostacolo, una cella libera. Salendo di livello il blocco contiene quello del livello prima,
+// quindi basta sapere a che livello le cose cambiano. Il punteggio di un punto al livello h è
+// (h >= livello vicina) + (h >= livello ostacolo): 2 su un ostacolo, 1 accanto, 0 lontano
+#define SEARCH_NEAR_SHIFT           0           // bit 0-2: primo livello con la vicina di un ostacolo (cella occupata o una delle 8 attorno)
+#define SEARCH_OCC_SHIFT            3           // bit 3-5: primo livello con un ostacolo
+#define SEARCH_FREE_SHIFT           6           // bit 6-8: primo livello con una cella libera (dove può stare il centro del robot)
+#define SEARCH_LEVEL_NEVER          7           // il blocco non lo contiene a nessun livello
+
 // canale di scambio del doppio buffer delle zone proibite
 static scambio_t double_buffer;
 // i due buffer
@@ -95,6 +123,21 @@ typedef struct {
 typedef struct { 
     double odom_x, odom_y, map_x, map_y;
 } stuck_history_entry_t;
+
+// Fasi della ricerca della posizione dopo un sollevamento
+typedef enum {
+    SEARCH_WAIT_SCAN,       // aspetta una scansione iniziata dopo il riappoggio
+    SEARCH_BUILD,           // prepara la griglia della ricerca, un pezzo per job
+    SEARCH_TREE,            // branch and bound, un numero fisso di letture per job
+    SEARCH_REFINE,          // rifinisce la posizione trovata, o conta il tentativo fallito
+} search_phase_t;
+
+// Struttura che contiene un possibile blocco di posizioni del centro del robot ancora da guardare
+typedef struct {
+    int16_t x, y;           // coordinate dell'angolo in basso a sinistra del blocco di posizioni
+    uint8_t level;          // livello della griglia di ricerca alla quale si riferisce il blocco
+    int16_t bound;          // limite superiore del punteggio di tutte le posizioni del blocco
+} search_node_t;
 
 // Definizione dello stato interno del task di mappatura
 typedef struct {
@@ -155,6 +198,34 @@ typedef struct {
 
     uint32_t base_check_jobs;       // numero di job in cui è stato controllato se il robot è sulla base
     bool base_seen;                 // indica se durante il controllo il robot è risultato sulla base
+
+    uint32_t last_mission_num;      // numero dell'ultima pulizia vista dalla mappatura
+
+    mapping_map_state state;        // stato della posizione del robot sulla mappa, viene pubblicato insieme alla correzione
+
+    // Ricerca della posizione dopo un sollevamento e conferma della posizione trovata
+    struct {
+        search_phase_t phase;                       // fase della ricerca
+        uint8_t attempts;                           // numero di ricerche o conferme fallite dall'ultimo sollevamento
+        int64_t put_down_t;                         // istante del riappoggio, valgono solo le scansioni del lidar iniziate dopo
+        bool grid_ready;                            // indica se la griglia corrisponde alla mappa
+        int x0, y0;                                 // cella fine corrispondente alla cella (0, 0) della griglia della ricerca
+        int width, height;                          // dimensioni della zona della ricerca, in celle fini
+        int build_level, build_row;                 // a che punto è la preparazione della griglia
+        uint16_t grid[SEARCH_MAX_CELLS * SEARCH_MAX_CELLS];    // griglia della ricerca
+        align_point_t point[SEARCH_MAX_POINTS];     // punti della scansione usati, rispetto al robot
+        int num_points;                             // numero di punti usati
+        double ref_x, ref_y, ref_theta;             // odometria alla fine della scansione usata
+        int angle;                                  // indice dell'angolo che si sta guardando, da 0 a SEARCH_NUM_ANGLES - 1
+        int16_t offset_x[SEARCH_MAX_POINTS], offset_y[SEARCH_MAX_POINTS];  // punti ruotati dell'angolo corrente, in celle fini
+        search_node_t stack[SEARCH_STACK_SIZE];     // blocchi ancora da guardare per l'angolo corrente, il migliore in cima
+        int stack_len;                              // numero di blocchi nella pila
+        int best_score;                             // miglior punteggio trovato finora (all'inizio la soglia meno 1)
+        int best_angle, best_x, best_y;             // posizione col miglior punteggio, best_angle inizializzato a -1
+        double confirm_distance;                    // strada percorsa durante la conferma, con la posizione che regge
+        double confirm_last_x, confirm_last_y;      // odometria all'ultimo controllo della conferma
+        int bad_scans;                              // scansioni di fila sotto soglia durante la conferma
+    } search;
 
 } mapping_state_t;
 
@@ -925,6 +996,25 @@ static int prepare_lidar_points(double ref_x, double ref_y, double ref_theta) {
     return num_points;
 }
 
+// funzione helper che pubblica la correzione: l'ultima stima allineata, l'odometria in quell'istante e lo stato della posizione.
+// se la stima non è ancora inizializzata sono tutti 0, quindi la correzione non sposta niente (posizione sulla mappa = odometria)
+static void publish_correction(bool is_stuck) {
+
+    mapping_correction_t mapping_correction = {
+        .version = ++map_state.correction_version,
+        .odom_x = map_state.last_odom_x,
+        .odom_y = map_state.last_odom_y,
+        .odom_theta = map_state.last_odom_theta,
+        .map_x = map_state.aligned_x,
+        .map_y = map_state.aligned_y,
+        .map_theta = map_state.aligned_theta,
+        .is_stuck = is_stuck,
+        .state = map_state.state,
+    };
+
+    scambio_scrivi(&double_buffer_align, &mapping_correction);
+}
+
 // funzione helper che aggiorna la stima allineata del robot con l'ultima scansione.
 // ref_x, ref_y e ref_theta sono la posizione data dall'odometria alla fine della scansione.
 static void update_aligned_pose(double ref_x, double ref_y, double ref_theta) {
@@ -964,7 +1054,7 @@ static void update_aligned_pose(double ref_x, double ref_y, double ref_theta) {
     map_state.last_odom_theta = ref_theta;
 
     uint8_t idx = map_state.stuck_history_count % STUCK_WINDOW_SCANS;
-    stuck_history_entry_t last_stuck_entry = map_state.stuck_history[idx];      // la scansione di 7 giri fa
+    stuck_history_entry_t last_stuck_entry = map_state.stuck_history[idx];      // la scansione di STUCK_WINDOW_SCANS giri fa
 
     bool is_stuck = false;
 
@@ -984,18 +1074,668 @@ static void update_aligned_pose(double ref_x, double ref_y, double ref_theta) {
     map_state.stuck_history_count++;
 
     // Pubblica la correzione, il task movement la userà per portare la sua odometria nel sistema della mappa
-    mapping_correction_t mapping_correction = {
-        .version = ++map_state.correction_version,
-        .odom_x = map_state.last_odom_x,
-        .odom_y = map_state.last_odom_y,
-        .odom_theta = map_state.last_odom_theta,
-        .map_x = map_state.aligned_x,
-        .map_y = map_state.aligned_y,
-        .map_theta = map_state.aligned_theta,
-        .is_stuck = is_stuck,
-    };
+    publish_correction(is_stuck);
+}
 
-    scambio_scrivi(&double_buffer_align, &mapping_correction);
+// funzione helper che calcola lo stato di una cella di navigazione dalle celle fini, senza guardare gli stati che si
+// conservano (proibita, troppo stretta): bloccata se tutti e 4 i quadranti sono bloccati, libera se abbastanza celle fini
+// sono state osservate, altrimenti sconosciuta
+static mapping_nav_cell_state calc_nav_cell_state(int nav_index, uint8_t cell_mask) {
+
+    if (cell_mask == NAV_CELL_QUAD_MASK) return NAV_CELL_BLOCKED;
+
+    if (map_state.num_observed_fine_cells[nav_index] >= UNKNOWN_CELL_THRESHOLD) return NAV_CELL_FREE;
+
+    return NAV_CELL_UNKNOWN;
+}
+
+// funzione helper che riporta una cella fine con un valore speciale (vuoto o ostacolo basso) a sconosciuta: è l'inverso
+// di set_fine_cell_special_value, che l'aveva contata fra le osservate e fra le occupate
+static void clear_fine_cell_special_value(const uint32_t cell_index) {
+
+    int x_fine = cell_index & 0x3FF;
+    int y_fine = cell_index >> 10;
+    int nav_index = (x_fine >> 2) | ((y_fine >> 2) << 8);
+
+    map_state.fine_grid[cell_index] = 0;
+    map_state.num_observed_fine_cells[nav_index]--;
+    update_occupied_cells(x_fine, y_fine, -1);
+}
+
+// funzione helper che riparte da una posizione nuova dopo un sollevamento: la posizione sulla mappa (map_x, map_y, map_theta)
+// corrisponde all'odometria (odom_x, odom_y, odom_theta)
+static void restart_from_pose(double odom_x, double odom_y, double odom_theta, double map_x, double map_y, double map_theta, mapping_map_state next_state) {
+
+    // la stima allineata è la posizione nuova, e l'ultima odometria è quella in cui la posizione vale
+    // così lo spostamento e la rotazione misurati in aria non contano
+    map_state.aligned_x = map_x;
+    map_state.aligned_y = map_y;
+    map_state.aligned_theta = map_theta;
+    map_state.aligned_valid = true;
+    map_state.last_odom_x = odom_x;
+    map_state.last_odom_y = odom_y;
+    map_state.last_odom_theta = odom_theta;
+
+    // azzera lo storico dell'incastro
+    map_state.stuck_history_count = 0;
+
+    // le celle fra il punto del sollevamento e quello del riappoggio non sono state attraversate
+    map_state.last_mark.is_valid = false;
+
+    // gli eventi dei sensori arrivati mentre il robot era in aria non valgono, salta direttamente all'ultimo
+    drv_contatti_t last_events = {0};
+    drv_contatti(&last_events);
+    map_state.last_event = last_events.ultimo;
+
+    // da normale la mappa ricomincia a cambiare, quindi la griglia della ricerca andrà rifatta
+    if (next_state == MAP_NORMAL) map_state.search.grid_ready = false;
+
+    map_state.state = next_state;
+
+    publish_correction(false);
+}
+
+// Funzione helper che lancia il guasto nel caso in cui la routine di ricerca non trovi la nuova posizione del robot nella mappa
+static void give_up_search(void) {
+
+    map_state.state = MAP_NOT_FOUND;
+
+    publish_correction(false);
+
+    drv_segnala_guasto(DRV_FAULT_POSITION_NOT_FOUND);
+}
+
+// funzione helper che conta un tentativo fallito (ricerca senza risultato o conferma non riuscita): se ne restano,
+// torna a cercare con una scansione nuova, altrimenti si arrende
+static void count_failed_attempt(void) {
+
+    map_state.search.attempts++;
+
+    if (map_state.search.attempts >= SEARCH_MAX_ATTEMPTS) {
+        give_up_search();
+        return;
+    }
+
+    map_state.state = MAP_LOST;
+    map_state.search.phase = SEARCH_WAIT_SCAN;
+    map_state.search.put_down_t = rt_adesso();
+
+    publish_correction(false);
+}
+
+// funzione helper che legge uno dei tre livelli di una cella della griglia della ricerca (shift è uno dei SEARCH_*_SHIFT)
+static inline int get_search_level(uint16_t cell, int shift) {
+    return (cell >> shift) & 7;
+}
+
+// funzione helper che calcola il livello 0 di una cella della griglia della ricerca partendo dalla cella fine (fine_x, fine_y)
+static uint16_t calc_search_cell(int fine_x, int fine_y) {
+
+    int near = SEARCH_LEVEL_NEVER, occupied = SEARCH_LEVEL_NEVER, free = SEARCH_LEVEL_NEVER;
+
+    int8_t score = map_state.fine_grid[fine_y << 10 | fine_x];
+
+    // un ostacolo visto dal lidar
+    if (score >= 1 && score <= FINE_GRID_MAX_SCORE) occupied = 0;
+
+    // una cella libera: il lidar ci è passato attraverso (ad eccezione del vuoto perchè il robot non ci può stare)
+    if (score < 0 && score != VOID_OBSTACLE) free = 0;
+
+    // la vicina di un ostacolo: la cella o una delle 8 attorno è un ostacolo. Serve a tollerare il rumore del lidar
+    for (int dy = -1; dy <= 1; dy++) {
+        for (int dx = -1; dx <= 1; dx++) {
+            int x = fine_x + dx, y = fine_y + dy;
+            if (x < 0 || y < 0 || x >= FINE_MAP_CELL_NUMBER || y >= FINE_MAP_CELL_NUMBER) continue;
+            int8_t near_score = map_state.fine_grid[y << 10 | x];
+            if (near_score >= 1 && near_score <= FINE_GRID_MAX_SCORE) near = 0;
+        }
+    }
+
+    return (uint16_t)(near << SEARCH_NEAR_SHIFT | occupied << SEARCH_OCC_SHIFT | free << SEARCH_FREE_SHIFT);
+}
+
+// funzione helper che sceglie la zona della ricerca: tutte le celle di navigazione già osservate, con una cella fine di margine,
+// al massimo SEARCH_MAX_CELLS per lato attorno all'ultima posizione nota. Restituisce false se la mappa è vuota
+static bool set_search_area(void) {
+
+    int x_min = FINE_MAP_CELL_NUMBER, x_max = -1, y_min = FINE_MAP_CELL_NUMBER, y_max = -1;
+
+    // scorri le celle di navigazione
+    for (int i = 0; i < NAV_MAP_CELL_NUMBER * NAV_MAP_CELL_NUMBER; i++) {
+
+        if (map_state.num_observed_fine_cells[i] == 0) continue;
+
+        int x = (i & 0xFF) * FINE_CELL_IN_NAV_CELL, y = (i >> 8) * FINE_CELL_IN_NAV_CELL;
+
+        if (x < x_min) x_min = x;
+        if (y < y_min) y_min = y;
+        if (x + FINE_CELL_IN_NAV_CELL - 1 > x_max) x_max = x + FINE_CELL_IN_NAV_CELL - 1;
+        if (y + FINE_CELL_IN_NAV_CELL - 1 > y_max) y_max = y + FINE_CELL_IN_NAV_CELL - 1;
+    }
+
+    if (x_max < 0) return false;
+
+    // una cella di margine, senza uscire dalla griglia fine
+    x_min = x_min > 0 ? x_min - 1 : 0;
+    y_min = y_min > 0 ? y_min - 1 : 0;
+    x_max = x_max < FINE_MAP_CELL_NUMBER - 1 ? x_max + 1 : x_max;
+    y_max = y_max < FINE_MAP_CELL_NUMBER - 1 ? y_max + 1 : y_max;
+
+    // se la zona è troppo grande, tieni il pezzo attorno all'ultima posizione nota
+    uint32_t last_cell = coord_to_fine_index(map_state.aligned_x, map_state.aligned_y);
+    int last_x = last_cell & 0x3FF, last_y = last_cell >> 10;
+
+    if (x_max - x_min + 1 > SEARCH_MAX_CELLS) {
+        x_min = last_x - SEARCH_MAX_CELLS / 2;
+        if (x_min < 0) x_min = 0;
+        if (x_min > FINE_MAP_CELL_NUMBER - SEARCH_MAX_CELLS) x_min = FINE_MAP_CELL_NUMBER - SEARCH_MAX_CELLS;
+        x_max = x_min + SEARCH_MAX_CELLS - 1;
+    }
+    if (y_max - y_min + 1 > SEARCH_MAX_CELLS) {
+        y_min = last_y - SEARCH_MAX_CELLS / 2;
+        if (y_min < 0) y_min = 0;
+        if (y_min > FINE_MAP_CELL_NUMBER - SEARCH_MAX_CELLS) y_min = FINE_MAP_CELL_NUMBER - SEARCH_MAX_CELLS;
+        y_max = y_min + SEARCH_MAX_CELLS - 1;
+    }
+
+    map_state.search.x0 = x_min;
+    map_state.search.y0 = y_min;
+    map_state.search.width = x_max - x_min + 1;
+    map_state.search.height = y_max - y_min + 1;
+
+    return true;
+}
+
+// FUNZIONE 1 della ricerca: prepara la griglia della ricerca, al massimo SEARCH_BUILD_CELLS_PER_JOB celle per job.
+// Restituisce true quando ha finito. Il livello 0 viene dalla griglia fine; il livello h di una cella si ricava dal livello h - 1
+// delle 4 celle (x, y), (x + s, y), (x, y + s), (x + s, y + s) con s = 2^(h-1), perché i loro blocchi messi insieme formano il
+// blocco da 2^h. Si può fare sulla stessa griglia: in questo passaggio si scrive solo il valore h, che non cambia la lettura "< h"
+static bool build_search_grid(void) {
+
+    int processed_cells = 0;
+
+    while (map_state.search.build_level <= SEARCH_LEVELS) {
+
+        int level = map_state.search.build_level;
+        int step = 1 << (level > 0 ? level - 1 : 0);
+
+        for (; map_state.search.build_row < map_state.search.height; map_state.search.build_row++) {
+
+            // finito il budget di questo job, si continua dalla stessa riga al prossimo
+            if (processed_cells >= SEARCH_BUILD_CELLS_PER_JOB) return false;
+
+            int y = map_state.search.build_row;
+
+            for (int x = 0; x < map_state.search.width; x++) {
+
+                uint16_t *cell = &map_state.search.grid[y * map_state.search.width + x];
+
+                if (level == 0) {
+                    *cell = calc_search_cell(map_state.search.x0 + x, map_state.search.y0 + y);
+                    continue;
+                }
+
+                // le 3 celle che con questa formano il blocco del livello h (quelle fuori dalla zona non contano)
+                int near_x[3] = { x + step, x, x + step };
+                int near_y[3] = { y, y + step, y + step };
+
+                const int shifts[3] = { SEARCH_NEAR_SHIFT, SEARCH_OCC_SHIFT, SEARCH_FREE_SHIFT };
+
+                for (int k = 0; k < 3; k++) {
+
+                    // già vero a un livello più basso: resta così
+                    if (get_search_level(*cell, shifts[k]) < level) continue;
+
+                    for (int j = 0; j < 3; j++) {
+
+                        if (near_x[j] >= map_state.search.width || near_y[j] >= map_state.search.height) continue;
+
+                        uint16_t near_cell = map_state.search.grid[near_y[j] * map_state.search.width + near_x[j]];
+
+                        // se una delle 3 lo contiene al livello h - 1, il blocco del livello h lo contiene
+                        if (get_search_level(near_cell, shifts[k]) < level) {
+                            *cell = (uint16_t)((*cell & ~(7u << shifts[k])) | (unsigned)level << shifts[k]);
+                            break;
+                        }
+                    }
+                }
+            }
+
+            processed_cells += map_state.search.width;
+        }
+
+        // livello finito, passa al prossimo
+        map_state.search.build_level++;
+        map_state.search.build_row = 0;
+    }
+
+    return true;
+}
+
+// FUNZIONE 2 della ricerca: sceglie i punti della scansione da usare fra i num_lidar_points di map_state.lidar_point (già
+// rispetto al robot): solo quelli entro SEARCH_MAX_RANGE, e uno solo ogni SEARCH_POINT_SPACING (i punti sono in ordine di angolo,
+// quindi basta la distanza dall'ultimo tenuto). Meno punti vuol dire ricerca più veloce, con la stessa precisione
+static void prepare_search_points(int num_lidar_points) {
+
+    map_state.search.num_points = 0;
+
+    for (int i = 0; i < num_lidar_points && map_state.search.num_points < SEARCH_MAX_POINTS; i++) {
+
+        align_point_t p = map_state.lidar_point[i];
+
+        if (hypot(p.x, p.y) > SEARCH_MAX_RANGE) continue;
+
+        if (map_state.search.num_points > 0) {
+            align_point_t last = map_state.search.point[map_state.search.num_points - 1];
+            if (hypot(p.x - last.x, p.y - last.y) < SEARCH_POINT_SPACING) continue;
+        }
+
+        map_state.search.point[map_state.search.num_points++] = p;
+    }
+}
+
+// funzione helper che calcola il limite superiore del punteggio di un blocco di posizioni (x, y, level) per l'angolo corrente:
+// ogni punto legge, al livello del blocco, la cella in cui cade quando il centro del robot è nella cella (x, y). Il valore di
+// quella cella al livello h è il massimo su tutto il blocco che parte da lì, cioè su tutte le posizioni del blocco del robot
+static int calc_search_bound(int x, int y, int level) {
+
+    int size = 1 << level;
+    int bound = 0;
+
+    for (int i = 0; i < map_state.search.num_points; i++) {
+
+        int cell_x = x + map_state.search.offset_x[i];
+        int cell_y = y + map_state.search.offset_y[i];
+
+        // se il blocco del punto inizia prima della zona ma ci entra, il suo pezzo dentro la zona sta nel blocco della cella 0
+        if (cell_x < 0) {
+            if (cell_x + size <= 0) continue;
+            cell_x = 0;
+        }
+        if (cell_y < 0) {
+            if (cell_y + size <= 0) continue;
+            cell_y = 0;
+        }
+
+        if (cell_x >= map_state.search.width || cell_y >= map_state.search.height) continue;
+
+        uint16_t cell = map_state.search.grid[cell_y * map_state.search.width + cell_x];
+
+        bound += (level >= get_search_level(cell, SEARCH_NEAR_SHIFT)) + (level >= get_search_level(cell, SEARCH_OCC_SHIFT));
+    }
+
+    return bound;
+}
+
+// funzione helper che mette nella pila i blocchi dati, il migliore in cima. Scarta quelli che non possono battere il migliore
+// e quelli senza nemmeno una cella libera (il centro del robot non ci può stare). Restituisce le letture fatte
+static int push_search_nodes(const int *x, const int *y, int count, int level) {
+
+    search_node_t nodes[64];
+    int num_nodes = 0;
+
+    for (int i = 0; i < count; i++) {
+
+        if (x[i] >= map_state.search.width || y[i] >= map_state.search.height) continue;
+
+        if (get_search_level(map_state.search.grid[y[i] * map_state.search.width + x[i]], SEARCH_FREE_SHIFT) > level) continue;
+
+        int bound = calc_search_bound(x[i], y[i], level);
+
+        if (bound <= map_state.search.best_score) continue;
+
+        // ordinamento per inserimento, dal limite più alto al più basso (sono al massimo 64)
+        int j = num_nodes++;
+        while (j > 0 && nodes[j - 1].bound < bound) {
+            nodes[j] = nodes[j - 1];
+            j--;
+        }
+        nodes[j] = (search_node_t){ .x = (int16_t)x[i], .y = (int16_t)y[i], .level = (uint8_t)level, .bound = (int16_t)bound };
+    }
+
+    // si mettono dal peggiore al migliore, così il migliore resta in cima. La pila non si può riempire (vedi SEARCH_STACK_SIZE)
+    for (int i = num_nodes - 1; i >= 0 && map_state.search.stack_len < SEARCH_STACK_SIZE; i--) {
+        map_state.search.stack[map_state.search.stack_len++] = nodes[i];
+    }
+
+    return count * map_state.search.num_points;
+}
+
+// funzione helper che passa all'angolo successivo: ruota i punti e mette nella pila i blocchi più grandi (le radici)
+static int start_search_angle(void) {
+
+    double theta = map_state.search.angle * 2 * M_PI / SEARCH_NUM_ANGLES;
+    double cos_theta = cos(theta), sin_theta = sin(theta);
+
+    // con il centro del robot al centro di una cella, un punto cade nella cella spostata di round(coordinata / lato della cella)
+    for (int i = 0; i < map_state.search.num_points; i++) {
+        double x = map_state.search.point[i].x * cos_theta - map_state.search.point[i].y * sin_theta;
+        double y = map_state.search.point[i].x * sin_theta + map_state.search.point[i].y * cos_theta;
+        map_state.search.offset_x[i] = (int16_t)floor(x / FINE_MAP_CELL_SIZE + 0.5);
+        map_state.search.offset_y[i] = (int16_t)floor(y / FINE_MAP_CELL_SIZE + 0.5);
+    }
+
+    int root_x[64], root_y[64], num_roots = 0;
+    int size = 1 << SEARCH_LEVELS;
+
+    for (int y = 0; y < map_state.search.height && num_roots < 64; y += size) {
+        for (int x = 0; x < map_state.search.width && num_roots < 64; x += size) {
+            root_x[num_roots] = x;
+            root_y[num_roots] = y;
+            num_roots++;
+        }
+    }
+
+    return push_search_nodes(root_x, root_y, num_roots, SEARCH_LEVELS);
+}
+
+// FUNZIONE 3 della ricerca: ramificazione e potatura, un angolo alla volta, al massimo SEARCH_LOOKUPS_PER_JOB letture per job.
+// Restituisce true quando ha guardato tutti gli angoli. Un blocco si divide in 4 solo se il suo limite supera il miglior punteggio
+// trovato: così trova esattamente la posizione migliore fra tutte quelle provate, come se le guardasse tutte
+static bool search_step(void) {
+
+    int lookups = 0;
+
+    while (lookups < SEARCH_LOOKUPS_PER_JOB) {
+
+        // finito l'angolo corrente, passa al prossimo
+        if (map_state.search.stack_len == 0) {
+
+            map_state.search.angle++;
+
+            if (map_state.search.angle >= SEARCH_NUM_ANGLES) return true;
+
+            lookups += start_search_angle();
+            continue;
+        }
+
+        search_node_t node = map_state.search.stack[--map_state.search.stack_len];
+
+        // nel frattempo si è trovato di meglio
+        if (node.bound <= map_state.search.best_score) continue;
+
+        // una posizione sola: il limite è il suo punteggio, ed è il migliore finora
+        if (node.level == 0) {
+            map_state.search.best_score = node.bound;
+            map_state.search.best_angle = map_state.search.angle;
+            map_state.search.best_x = node.x;
+            map_state.search.best_y = node.y;
+            continue;
+        }
+
+        // dividi il blocco nei suoi 4 quarti
+        int half = 1 << (node.level - 1);
+        int child_x[4] = { node.x, node.x + half, node.x, node.x + half };
+        int child_y[4] = { node.y, node.y, node.y + half, node.y + half };
+
+        lookups += push_search_nodes(child_x, child_y, 4, node.level - 1);
+    }
+
+    return false;
+}
+
+// funzione helper che somma i punteggi della griglia fine (interpolati, come l'allineamento) nei punti della ricerca,
+// con il robot in (x, y, theta)
+static double calc_bilinear_score(double x, double y, double theta) {
+
+    double cos_theta = cos(theta), sin_theta = sin(theta), total = 0;
+
+    for (int i = 0; i < map_state.search.num_points; i++) {
+        double score, grad_x, grad_y;
+        double px = x + map_state.search.point[i].x * cos_theta - map_state.search.point[i].y * sin_theta;
+        double py = y + map_state.search.point[i].x * sin_theta + map_state.search.point[i].y * cos_theta;
+        read_fine_grid_bilinear(px, py, &score, &grad_x, &grad_y);
+        total += score;
+    }
+
+    return total;
+}
+
+// FUNZIONE 4 della ricerca: rifinisce la posizione trovata, che ha l'errore di mezza cella e mezzo passo d'angolo.
+// Per ogni angolo vicino fa i passi dell'allineamento su x e y, e tiene la posizione col punteggio più alto
+static void refine_search_result(double *x, double *y, double *theta) {
+
+    double best_score = -1, best_x = *x, best_y = *y, best_theta = *theta;
+
+    for (double delta = -SEARCH_REFINE_ANGLE; delta <= SEARCH_REFINE_ANGLE + 1e-9; delta += SEARCH_REFINE_ANGLE_STEP) {
+
+        double cur_x = *x, cur_y = *y, cur_theta = *theta + delta;
+
+        for (int step = 0; step < ALIGN_STEPS; step++) {
+            align_scan_step(map_state.search.point, map_state.search.num_points, &cur_x, &cur_y, cur_theta);
+        }
+
+        double score = calc_bilinear_score(cur_x, cur_y, cur_theta);
+
+        if (score > best_score) {
+            best_score = score;
+            best_x = cur_x;
+            best_y = cur_y;
+            best_theta = cur_theta;
+        }
+    }
+
+    *x = best_x;
+    *y = best_y;
+    *theta = wrap_angle(best_theta);
+}
+
+// funzione helper che calcola il punteggio della ricerca (2 su un ostacolo, 1 accanto) con il robot in (x, y, theta) sulla mappa.
+// Serve alla conferma: è lo stesso punteggio con cui la ricerca ha scelto la posizione
+static int calc_search_score(double x, double y, double theta) {
+
+    double cos_theta = cos(theta), sin_theta = sin(theta);
+    int score = 0;
+
+    for (int i = 0; i < map_state.search.num_points; i++) {
+
+        double px = x + map_state.search.point[i].x * cos_theta - map_state.search.point[i].y * sin_theta;
+        double py = y + map_state.search.point[i].x * sin_theta + map_state.search.point[i].y * cos_theta;
+
+        uint32_t index = coord_to_fine_index(px, py);
+        int cell_x = (int)(index & 0x3FF) - map_state.search.x0;
+        int cell_y = (int)(index >> 10) - map_state.search.y0;
+
+        if (cell_x < 0 || cell_y < 0 || cell_x >= map_state.search.width || cell_y >= map_state.search.height) continue;
+
+        uint16_t cell = map_state.search.grid[cell_y * map_state.search.width + cell_x];
+
+        score += (get_search_level(cell, SEARCH_NEAR_SHIFT) == 0) + (get_search_level(cell, SEARCH_OCC_SHIFT) == 0);
+    }
+
+    return score;
+}
+
+// funzione helper che dice se un punteggio della ricerca supera la soglia SEARCH_MIN_SCORE_PCT (il massimo è 2 per punto)
+static bool is_search_score_enough(int score) {
+    return map_state.search.num_points >= SEARCH_MIN_POINTS && score * 100 >= SEARCH_MIN_SCORE_PCT * 2 * map_state.search.num_points;
+}
+
+// funzione che cerca la posizione del robot riappoggiato (stato MAP_LOST), una fase alla volta, un pezzo per job
+static void relocate(const movement_position_data_t *cur_pos, const drv_stato_t *cur_drv_state, bool is_same_scan) {
+
+    switch (map_state.search.phase) {
+
+        case SEARCH_WAIT_SCAN: {
+
+            // riappoggiato sulla base: è lì per forza, e la base è l'origine della mappa
+            if (read_started_on_base() && cur_drv_state->sulla_base) {
+                restart_from_pose(cur_pos->odom_x, cur_pos->odom_y, cur_pos->odom_theta, 0, 0, 0, MAP_NORMAL);
+                return;
+            }
+
+            // mappa ancora vuota: non c'è niente da ritrovare, si riparte da dove si è
+            if (!map_state.aligned_valid) {
+                restart_from_pose(cur_pos->odom_x, cur_pos->odom_y, cur_pos->odom_theta, cur_pos->odom_x, cur_pos->odom_y, cur_pos->odom_theta, MAP_NORMAL);
+                return;
+            }
+
+            // serve una scansione nuova, iniziata dopo il riappoggio (da sollevato il lidar è spento)
+            if (is_same_scan || map_state.last_scan.t_inizio_ns <= map_state.search.put_down_t) return;
+
+            // la posizione dell'odometria alla fine della scansione, e i punti rispetto a quella posizione
+            read_odom_history(&map_state.odom_history);
+            pose_at_time(map_state.last_scan.t_fine_ns, &map_state.search.ref_x, &map_state.search.ref_y, &map_state.search.ref_theta);
+            prepare_search_points(prepare_lidar_points(map_state.search.ref_x, map_state.search.ref_y, map_state.search.ref_theta));
+
+            // pochi punti (per esempio il robot è contro un mobile): aspetta la prossima scansione
+            if (map_state.search.num_points < SEARCH_MIN_POINTS) return;
+
+            // prepara la ricerca: si parte dall'angolo -1, così il primo passo apre l'angolo 0
+            map_state.search.angle = -1;
+            map_state.search.stack_len = 0;
+            map_state.search.best_score = (SEARCH_MIN_SCORE_PCT * 2 * map_state.search.num_points + 99) / 100 - 1;
+            map_state.search.best_angle = -1;
+
+            // la griglia si rifà solo se la mappa è cambiata dall'ultima volta
+            if (map_state.search.grid_ready) {
+                map_state.search.phase = SEARCH_TREE;
+                return;
+            }
+
+            if (!set_search_area()) {
+                restart_from_pose(cur_pos->odom_x, cur_pos->odom_y, cur_pos->odom_theta, cur_pos->odom_x, cur_pos->odom_y, cur_pos->odom_theta, MAP_NORMAL);
+                return;
+            }
+
+            map_state.search.build_level = 0;
+            map_state.search.build_row = 0;
+            map_state.search.phase = SEARCH_BUILD;
+            break;
+        }
+        case SEARCH_BUILD: {
+
+            if (build_search_grid()) {
+                map_state.search.grid_ready = true;
+                map_state.search.phase = SEARCH_TREE;
+            }
+            break;
+        }
+        case SEARCH_TREE: {
+
+            if (search_step()) map_state.search.phase = SEARCH_REFINE;
+            break;
+        }
+        case SEARCH_REFINE: {
+
+            // nessuna posizione sopra la soglia
+            if (map_state.search.best_angle < 0) {
+                count_failed_attempt();
+                break;
+            }
+
+            // la posizione trovata: il centro della cella e l'angolo provato
+            double x = (map_state.search.x0 + map_state.search.best_x - FINE_MAP_ORIGIN + 0.5) * FINE_MAP_CELL_SIZE;
+            double y = (map_state.search.y0 + map_state.search.best_y - FINE_MAP_ORIGIN + 0.5) * FINE_MAP_CELL_SIZE;
+            double theta = wrap_angle(map_state.search.best_angle * 2 * M_PI / SEARCH_NUM_ANGLES);
+
+            refine_search_result(&x, &y, &theta);
+
+            // il robot riprende a lavorare, ma finché la posizione non è confermata la mappa non si scrive
+            map_state.search.confirm_distance = 0;
+            map_state.search.confirm_last_x = map_state.search.ref_x;
+            map_state.search.confirm_last_y = map_state.search.ref_y;
+            map_state.search.bad_scans = 0;
+
+            restart_from_pose(map_state.search.ref_x, map_state.search.ref_y, map_state.search.ref_theta, x, y, theta, MAP_UNCONFIRMED);
+            break;
+        }
+    }
+}
+
+// funzione che conferma la posizione trovata dalla ricerca (stato MAP_UNCONFIRMED): a ogni scansione allinea come sempre e
+// controlla che la scansione regga sulla mappa. Se regge per CONFIRM_DISTANCE di strada la posizione è confermata,
+// se non regge per CONFIRM_MAX_BAD_SCANS scansioni di fila è sbagliata. Non scrive niente sulla mappa
+static void confirm_position(const movement_position_data_t *cur_pos, bool is_same_scan) {
+
+    // stesse condizioni della mappatura normale per usare una scansione
+    if (is_same_scan || fabs(cur_pos->omega) >= ROTATION_SPEED_MAX_THRESHOLD) return;
+
+    // allinea come sempre (pubblica anche la correzione)
+    double ref_x, ref_y, ref_theta;
+    pose_at_time(map_state.last_scan.t_fine_ns, &ref_x, &ref_y, &ref_theta);
+    update_aligned_pose(ref_x, ref_y, ref_theta);
+
+    // controlla la scansione con il punteggio della ricerca, nella posizione appena allineata. Se il robot ruota veloce la
+    // scansione è deformata e non si controlla (l'allineamento sopra invece si fa comunque)
+    if (fabs(cur_pos->omega) > CONFIRM_MAX_OMEGA) return;
+
+    prepare_search_points(prepare_lidar_points(ref_x, ref_y, ref_theta));
+
+    if (is_search_score_enough(calc_search_score(map_state.aligned_x, map_state.aligned_y, map_state.aligned_theta))) map_state.search.bad_scans = 0;
+    else map_state.search.bad_scans++;
+
+    // la posizione non regge: era sbagliata
+    if (map_state.search.bad_scans >= CONFIRM_MAX_BAD_SCANS) {
+        count_failed_attempt();
+        return;
+    }
+
+    // somma la strada fatta dall'ultimo controllo
+    map_state.search.confirm_distance += hypot(ref_x - map_state.search.confirm_last_x, ref_y - map_state.search.confirm_last_y);
+    map_state.search.confirm_last_x = ref_x;
+    map_state.search.confirm_last_y = ref_y;
+
+    // ha retto per tutta la strada: posizione confermata, da qui si torna a scrivere la mappa
+    if (map_state.search.confirm_distance >= CONFIRM_DISTANCE) {
+        restart_from_pose(map_state.last_odom_x, map_state.last_odom_y, map_state.last_odom_theta,
+                          map_state.aligned_x, map_state.aligned_y, map_state.aligned_theta, MAP_NORMAL);
+    }
+}
+
+// funzione che, all'inizio di una nuova pulizia nella stessa accensione, azzera quello che durante una pulizia non si
+// aggiorna più (le condizioni della stanza potrebbero essere cambiate): celle troppo strette, quadranti attraversati,
+// celle del vuoto e degli ostacoli bassi. Ostacoli e celle libere restano: il lidar li aggiorna comunque.
+// Lavora solo sulla zona conosciuta, la stessa della ricerca della posizione
+static void reset_session_data(void) {
+
+    // le celle chiuse la navigazione le ricomincia a contare da zero
+    map_state.last_closed_num = 0;
+    map_state.last_mark.is_valid = false;
+
+    // la mappa cambia: la griglia della ricerca andrà rifatta
+    map_state.search.grid_ready = false;
+
+    if (!set_search_area()) return;
+
+    // celle fini del vuoto e degli ostacoli bassi
+    for (int y = map_state.search.y0; y < map_state.search.y0 + map_state.search.height; y++) {
+        for (int x = map_state.search.x0; x < map_state.search.x0 + map_state.search.width; x++) {
+            int8_t score = map_state.fine_grid[y << 10 | x];
+            if (score == VOID_OBSTACLE || score == LOW_OBSTACLE) clear_fine_cell_special_value(y << 10 | x);
+        }
+    }
+
+    // celle di navigazione della zona (più una di margine per l'ingrossamento degli ostacoli)
+    int nav_x_min = map_state.search.x0 / FINE_CELL_IN_NAV_CELL - 1, nav_x_max = (map_state.search.x0 + map_state.search.width) / FINE_CELL_IN_NAV_CELL + 1;
+    int nav_y_min = map_state.search.y0 / FINE_CELL_IN_NAV_CELL - 1, nav_y_max = (map_state.search.y0 + map_state.search.height) / FINE_CELL_IN_NAV_CELL + 1;
+    if (nav_x_min < 1) nav_x_min = 1;
+    if (nav_y_min < 1) nav_y_min = 1;
+    if (nav_x_max > NAV_MAP_CELL_NUMBER - 2) nav_x_max = NAV_MAP_CELL_NUMBER - 2;
+    if (nav_y_max > NAV_MAP_CELL_NUMBER - 2) nav_y_max = NAV_MAP_CELL_NUMBER - 2;
+
+    pthread_mutex_lock(&navigation_map_data.mutex);
+
+    for (int nav_y = nav_y_min; nav_y <= nav_y_max; nav_y++) {
+        for (int nav_x = nav_x_min; nav_x <= nav_x_max; nav_x++) {
+
+            int nav_index = nav_y << 8 | nav_x;
+
+            // togli il segno di quadrante attraversato
+            for (int quad = 0; quad < 4; quad++) map_state.num_occupied_fine_cells[quad][nav_index] &= ~QUAD_CROSSED_FLAG;
+
+            // ricalcola quadranti e stato: la proibita resta, la troppo stretta torna normale
+            uint8_t cell_mask = calc_nav_cell_bitmask(nav_index);
+            uint8_t cur_state = get_nav_cell_state(navigation_map_data.navigation_grid[nav_index]);
+            uint8_t next_state = cur_state == NAV_CELL_FORBIDDEN ? NAV_CELL_FORBIDDEN : calc_nav_cell_state(nav_index, cell_mask);
+
+            navigation_map_data.navigation_grid[nav_index] = next_state | cell_mask;
+        }
+    }
+
+    navigation_map_data.version_number++;
+
+    pthread_mutex_unlock(&navigation_map_data.mutex);
 }
 
 // funzione helper che serve alla navigazione per rilevare se una cella di navigazione contiene al suo interno almeno una 
@@ -1095,7 +1835,6 @@ void job_mapping(void *arg) {
     
     (void)arg;
 
-
     // Leggi l'ultiima scansione del lidar
     uint32_t cur_scan_num = drv_giro(&map_state.last_scan);
 
@@ -1108,14 +1847,65 @@ void job_mapping(void *arg) {
     // Leggi la posizione attuale del robot, dal task movement
     movement_position_data_t cur_pos = read_movement();
 
-    // Se la posizione attuale non è valida (il robot è sollevato), esci
-    if (!cur_pos.valid) return;
+    // Leggi lo stato del driver, serve a sapere se il robot è sollevato
+    drv_stato_t cur_drv_state = {0};
+    drv_stato(&cur_drv_state);
+
+    // se il robot è sollevato la sua posizione è persa: pubblicalo una volta sola ed esci,
+    // da sollevato non si scrive niente sulla mappa
+    if (cur_drv_state.sollevato) {
+        if (map_state.state != MAP_LOST) {
+            map_state.state = MAP_LOST;
+            map_state.search.attempts = 0;
+            publish_correction(false);
+        }
+
+        // a ogni sollevamento la ricerca ricomincia. L'istante si aggiorna finché il robot è in aria,
+        // così l'ultimo valore è quello del riappoggio
+        map_state.search.phase = SEARCH_WAIT_SCAN;
+        map_state.search.put_down_t = rt_adesso();
+        return;
+    }
+
+    // se il robot è stato riappoggiato, cerca la sua posizione
+    if (map_state.state == MAP_LOST) {
+        relocate(&cur_pos, &cur_drv_state, is_same_scan);
+        return;
+    }
+
+    // posizione non ritrovata: il robot è in guasto e la mappa non si tocca. Quando il guasto viene azzerato (tasto premuto
+    // o robot rimesso sulla base) si ricomincia a cercare da capo, e sulla base la posizione si ritrova subito
+    if (map_state.state == MAP_NOT_FOUND) {
+        if (cur_drv_state.fase != DRV_GUASTO) {
+            map_state.state = MAP_LOST;
+            map_state.search.attempts = 0;
+            map_state.search.phase = SEARCH_WAIT_SCAN;
+            map_state.search.put_down_t = rt_adesso();
+            publish_correction(false);
+        }
+        return;
+    }
 
     // Controlla se il robot è partito dalla base di ricarica
     check_start_on_base();
 
     // Leggi lo storico delle pose dell'odometria: serve a sapere dov'era il robot quando è stato misurato ogni punto
     read_odom_history(&map_state.odom_history);
+
+    // posizione trovata dalla ricerca ma non ancora confermata: allinea e controlla, senza scrivere sulla mappa
+    if (map_state.state == MAP_UNCONFIRMED) {
+        confirm_position(&cur_pos, is_same_scan);
+        return;
+    }
+
+    // se la navigazione ha fatto partire una nuova pulizia, azzera quello che in una pulizia non si aggiorna più
+    {
+        navigation_closed_cells_t closed_cells = read_closed_cells();
+        if (closed_cells.mission_num != map_state.last_mission_num) {
+            map_state.last_mission_num = closed_cells.mission_num;
+            reset_session_data();
+        }
+    }
 
     // Applica gli eventi speciali (sensori di caduta, incastro e bumper anteriore) sulla mappa
     bool has_applied_events = apply_queued_events();
@@ -1278,12 +2068,8 @@ void job_mapping(void *arg) {
 
             // Se la cella è proibita o troppo stretta, next_state è lo stato attuale
             if (cur_cell_state == NAV_CELL_FORBIDDEN || cur_cell_state == NAV_CELL_TOO_NARROW) next_state = cur_cell_state;
-            // Se la cella ha la bitmask tutta a 1, allora next_state è NAV_CELL_BLOCKED
-            else if (cur_cell_mask == NAV_CELL_QUAD_MASK) next_state = NAV_CELL_BLOCKED;
-            // altrimenti, se almeno UNKNOWN_CELL_THRESHOLD sono state osservate, segnala come libera
-            else if (map_state.num_observed_fine_cells[cur_nav_index] >= UNKNOWN_CELL_THRESHOLD) next_state = NAV_CELL_FREE;
-            // altrimenti segnala come sconosciuta
-            else next_state = NAV_CELL_UNKNOWN;
+            // altrimenti bloccata, libera o sconosciuta, dalle celle fini
+            else next_state = calc_nav_cell_state(cur_nav_index, cur_cell_mask);
             
 
             // Se il prossimo stato è diverso da quello attuale, o se la bitmask

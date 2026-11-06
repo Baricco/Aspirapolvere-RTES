@@ -10,6 +10,7 @@
  *     led N              modo del LED (0x8d)
  *     lidar 0|1 [G]      spegne / accende il lidar (G giri/s, default 6)
  *     esci_base 0|1      permette di muoversi piano anche sulla base
+ *     guasto N           fault asked by a task, N = drv_task_fault_t (drv_segnala_guasto)
  *     azzera             prova a uscire dallo stato di guasto
  *     suono NOME         es. suono sound_beep_beep
  *     blocca             il task di prova (--task-prova) si blocca: il watchdog deve mandare il driver in guasto
@@ -113,6 +114,8 @@ static int esegui(const char *riga)
 		drv_aggancia(i);
 	else if (sscanf(riga, "esci_base %d", &i) == 1)
 		drv_esci_dalla_base(i);
+	else if (sscanf(riga, "guasto %d", &i) == 1)
+		drv_segnala_guasto((drv_task_fault_t)i);
 	else if (!strncmp(riga, "azzera", 6))
 		printf("azzera guasto: %s\n", drv_azzera_guasto() ? "NO, la causa c'è ancora" : "ok");
 	else if (sscanf(riga, "suono %99s", nome) == 1) {
@@ -206,13 +209,14 @@ static void riga_stato(double t, const drv_stato_t *st, const drv_sensori_t *s, 
 	}
 	printf("%7.1f %-6s %5.2f V %3d%%%s%s | bump %d%d vuoto %x | sens %2.0f Hz | v %+.2f w %+.2f lim %s"
 	       " (misurate v %+.3f w %+.3f, imbardata %+.1f°) | cassetto %d ir %x/%x ventola %d%s | spazz %d/%d led %d |"
-	       " lidar %s %.2f g/s p%d giri %u | tick+%.0f lav %.0f us",
+	       " lidar %s %.2f g/s p%d giri %u | tick+%.0f lav %.0f us | tasti %u/%u",
 	       t, nome_fase(st->fase), st->volt, st->percentuale, st->in_carica ? " carica" : "",
 	       st->sulla_base ? " BASE" : "", s->s.bumper_sx, s->s.bumper_dx,
 	       s->s.cliff[0] | s->s.cliff[1] << 1 | s->s.cliff[2] << 2 | s->s.cliff[3] << 3, st->sensori_hz, st->v, st->w,
 	       lim, s->s.vel_sx / GD32_SCALA_V, s->s.vel_dx / GD32_SCALA_W, s->s.angolo[0] / 100.0,
 	       s->s.cassetto, s->s.ir_base_a, s->s.ir_base_b, s->s.byte69_x100, asp, st->spazzola_laterale, st->spazzola_centrale, st->led, st->lidar_acceso ? (st->lidar_ok ? "ok" : "MUTO") : "off",
-	       st->lidar_giri_s, st->lidar_potenza, st->lidar_giri, st->tick_ritardo_max_ns / 1e3, st->lavoro_max_ns / 1e3);
+	       st->lidar_giri_s, st->lidar_potenza, st->lidar_giri, st->tick_ritardo_max_ns / 1e3, st->lavoro_max_ns / 1e3,
+	       st->pressioni_accensione, st->pressioni_casa);
 	if (task)
 		printf(" | task: sens %llu job lat %.0f esec %.0f us, persi %llu; lidar %llu job, giro %u da %u punti",
 		       (unsigned long long)t_sensori.stats.job, t_sensori.stats.latenza_max_ns / 1e3,

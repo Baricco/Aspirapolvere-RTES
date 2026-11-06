@@ -59,9 +59,17 @@ typedef enum {
     NAV_CELL_UNKNOWN,                    // Cella Sconosciuta: la cella non è ancora stata esplorata
     NAV_CELL_FREE,                       // Cella Libera: la cella è vuota e percorribile
     NAV_CELL_BLOCKED,                    // Cella Bloccata: la cella è coperta da un ostacolo
-    NAV_CELL_FORBIDDEN,                   // Cella Proibita: la cella è in una Zona Proibita, non è percorribile
+    NAV_CELL_FORBIDDEN,                  // Cella Proibita: la cella è in una Zona Proibita, non è percorribile
     NAV_CELL_TOO_NARROW,                 // Cella troppo Stretta: il passaggio è troppo stretto, nonostante questa cella sia libera, il robot non può comunque passare
 } mapping_nav_cell_state;
+
+// Enum degli stati della mappa 
+typedef enum {
+    MAP_NORMAL,         // Normale: il robot ha una posizione consistente con le proprie letture dei sensori all'interno della mappa
+    MAP_LOST,           // Perso: il robot si è perso a causa di un sollevamento e non sa in che punto della mappa sia stato riappoggiato, ricalcola la posizione con la ricerca globale all'interno della mappa 
+    MAP_UNCONFIRMED,    // Incerta: il robot ha una posizione "candidata" ma non è certo che sia corretta, in questo stato il robot deve accertarsi che la posizione candidata sia corretta
+    MAP_NOT_FOUND,      // Not Found: il robot non è riuscito a capire la propria posizione con la ricerca globale, il robot va in guasto
+} mapping_map_state;
 
 // Funzione helper per calcolare l'indice della cella nella navigation map partendo dalle coordinate espresse in metri rispetto all'origine
 static inline uint16_t coord_to_nav_index(double x, double y) { 
@@ -175,6 +183,8 @@ typedef struct {
     double map_x, map_y, map_theta;         // stima allineata in quell'istante
 
     bool is_stuck;                  // indica se il robot è incastrato, va a true se le ruote girano liberamente ma il robot è fermo
+
+    mapping_map_state state;        // stato della posizione del robot sulla mappa
 
 } mapping_correction_t;
 

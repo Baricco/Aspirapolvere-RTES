@@ -2,6 +2,9 @@
 # Uso (dalla cartella del progetto): python3 tools/prove-nav/prova.py [--pulizia] [--missione] [--dalla-base] stanza.txt seme durata_s [x y angolo]
 # --dalla-base: il robot parte agganciato alla base della stanza. --missione: va avanti fino al riposo o al guasto, passando dal
 # ritorno alla base, e alla fine dice se il robot è sui contatti e in carica.
+# --solleva T D: dopo T s solleva il robot nel simulatore e dopo altri D s lo riappoggia nello stesso punto (prova del sollevamento).
+# --senza-avvio: non preme il tasto di accensione all'inizio (il robot resta in riposo). --premi T TASTO: preme un tasto dopo T s (accensione o casa).
+# --sposta X Y ANGOLO (con --solleva): mentre è in aria lo sposta lì, in coordinate della stanza e gradi (prova della ricerca della posizione).
 # --batteria T (con --missione): dopo T s porta la batteria del simulatore al 25% (14,3 V a vuoto: con la ventola accesa la tensione scende sotto 14,2, senza arrivare ai 13,8 che fermano i motori); quando il robot arriva in riposo la ricarica di colpo
 # (la vera ricarica durerebbe ore) e la prova continua fino al riposo successivo.
 # Si ferma quando la navigazione finisce l'esplorazione (arriva al giro dei bordi) o al guasto, o alla durata. Con --pulizia va avanti fino al
@@ -12,7 +15,7 @@
 import json, math, os, re, signal, subprocess, sys, time, urllib.request
 REPO = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..'))
 D = os.path.join(REPO, 'build', 'prove-nav')
-NOMI = ['WAIT', 'EXPLORE', 'CLEAN', 'BORDERS', 'HOME', 'HOOK', 'FOLLOW', 'UNLOCK', 'SLEEP', 'ALIGN', 'FAILURE', 'LAP', 'LEAVE', 'CROSS']
+NOMI = ['WAIT', 'EXPLORE', 'CLEAN', 'BORDERS', 'HOME', 'HOOK', 'FOLLOW', 'UNLOCK', 'SLEEP', 'ALIGN', 'FAILURE', 'LAP', 'LEAVE', 'CROSS', 'PAUSE']
 CLEAN, FAILURE, SLEEP, HOME = NOMI.index('CLEAN'), NOMI.index('FAILURE'), NOMI.index('SLEEP'), NOMI.index('HOME')
 BORDERS, LAP = NOMI.index('BORDERS'), NOMI.index('LAP')
 LAP_TIMEOUT = 1800   # BORDER_LAP_TIMEOUT di navigation.c: la rete di sicurezza, non deve mai scattare
@@ -25,6 +28,19 @@ a = [x for x in a if x not in ('--pulizia', '--missione', '--dalla-base')]
 BATTERIA = None
 if '--batteria' in a:
     i = a.index('--batteria'); BATTERIA = float(a[i + 1]); del a[i:i + 2]
+SOLLEVA = None   # --solleva T D: dopo T s solleva il robot nel simulatore, dopo altri D s lo riappoggia nello stesso punto
+if '--solleva' in a:
+    i = a.index('--solleva'); SOLLEVA = (float(a[i + 1]), float(a[i + 2])); del a[i:i + 3]
+# il robot all'accensione aspetta un comando: dopo 2 s si preme il tasto di accensione, a meno di --senza-avvio.
+# --premi T TASTO (anche più volte): dopo T s preme per 0,2 s il tasto "accensione" o "casa" della pagina del simulatore
+PREMI = [] if '--senza-avvio' in a else [(2.0, 'accensione')]
+a = [x for x in a if x != '--senza-avvio']
+while '--premi' in a:
+    i = a.index('--premi'); PREMI.append((float(a[i + 1]), a[i + 2])); del a[i:i + 3]
+PREMI.sort()
+SPOSTA = None    # --sposta X Y ANGOLO (con --solleva): mentre è in aria il robot viene spostato lì (coordinate della stanza, gradi)
+if '--sposta' in a:
+    i = a.index('--sposta'); SPOSTA = a[i + 1:i + 4]; del a[i:i + 4]
 FINE = (SLEEP, FAILURE) if MISSIONE else (SLEEP, HOME, FAILURE) if PULIZIA else (BORDERS, FAILURE)
 stanza, seme, durata = a[0], a[1], float(a[2])
 testo = open(os.path.join(REPO, stanza)).read()
@@ -55,7 +71,7 @@ prog = subprocess.Popen(['build/host/osserva', '--uscita', 'build/sim/mappa_robo
                         start_new_session=True)
 def comando_sim(testo):
     urllib.request.urlopen(urllib.request.Request('http://127.0.0.1:8080/comando', data=testo.encode(), method='POST'), timeout=2).read()
-fase_batt, righe_a_riposo = 0, 0
+fase_batt, righe_a_riposo, fase_solleva, t_tasto = 0, 0, 0, 0
 def righe_nav():
     return [l.split() for l in open(fout, errors='replace') if l.startswith('NAV ')]
 eventi, prec, t0, fine, ultimo = [], {}, time.time(), None, None
@@ -73,13 +89,23 @@ while time.time() - t0 < durata:
         vero.write(f"{time.monotonic():.3f},{d['t']:.3f},{r['x']:.4f},{r['y']:.4f},{r['dir']:.1f},"
                    f"{int(any(d['bumper']))},{int(bool(d['bloccato']))},{int(bool(d['incastrato']))}\n")
     nav = righe_nav()
+    while PREMI and time.time() - t0 >= PREMI[0][0]:
+        tasto = PREMI.pop(0)[1]
+        comando_sim(f'tasto {tasto} 1'); time.sleep(0.2); comando_sim(f'tasto {tasto} 0'); t_tasto = time.time()
+        print(f"tasto {tasto} premuto a {time.time() - t0:.1f} s", flush=True)
+    if SOLLEVA is not None:
+        if fase_solleva == 0 and time.time() - t0 >= SOLLEVA[0]:
+            comando_sim('solleva'); fase_solleva = 1; print(f"sollevato a {time.time() - t0:.1f} s", flush=True)
+            if SPOSTA: time.sleep(0.5); comando_sim('sposta ' + ' '.join(SPOSTA)); print(f"spostato in {' '.join(SPOSTA)}", flush=True)
+        elif fase_solleva == 1 and time.time() - t0 >= SOLLEVA[0] + SOLLEVA[1]:
+            comando_sim('posa'); fase_solleva = 2; print(f"riappoggiato a {time.time() - t0:.1f} s", flush=True)
     if BATTERIA is not None:
         if fase_batt == 0 and time.time() - t0 >= BATTERIA:
             comando_sim('batteria 25'); fase_batt = 1; print(f"batteria scaricata a {time.time() - t0:.0f} s", flush=True)
         elif fase_batt == 1 and nav and int(nav[-1][3]) == SLEEP:
             time.sleep(1); comando_sim('batteria 95'); fase_batt = 2; righe_a_riposo = len(nav); print(f"batteria ricaricata a {time.time() - t0:.0f} s", flush=True)
     finita = nav and int(nav[-1][3]) in FINE and (BATTERIA is None or int(nav[-1][3]) == FAILURE or (fase_batt == 2 and len(nav) > righe_a_riposo))
-    if finita and fine is None: fine = time.time()
+    if finita and fine is None and not PREMI and time.time() - t_tasto > 3: fine = time.time()   # finché ci sono tasti da premere la prova continua, e lo stato dopo un tasto arriva al job dopo
     if fine and time.time() - fine > 1.5: break
     time.sleep(0.1)
 for l in subprocess.run(['pgrep', '-f', '^' + os.path.join(D, 'vacdbg')], capture_output=True, text=True).stdout.split():

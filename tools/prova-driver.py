@@ -270,6 +270,68 @@ def s_watchdog(sim, drv):
     controlla(any("NO, la causa" in r for r in drv.righe), "con il task ancora bloccato il guasto non si azzera")
 
 
+def s_guasto_da_task(sim, drv):
+    drv.manda("v 0.05 0")
+    time.sleep(0.5)
+    t0 = time.time()
+    drv.manda("guasto 9")              # DRV_FAULT_POSITION_NOT_FOUND
+    ok = drv.aspetta(lambda: "GUASTO" in drv.ultima(), 1)
+    dt = time.time() - t0
+    time.sleep(0.1)                     # il GD32 simulato applica la velocità ~29 ms dopo il comando
+    st = sim.stato()
+    controlla(ok, f"guasto dopo {dt:.2f} s dalla richiesta del task")
+    controlla(any("task fault 9: position not found after the robot was lifted" in r for r in drv.righe), "il motivo è quello del task")
+    drv.manda("guasto 3")              # a second request during the fault must not change the reason
+    time.sleep(0.2)
+    controlla(not any("task fault 3" in r for r in drv.righe), "una seconda richiesta durante il guasto non cambia il motivo")
+    controlla(st["led"] == 8 and st["cmd_v"] == 0, f"LED 8 e motori fermi (led {st['led']}, v {st['cmd_v']})")
+    drv.manda("v 0.1 0")
+    time.sleep(0.5)
+    controlla(sim.stato()["cmd_v"] == 0, "in guasto i comandi ai motori sono rifiutati")
+    drv.manda("azzera")
+    ok = drv.aspetta(lambda: any("azzera guasto: ok" in r for r in drv.righe), 1)
+    controlla(ok, "il guasto chiesto da un task si azzera con drv_azzera_guasto")
+    drv.manda("v 0.05 0")
+    time.sleep(0.5)
+    controlla(sim.stato()["cmd_v"] != 0, "dopo l'azzeramento i motori ripartono")
+    drv.manda("guasto 999")            # not in the enum: the default of the switch
+    ok = drv.aspetta(lambda: any("task fault 999: generic fault" in r for r in drv.righe), 1)
+    controlla(ok, "un codice fuori dall'enum dà il guasto generico")
+
+
+def s_tasti(sim, drv):
+    def tasti():
+        m = re.search(r"tasti (\d+)/(\d+)", drv.ultima())
+        return (int(m[1]), int(m[2])) if m else (-1, -1)
+    def premi(nome, durata):
+        sim.comando(f"tasto {nome} 1"); time.sleep(durata); sim.comando(f"tasto {nome} 0")
+    drv.aspetta(lambda: tasti() != (-1, -1), 2)
+    controlla(tasti() == (0, 0), f"all'avvio nessuna pressione: {tasti()}")
+    premi("accensione", 0.2)
+    ok = drv.aspetta(lambda: tasti() == (1, 0), 2)
+    controlla(ok, f"pressione breve dell'accensione contata: {tasti()}")
+    premi("casa", 0.06)
+    ok = drv.aspetta(lambda: tasti() == (1, 1), 2)
+    controlla(ok, f"pressione brevissima (60 ms) di casa contata: {tasti()}")
+    premi("accensione", 1.5)
+    time.sleep(1.2)
+    controlla(tasti() == (1, 1), f"pressione lunga (1,5 s) non contata: {tasti()}")
+    # guasto chiesto da un task, azzerato dal tasto (la causa non c'è più)
+    drv.manda("guasto 4")
+    ok = drv.aspetta(lambda: "GUASTO" in drv.ultima(), 1)
+    controlla(ok, "guasto")
+    premi("casa", 0.2)
+    ok = drv.aspetta(lambda: tasti() == (1, 2) and "GUASTO" not in drv.ultima(), 2)
+    controlla(ok, f"il tasto azzera il guasto e la pressione è contata: {tasti()}")
+    # guasto azzerato dal ritorno sulla base, dopo almeno 1 s fuori
+    drv.manda("guasto 4")
+    ok = drv.aspetta(lambda: "GUASTO" in drv.ultima(), 1)
+    time.sleep(1.5)
+    sim.comando("sposta 0.6 0.3955 90")              # contatti DIETRO: le spalle alla base
+    ok = drv.aspetta(lambda: "BASE" in drv.ultima() and "GUASTO" not in drv.ultima(), 3)
+    controlla(ok, "rimesso sulla base, il guasto si azzera")
+
+
 def s_aspirazione(sim, drv, permessa):
     drv.manda("aspirazione 8000")
     time.sleep(2)
@@ -324,6 +386,9 @@ def main():
     scenario("7. batteria critica", vuota, s_batteria, ("--batteria-veloce", "200"))
     cod, _ = scenario("8. watchdog dei task", vuota, s_watchdog, (), ("--task-prova",))
     controlla(cod == 4, f"codice d'uscita 4 (guasto durante la prova): {cod}")
+
+    scenario("8b. guasto chiesto da un task", vuota, s_guasto_da_task)
+    scenario("8c. tasti e azzeramento del guasto", soggiorno, s_tasti)
 
     scenario("9. aspirazione permessa", vuota, lambda sim, drv: s_aspirazione(sim, drv, True), (), ("--aspirazione",))
     scenario("9b. aspirazione vietata", vuota, lambda sim, drv: s_aspirazione(sim, drv, False))
