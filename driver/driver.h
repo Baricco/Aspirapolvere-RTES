@@ -56,6 +56,8 @@ typedef struct {
 	const char *dev_gd32;        /* seriale del GD32 (default /dev/ttyS3; nel simulatore build/sim/gd32) */
 	const char *dev_lidar;       /* seriale del lidar (default /dev/ttyS1); NULL = niente lidar */
 	int cpu;                     /* core del driver (default 0) */
+	int cpu_flash;               /* core su cui spostare interruzioni e thread del kernel della flash (default 3, quello del
+	                                task aperiodico; -1 = non spostarli). Solo con SCHED_FIFO (sul robot), docs/PIANO.md */
 	int priorita;                /* default RT_PRIO_DRIVER (99) */
 	int motori;                  /* 0 = rifiuta TUTTI i comandi ai motori: ruote, spazzole, aspirazione (default 1) */
 	int aspirazione;             /* 1 = aspirazione permessa (default 1; 0 con drv_config_prova) */

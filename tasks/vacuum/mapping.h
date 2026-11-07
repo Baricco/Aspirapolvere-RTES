@@ -30,6 +30,23 @@
 #define FINE_MAP_ORIGIN     (FINE_MAP_CELL_NUMBER / 2)             // indice della mappa fine che contiene l'origine (la base di ricarica)
 #define NAV_MAP_ORIGIN      (NAV_MAP_CELL_NUMBER / 2)              // indice della mappa di navigazione che contiene l'origine (la base di ricarica)
 
+// Formato del file della mappa: lo scrive il task aperiodico, lo legge la mappatura all'avvio
+#define MAP_FILE_MAGIC          "RTM1"      // numero magico: "RT" progetto, "M" mappa, "1" versione del formato
+#define MAP_FILE_MAGIC_LEN      4           // dimensione in byte del numero magico
+#define MAP_FILE_HEADER_LEN     17          // dimensione in byte dell'header: numero magico, rettangolo (4 uint16), numero di zone (1 byte)
+#define MAP_FILE_ZONE_LEN       8           // dimensione in byte di una zona proibita: x, y, larghezza, altezza (uint16, in celle fini)
+#define MAP_FILE_CRC_LEN        4           // dimensione in byte del CRC-32 in fondo
+#define MAP_RUN_MAX             63          // celle massime in una sequenza (6 bit): le sequenze più lunghe si spezzano
+#define MAP_RUN_CATEGORY_SHIFT  6           // la categoria sta nei 2 bit alti del byte della sequenza
+#define MAP_RUN_COUNT_MASK      0x3F        // il conteggio sta nei 6 bit bassi
+
+// Categorie delle celle fini nel file e nella copia del task aperiodico (2 bit per cella)
+#define MAP_CAT_UNKNOWN         0           // punteggio 0
+#define MAP_CAT_FREE            1           // osservata e non occupata, e l'ostacolo basso (il lidar lì vede libero)
+#define MAP_CAT_OCCUPIED        2           // punteggio sopra la soglia di occupazione
+#define MAP_CAT_VOID            3           // vuoto degli anti-caduta (scale, gradini)
+#define MAP_CATEGORIES_BYTES    (FINE_MAP_CELL_NUMBER * FINE_MAP_CELL_NUMBER / 4)  // tutta la griglia fine a 2 bit per cella (256 KB)
+
 // Simboli Mnemonici da usare nella bit mask nelle celle di navigazione (4 bit più significativi della cella)
 #define NAV_CELL_TOP_LEFT       (1u << 4)       // XXX1 XXXX --> Cella in Alto a Sinistra
 #define NAV_CELL_TOP_RIGHT      (1u << 5)       // XX1X XXXX --> Cella in Alto a Destra
@@ -196,6 +213,12 @@ extern rt_task_t mapping_task;
 bool is_nav_cell_invisible_obstacle(uint16_t cell);
 
 int init_mapping(void);
+// funzione chiamata dal task aperiodico: copia tutta la griglia fine a categorie (2 bit per cella, 4 celle per byte,
+// cella x della riga y nel byte (y * 1024 + x) / 4, ai bit 2 * (x % 4)) leggendola fra un job e l'altro della mappatura.
+// Ritorna false se non ci riesce (la mappatura non lascia mai la finestra libera: non deve succedere)
+bool copy_map_categories(uint8_t *categories);
+// zone proibite dell'utente caricate con la mappa (senza quella della base), per salvarle di nuovo: ne restituisce il numero
+int read_user_zones(mapping_forbidden_zone_t *zones);
 mapping_forbidden_zone_list_t read_forbidden_zone_list(void);
 mapping_correction_t read_mapping_correction(void);
 // funzione per sapere se il robot è partito dalla base di ricarica (lo leggerà il task navigation), è false anche finché

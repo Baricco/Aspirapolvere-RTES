@@ -220,6 +220,98 @@ static void priorita_rate_monotonic(void)
 	CONTROLLA(rt_priorita_rm(v, 0, 90) == 0);
 }
 
+/* ------------------------------------------------------------------------------------------ task aperiodico --- */
+
+static atomic_int aper_job;
+static atomic_int aper_lento;          /* 1 = il job dura 50 ms */
+
+static void job_aperiodico(void *arg)
+{
+	(void)arg;
+	struct sched_param p;
+	pthread_getschedparam(pthread_self(), &politica_vista, &p);
+	priorita_vista = p.sched_priority;
+	cpu_vista = sched_getcpu();
+	if (atomic_load(&aper_lento)) {
+		int64_t fine = rt_adesso() + RT_MS(50);
+		while (rt_adesso() < fine)
+			;
+	}
+	atomic_fetch_add(&aper_job, 1);
+}
+
+/* aspetta (al massimo 1 s) che i job eseguiti arrivino a n */
+static void aspetta_job_aperiodici(int n)
+{
+	int64_t limite = rt_adesso() + RT_S(1);
+	while (atomic_load(&aper_job) < n && rt_adesso() < limite)
+		rt_dormi_fino_a(rt_adesso() + RT_MS(1));
+}
+
+static void aperiodico_config_non_valide(void)
+{
+	rt_aperiodico_t a;
+	rt_aperiodico_cfg_t c = { .cpu = RT_CPU_QUALSIASI, .job = NULL };
+	CONTROLLA(rt_aperiodico_avvia(&a, &c) == EINVAL);
+	c.job = job_aperiodico;
+	c.cpu = -5;
+	CONTROLLA(rt_aperiodico_avvia(&a, &c) == EINVAL);
+}
+
+static void aperiodico_un_job_per_sveglia(void)
+{
+	rt_aperiodico_t a;
+	rt_aperiodico_cfg_t c = { .nome = "prova", .cpu = 0, .job = job_aperiodico };
+	atomic_store(&aper_job, 0);
+	atomic_store(&aper_lento, 0);
+	CONTROLLA(rt_aperiodico_avvia(&a, &c) == 0);
+	/* senza sveglie non parte niente */
+	rt_dormi_fino_a(rt_adesso() + RT_MS(20));
+	CONTROLLA(atomic_load(&aper_job) == 0);
+	for (int i = 1; i <= 3; i++) {
+		rt_aperiodico_sveglia(&a);
+		aspetta_job_aperiodici(i);
+	}
+	rt_aperiodico_ferma(&a);
+	CONTROLLA(atomic_load(&aper_job) == 3);
+	CONTROLLA(a.stats.job == 3);
+	CONTROLLA(a.stats.sveglie == 3);
+	CONTROLLA(politica_vista == SCHED_OTHER);    /* scheduling normale, nessuna priorità real-time */
+	CONTROLLA(cpu_vista == 0);
+	CONTROLLA(a.stats.risposta_max_ns >= a.stats.esec_max_ns);
+}
+
+static void aperiodico_sveglie_durante_un_job(void)
+{
+	rt_aperiodico_t a;
+	rt_aperiodico_cfg_t c = { .nome = "prova", .cpu = RT_CPU_QUALSIASI, .job = job_aperiodico };
+	atomic_store(&aper_job, 0);
+	atomic_store(&aper_lento, 1);
+	CONTROLLA(rt_aperiodico_avvia(&a, &c) == 0);
+	rt_aperiodico_sveglia(&a);
+	rt_dormi_fino_a(rt_adesso() + RT_MS(10));    /* il primo job è partito e dura 50 ms */
+	for (int i = 0; i < 5; i++)                  /* 5 sveglie mentre lavora: valgono come una */
+		rt_aperiodico_sveglia(&a);
+	aspetta_job_aperiodici(2);
+	rt_dormi_fino_a(rt_adesso() + RT_MS(80));    /* nessun terzo job */
+	rt_aperiodico_ferma(&a);
+	CONTROLLA(atomic_load(&aper_job) == 2);
+	CONTROLLA(a.stats.sveglie == 6);
+	CONTROLLA(a.stats.esec_max_ns >= RT_MS(50));
+	atomic_store(&aper_lento, 0);
+}
+
+static void aperiodico_ferma_senza_sveglie(void)
+{
+	rt_aperiodico_t a;
+	rt_aperiodico_cfg_t c = { .cpu = RT_CPU_QUALSIASI, .job = job_aperiodico };
+	atomic_store(&aper_job, 0);
+	CONTROLLA(rt_aperiodico_avvia(&a, &c) == 0);
+	rt_aperiodico_ferma(&a);
+	CONTROLLA(atomic_load(&aper_job) == 0);
+	CONTROLLA(a.stats.job == 0);
+}
+
 int main(void)
 {
 	/* Come nei programmi veri: memoria bloccata in RAM prima di creare i task.
@@ -231,6 +323,11 @@ int main(void)
 	ESEGUI(config_non_valide);
 	ESEGUI(mutex_priority_inheritance);
 	ESEGUI(priorita_rate_monotonic);
+	/* il task aperiodico usa lo scheduling normale: non servono permessi */
+	ESEGUI(aperiodico_config_non_valide);
+	ESEGUI(aperiodico_un_job_per_sveglia);
+	ESEGUI(aperiodico_sveglie_durante_un_job);
+	ESEGUI(aperiodico_ferma_senza_sveglie);
 
 	/* Prova a creare un task: se manca il permesso, salta il resto. */
 	rt_task_cfg_t prova = { .priorita = 1, .cpu = RT_CPU_QUALSIASI, .periodo_ns = RT_MS(1),

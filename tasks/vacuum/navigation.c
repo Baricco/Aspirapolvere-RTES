@@ -6,6 +6,7 @@
 
 #include "navigation.h"
 #include "mapping.h"
+#include "aperiodic.h"
 #include "movement.h"
 #include "safety.h"
 #include "lidar.h"
@@ -232,7 +233,7 @@ typedef struct {
 
     uint32_t last_power_presses;            // pressioni del tasto di accensione già lette 
     uint32_t last_home_presses;             // pressioni del tasto casa già lette
-    bool is_map_ready;                      // true se la mappa c'è già, una nuova pulizia salta l'esplorazione
+    bool is_map_ready;                      // true se in questa accensione un'esplorazione è finita (la mappa è completa): da qui la mappa si può salvare
 
     int64_t brush_unlock_start;             // istante di inizio dell'ultimo sblocco della spazzola centrale, 0 se non ce n'è mai stato uno
     uint8_t brush_unlock_attempt;           // numero di sblocchi della spazzola centrale fatti di fila
@@ -2107,7 +2108,19 @@ static void start_new_mission(void) {
     drv_led(DRV_LED_AZZURRO);
 
     set_state(NAV_STATE_WAIT);
-    nav_state.mission = nav_state.is_map_ready ? NAV_STATE_FOLLOW_BORDERS : NAV_STATE_EXPLORE;
+
+    // la missione parte sempre dall'esplorazione: con una mappa completa non trova frontiere e passa subito ai bordi,
+    // se la mappa ha zone nuove (per esempio dietro una porta aperta) esplora solo quelle. Dalla sua ultima ricerca
+    // viene anche l'asse delle strisce
+    nav_state.mission = NAV_STATE_EXPLORE;
+}
+
+// funzione helper che chiede al task aperiodico di salvare la mappa, se si può: sessione partita dalla base (la mappa
+// ha l'origine nella base), esplorazione finita almeno una volta (una mappa a metà farebbe saltare zone alla volta
+// dopo) e posizione sulla mappa normale (non persa né da confermare)
+static void request_map_save_if_allowed(void) {
+    if (read_started_on_base() && nav_state.is_map_ready && read_mapping_correction().state == MAP_NORMAL)
+        request_map_save();
 }
 
 // funzione helper che mette in pausa: il robot si ferma dov'è, la missione resta quella di prima
@@ -2416,8 +2429,13 @@ void job_navigation(void *arg) {
 
             if (dist == 0) {        // se dist == 0, l'esplorazione è finita
                 
+                // l'asse delle strisce si calcola adesso, finché la coda contiene le celle raggiungibili dell'ultima
+                // ricerca (quella che non ha trovato frontiere), poi la mappa completa si salva
+                calc_strip_axis();
+                nav_state.is_map_ready = true;
+                request_map_save_if_allowed();
+
                 // passa al giro dei bordi
-                nav_state.is_map_ready = true;      // la prossima pulizia di questa accensione salta l'esplorazione
                 set_state(NAV_STATE_FOLLOW_BORDERS); 
 
             } else { // Se esiste un percorso verso la frontiera
@@ -2790,7 +2808,11 @@ void job_navigation(void *arg) {
             // se il driver sta già facendo la manovra, aspetta l'esito
             if (nav_state.hook_has_started) {
 
-                if (cur_drv_state.aggancio == AGG_FATTO) set_state(NAV_STATE_SLEEP);
+                // agganciato: riposo sulla base, e la mappa si salva
+                if (cur_drv_state.aggancio == AGG_FATTO) {
+                    set_state(NAV_STATE_SLEEP);
+                    request_map_save_if_allowed();
+                }
                 else if (cur_drv_state.aggancio == AGG_FALLITO) stop_and_fail(DRV_FAULT_DOCKING_FAILED);
 
                 break;

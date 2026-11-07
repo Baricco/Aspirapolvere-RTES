@@ -10,6 +10,7 @@
 #include "navigation.h"
 #include "safety.h"
 #include "mapping.h"
+#include "aperiodic.h"
 
 #define SLEEP_TIME 1                      // il main contiene un loop infinito che serve solo ad aspettare di ricevere il segnale di arresto, dentro al loop aspetta 1 secondo per non mandare la CPU al 100%
 
@@ -100,6 +101,7 @@ int main(void) {
        init_movement();
        init_navigation();
        init_safety();
+       init_aperiodic();
 
        // se mapping fallisce nell'inizializzazione del mutex, 
        // chiudi il driver e ferma tutto
@@ -226,6 +228,25 @@ int main(void) {
               return 1;
        }
 
+       // Task aperiodico: da solo sul core 3, scheduling normale, fuori da Rate Monotonic e dalla sorveglianza del
+       // driver. Esegue le richieste dei task, per ora il salvataggio della mappa
+       rt_aperiodico_cfg_t task_cfg_aperiodic = {
+              .nome = "task_aperiodic",
+              .cpu = APERIODIC_CPU,
+              .job = job_aperiodic,
+       };
+
+       // Avvia il task aperiodico
+       if (rt_aperiodico_avvia(&aperiodic_task, &task_cfg_aperiodic)) {
+              rt_task_ferma(&lidar_task);
+              rt_task_ferma(&movement_task);
+              rt_task_ferma(&safety_task);
+              rt_task_ferma(&navigation_task);
+              rt_task_ferma(&mapping_task);
+              drv_ferma();
+              return 1;
+       }
+
        // sveglia il task del moto con l'arrivo del frame dai sensori
        drv_sveglia_ai_sensori(&movement_task);
 
@@ -265,6 +286,7 @@ int main(void) {
        rt_task_ferma(&safety_task);              // safety
        rt_task_ferma(&navigation_task);          // navigazione
        rt_task_ferma(&mapping_task);             // mappatura
+       rt_aperiodico_ferma(&aperiodic_task);     // aperiodico
 
 	// ferma il driver 
        drv_ferma();
@@ -276,6 +298,7 @@ int main(void) {
        rt_stats_stampa(&safety_task);     // safety
        rt_stats_stampa(&navigation_task); // navigazione
        rt_stats_stampa(&mapping_task);    // mappatura
+       rt_aperiodico_stampa(&aperiodic_task);    // aperiodico
 
 
 

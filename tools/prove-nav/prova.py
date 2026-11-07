@@ -65,6 +65,10 @@ for _ in range(100):
     time.sleep(0.1)
 env = dict(os.environ, RTES_GD32='build/sim/gd32', RTES_LIDAR='build/sim/lidar',
            RTES_SONDA=os.path.join(D, f'sonda_{tag}.bin'))   # registratore della mappatura (sonda_mappa.c)
+# mappe salvate (docs/formato-mappa.md): sul PC in build/prove-nav/maps, oppure nella cartella di RTES_MAPS. Una prova
+# lascia la mappa nel file, quella dopo con --dalla-base la ricarica: per ripartire da zero si cancella il file
+env.setdefault('RTES_MAPS', os.path.join(D, 'maps'))
+os.makedirs(env['RTES_MAPS'], exist_ok=True)
 fout = os.path.join(D, f'prog_{tag}.log')
 prog = subprocess.Popen(['build/host/osserva', '--uscita', 'build/sim/mappa_robot', '--', 'taskset', '-c', '0-3',
                          os.path.join(D, 'vacdbg')], env=env, stdout=open(fout, 'w'), stderr=subprocess.STDOUT,

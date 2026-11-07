@@ -191,6 +191,71 @@ int rt_priorita_rm(rt_task_cfg_t *cfg[], int n, int prio_max);
 void rt_consenti_senza_privilegi(int si);
 
 /*
+ * Task APERIODICO: un thread che esegue un job ogni volta che qualcuno lo sveglia, senza periodo, senza intervallo
+ * minimo e senza scadenza. Nella teoria è un servizio in sottofondo su un processore dedicato (docs/PIANO.md, task
+ * aperiodico): sta da solo sul suo core, con lo scheduling NORMALE di Linux (SCHED_OTHER, nessuna priorità
+ * real-time), fuori da Rate Monotonic e dalla sorveglianza del driver. Non può togliere tempo ai task periodici,
+ * che stanno sugli altri core, e non può affamare gli altri thread normali del suo core (per esempio quelli del
+ * kernel che scrivono sulla flash).
+ *
+ * Sveglie: rt_aperiodico_sveglia() non si blocca mai e si può chiamare da qualsiasi thread, anche real-time. Se il
+ * task aspetta, parte un job; se sta già eseguendo un job, ne parte un altro appena finisce; più sveglie arrivate
+ * prima che il job parta valgono come una sola. Quindi COSA fare non lo dice la sveglia: lo dicono i dati che chi
+ * chiede ha scritto prima di svegliarlo (nel progetto, i doppi buffer delle richieste con un numero progressivo).
+ *
+ *     rt_aperiodico_cfg_t cfg = { .nome = "aperiodico", .cpu = 3, .job = lavoro };
+ *     rt_aperiodico_t a;
+ *     rt_aperiodico_avvia(&a, &cfg);
+ *     ...
+ *     rt_aperiodico_sveglia(&a);        // da qualsiasi thread
+ *     ...
+ *     rt_aperiodico_ferma(&a);
+ *     rt_aperiodico_stampa(&a);
+ */
+typedef struct {
+	const char *nome;
+	int cpu;                 /* core a cui fissare il thread, o RT_CPU_QUALSIASI */
+	void (*job)(void *arg);  /* il lavoro da fare a ogni sveglia */
+	void *arg;               /* passato a job() */
+	size_t stack_byte;       /* dimensione dello stack; 0 = RT_STACK_DEFAULT */
+} rt_aperiodico_cfg_t;
+
+/* Statistiche: vanno lette dopo rt_aperiodico_ferma(). */
+typedef struct {
+	uint64_t job;               /* job completati */
+	uint64_t sveglie;           /* sveglie ricevute (più sveglie possono finire nello stesso job) */
+	int64_t esec_max_ns, esec_somma_ns;
+	int64_t cpu_max_ns;         /* tempo di CPU peggiore di un job (senza le attese, per esempio della flash) */
+	int64_t risposta_max_ns;    /* max(fine del job - prima sveglia che il job ha servito) */
+} rt_aperiodico_stats_t;
+
+typedef struct {
+	rt_aperiodico_cfg_t cfg;
+	pthread_t thread;
+	atomic_int stop;
+	sem_t avviato;
+	int errore_avvio;
+	int attivo;
+	sem_t sveglia;
+	_Atomic int64_t richiesta_ns;       /* istante della prima sveglia non ancora servita, 0 = nessuna */
+	_Atomic uint64_t sveglie;
+	rt_aperiodico_stats_t stats;
+} rt_aperiodico_t;
+
+/* Crea il thread (scheduling normale, fissato a cfg->cpu) e lo mette in attesa della prima sveglia.
+ * Ritorna 0 oppure un codice errno (EINVAL: configurazione non valida). */
+int rt_aperiodico_avvia(rt_aperiodico_t *a, const rt_aperiodico_cfg_t *cfg);
+
+/* Sveglia il task. Non si blocca mai. */
+void rt_aperiodico_sveglia(rt_aperiodico_t *a);
+
+/* Chiede al task di fermarsi (dopo il job in corso, se c'è) e aspetta che finisca. */
+void rt_aperiodico_ferma(rt_aperiodico_t *a);
+
+/* Stampa le statistiche su stdout, in microsecondi. */
+void rt_aperiodico_stampa(const rt_aperiodico_t *a);
+
+/*
  * Inizializza un mutex con priority inheritance: se un task a bassa
  * priorità tiene il mutex e uno ad alta priorità lo aspetta, il primo eredita
  * temporaneamente la priorità del secondo. Evita l'inversione di priorità

@@ -1078,6 +1078,65 @@ static void fissa_cpu(void)
 	}
 }
 
+/*
+ * Sposta sul core `cpu` il lavoro della flash che non è nostro (prova sul robot del 2026-11-07, docs/PIANO.md, task
+ * aperiodico): le interruzioni della flash e del DMA, che il kernel manda al core 0 (quello del driver), e i thread del
+ * kernel che scrivono sulla flash. Così una scrittura del task aperiodico (core 3) non ritarda il driver. Le
+ * interruzioni si cercano per nome in /proc/interrupts, i thread per nome in /proc/PID/comm. kblockd e i kworker/u il
+ * kernel 3.4 non li lascia spostare. Si fa una volta, all'avvio; lo stato resta fino al riavvio del robot.
+ */
+static void sposta_flash(int cpu)
+{
+	int irq = 0, thread = 0;
+	char riga[256], percorso[64];
+
+	FILE *f = fopen("/proc/interrupts", "r");
+	while (f && fgets(riga, sizeof riga, f)) {
+		size_t n = strlen(riga);
+		while (n && (riga[n - 1] == '\n' || riga[n - 1] == ' '))
+			riga[--n] = 0;
+		int num;
+		if ((n >= 5 && !strcmp(riga + n - 5, " nand")) || (n >= 11 && !strcmp(riga + n - 11, " sunxi_dmac"))) {
+			if (sscanf(riga, " %d:", &num) != 1)
+				continue;
+			snprintf(percorso, sizeof percorso, "/proc/irq/%d/smp_affinity", num);
+			FILE *a = fopen(percorso, "w");
+			if (a && fprintf(a, "%x\n", 1u << cpu) > 0 && fclose(a) == 0)
+				irq++;
+			else if (a)
+				fclose(a);
+		}
+	}
+	if (f)
+		fclose(f);
+
+	cpu_set_t set;
+	CPU_ZERO(&set);
+	CPU_SET(cpu, &set);
+	DIR *dir = opendir("/proc");
+	struct dirent *e;
+	while (dir && (e = readdir(dir))) {
+		int pid = atoi(e->d_name);
+		if (pid <= 0)
+			continue;
+		snprintf(percorso, sizeof percorso, "/proc/%d/comm", pid);
+		FILE *c = fopen(percorso, "r");
+		if (!c)
+			continue;
+		char nome[32] = "";
+		if (fgets(nome, sizeof nome, c))
+			nome[strcspn(nome, "\n")] = 0;
+		fclose(c);
+		if (!strcmp(nome, "nand") || !strcmp(nome, "nand_rcd") || !strcmp(nome, "bdi-default") ||
+		    !strcmp(nome, "sync_supers") || !strncmp(nome, "jbd2/", 5) || !strncmp(nome, "flush-", 6))
+			if (sched_setaffinity(pid, sizeof set, &set) == 0)
+				thread++;
+	}
+	if (dir)
+		closedir(dir);
+	evento("flash sul core %d: %d interruzioni e %d thread del kernel spostati", cpu, irq, thread);
+}
+
 static int64_t minimo(int64_t a, int64_t b) { return a < b ? a : b; }
 
 static void lavoro_fatto(int64_t inizio)
@@ -1110,6 +1169,8 @@ static void *ciclo_tempo(void *arg)
 	arresto();                                  /* stato sicuro prima di tutto */
 	evento("driver avviato (CPU %d, %s), sequenza di avvio del GD32", d.cfg.cpu,
 	       d.senza_rt ? "SENZA SCHED_FIFO" : "SCHED_FIFO 99 + ricezione 98");
+	if (!d.cfg.senza_rt && !d.senza_rt && d.cfg.cpu_flash >= 0)      /* solo sul robot: nel simulatore cfg.senza_rt è 1 */
+		sposta_flash(d.cfg.cpu_flash);
 	pthread_mutex_unlock(&d.mx);
 
 	while (!atomic_load(&d.stop)) {
@@ -1270,6 +1331,7 @@ void drv_config_default(drv_config_t *c)
 	c->prova_rientro_s = getenv("RTES_PROVA_RIENTRO_DOPO_S") ? atof(getenv("RTES_PROVA_RIENTRO_DOPO_S")) : 0;
 	c->prova_premi_s = getenv("RTES_PROVA_PREMI_DOPO_S") ? atof(getenv("RTES_PROVA_PREMI_DOPO_S")) : 0;
 	c->cpu = 0;
+	c->cpu_flash = 3;
 	c->priorita = RT_PRIO_DRIVER;
 	c->motori = 1;
 	c->aspirazione = 1;

@@ -308,3 +308,115 @@ void rt_stats_stampa(const rt_task_t *t)
 	       s->esec_max_ns / 1e3);
 	printf("  risposta max %.1f us, CPU max di un job %.1f us\n", s->risposta_max_ns / 1e3, s->cpu_max_ns / 1e3);
 }
+
+/* ------------------------------------------------------------------------------------------ task aperiodico --- */
+
+/* Il corpo del task aperiodico: aspetta una sveglia, esegue il job, misura. */
+static void *ciclo_aperiodico(void *arg)
+{
+	rt_aperiodico_t *a = arg;
+
+	a->errore_avvio = (a->cfg.cpu == RT_CPU_QUALSIASI) ? 0 : fissa_al_core(a->cfg.cpu);
+	sem_post(&a->avviato);
+	if (a->errore_avvio != 0)
+		return NULL;
+
+	while (!atomic_load(&a->stop)) {
+		while (sem_wait(&a->sveglia) != 0)
+			;
+		if (atomic_load(&a->stop))
+			break;
+		/* azzerare la richiesta PRIMA del job: una sveglia che arriva durante il job ne fa partire un altro dopo */
+		int64_t richiesta = atomic_exchange(&a->richiesta_ns, 0);
+		if (richiesta == 0)
+			continue;
+		int64_t inizio = rt_adesso();
+		int64_t cpu_inizio = cpu_del_thread();
+		a->cfg.job(a->cfg.arg);
+		int64_t cpu = cpu_del_thread() - cpu_inizio;
+		int64_t fine = rt_adesso();
+
+		rt_aperiodico_stats_t *s = &a->stats;
+		s->job++;
+		s->esec_somma_ns += fine - inizio;
+		if (fine - inizio > s->esec_max_ns) s->esec_max_ns = fine - inizio;
+		if (cpu > s->cpu_max_ns) s->cpu_max_ns = cpu;
+		if (fine - richiesta > s->risposta_max_ns) s->risposta_max_ns = fine - richiesta;
+	}
+	return NULL;
+}
+
+int rt_aperiodico_avvia(rt_aperiodico_t *a, const rt_aperiodico_cfg_t *cfg)
+{
+	if (!cfg->job || (cfg->cpu != RT_CPU_QUALSIASI && (cfg->cpu < 0 || cfg->cpu >= CPU_SETSIZE)))
+		return EINVAL;
+
+	memset(a, 0, sizeof(*a));
+	a->cfg = *cfg;
+	atomic_init(&a->stop, 0);
+	atomic_init(&a->richiesta_ns, 0);
+	atomic_init(&a->sveglie, 0);
+	sem_init(&a->avviato, 0, 0);
+	sem_init(&a->sveglia, 0, 0);
+
+	/* scheduling normale dichiarato esplicitamente: chi lo crea (il main) potrebbe essere SCHED_FIFO */
+	pthread_attr_t at;
+	struct sched_param p = { .sched_priority = 0 };
+	int r = pthread_attr_init(&at);
+	if (r == 0) r = pthread_attr_setinheritsched(&at, PTHREAD_EXPLICIT_SCHED);
+	if (r == 0) r = pthread_attr_setschedpolicy(&at, SCHED_OTHER);
+	if (r == 0) r = pthread_attr_setschedparam(&at, &p);
+	if (r == 0) r = pthread_attr_setstacksize(&at, cfg->stack_byte ? cfg->stack_byte : RT_STACK_DEFAULT);
+	if (r == 0) r = pthread_create(&a->thread, &at, ciclo_aperiodico, a);
+	pthread_attr_destroy(&at);
+	if (r != 0) {
+		sem_destroy(&a->avviato);
+		sem_destroy(&a->sveglia);
+		return r;
+	}
+
+	sem_wait(&a->avviato);
+	sem_destroy(&a->avviato);
+	if (a->errore_avvio != 0) {
+		pthread_join(a->thread, NULL);
+		sem_destroy(&a->sveglia);
+		return a->errore_avvio;
+	}
+	a->attivo = 1;
+	return 0;
+}
+
+void rt_aperiodico_sveglia(rt_aperiodico_t *a)
+{
+	atomic_fetch_add(&a->sveglie, 1);
+	/* solo la prima sveglia non servita fa il sem_post: le altre si uniscono a lei */
+	int64_t zero = 0;
+	if (atomic_compare_exchange_strong(&a->richiesta_ns, &zero, rt_adesso()))
+		sem_post(&a->sveglia);
+}
+
+void rt_aperiodico_ferma(rt_aperiodico_t *a)
+{
+	if (!a->attivo)
+		return;
+	atomic_store(&a->stop, 1);
+	sem_post(&a->sveglia);
+	pthread_join(a->thread, NULL);
+	sem_destroy(&a->sveglia);
+	a->stats.sveglie = atomic_load(&a->sveglie);
+	a->attivo = 0;
+}
+
+void rt_aperiodico_stampa(const rt_aperiodico_t *a)
+{
+	const rt_aperiodico_stats_t *s = &a->stats;
+	printf("%s: aperiodico, cpu %d, scheduling normale\n", a->cfg.nome ? a->cfg.nome : "task", a->cfg.cpu);
+	if (s->job == 0) {
+		printf("  nessun job eseguito (sveglie %llu)\n", (unsigned long long)s->sveglie);
+		return;
+	}
+	printf("  job %llu, sveglie %llu\n", (unsigned long long)s->job, (unsigned long long)s->sveglie);
+	printf("  esecuzione media %.1f  max %.1f us, CPU max di un job %.1f us\n",
+	       (double)s->esec_somma_ns / s->job / 1e3, s->esec_max_ns / 1e3, s->cpu_max_ns / 1e3);
+	printf("  risposta max %.1f us (dalla sveglia alla fine del job)\n", s->risposta_max_ns / 1e3);
+}

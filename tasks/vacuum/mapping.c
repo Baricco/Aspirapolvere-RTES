@@ -2,6 +2,7 @@
 #include <string.h>
 #include <math.h>
 #include <stdlib.h>
+#include <stdio.h>
 
 #include "driver/driver.h"
 #include "driver/scambio.h"
@@ -10,6 +11,7 @@
 #include "lidar.h"
 #include "movement.h"
 #include "navigation.h"
+#include "aperiodic.h"
 
 
 #define FINE_GRID_MAX_SCORE         100         // massimo punteggio di una cella della griglia fine
@@ -53,6 +55,13 @@
 #define WALL_MAX_ERROR      (10 * M_PI / 180)   // errori più grandi di così non si correggono (muro storto o mobile in diagonale), espresso in radianti
 #define WALL_GAIN           0.02            // frazione dell'errore corretta a ogni giro: il rumore di un giro solo non sposta l'angolo 
 #define WALL_MIN_MOVE_M     0.05            // strada minima fra due correzioni: da fermo la vista è sempre la stessa e un suo piccolo difetto si sommerebbe giro dopo giro (da fermo l'IMU non deriva), espressa in m
+
+// Costanti della mappa salvata
+#define LOAD_SCORE_FREE         (-100)      // punteggio con cui si salva una cella libera caricata dal file
+#define LOAD_SCORE_OCCUPIED     80          // punteggio con cui si salva una cella occupata caricata dal file
+#define LOAD_BASE_WAIT          RT_S(3)     // all'avvio, tempo massimo di attesa del driver pronto per sapere se il robot è sulla base (la mappa si carica solo lì)
+#define MAP_COPY_MAX_ATTEMPTS   100         // tentativi della copia fra un job e l'altro prima di rinunciare
+#define MAP_COPY_RETRY_WAIT     RT_MS(2)    // attesa fra due tentativi della copia, se la mappatura sta lavorando
 
 #define STUCK_WINDOW_SCANS     7        // numero di scansioni ferme prima che scatti l'allarme "robot incastrato"
 #define STUCK_MIN_ODOM_MOVE_M  0.05     // distanza minima che il robot deve percorrere prima che si consideri in movimento
@@ -191,6 +200,13 @@ typedef struct {
     // posizione della stima all'ultima correzione dell'angolo con i muri
     double wall_last_x, wall_last_y;
 
+    // true finché l'angolo non è stato preso dai muri al primo giro buono (l'aggancio alla base può essere ruotato)
+    bool is_initial_theta_pending;
+
+    // zone proibite dell'utente caricate con la mappa (la zona della base si aggiunge quando il robot parte dalla base)
+    mapping_forbidden_zone_t user_zones[MAX_FORBIDDEN_ZONES - 1];
+    int num_user_zones;
+
     // punti misurati dal lidar da usare per l'allineamento 
     align_point_t lidar_point[LIDAR_GIRO_MAX_PUNTI];
 
@@ -249,6 +265,11 @@ static mapping_state_t map_state;
 
 // indica se il robot è partito dalla base di ricarica, è atomico perché lo legge il task di navigazione
 static _Atomic bool started_on_base;
+
+// contatore dei job, per la lettura della mappa fra un job e l'altro (copy_map_categories): sale di 1 all'inizio e alla
+// fine di ogni job, quindi è dispari mentre un job è in corso. REGOLA: la mappatura scrive la mappa (griglia fine,
+// contatori, griglia di navigazione) SOLO dentro il suo job, o in init_mapping prima che partano i task
+static _Atomic uint32_t map_job_counter;
 
 
 
@@ -449,6 +470,8 @@ uint32_t read_nav_map_version_number(void) {
 // funzione di inizializzazione del task
 // ! Questa funzione restituisce un intero che indica se ci sono stati problemi
 // ! Nella creazione del mutex
+static void load_map_if_on_base(void);
+
 int init_mapping(void) {
 
     // inizializza il doppio buffer passando i due buffer da usare
@@ -491,6 +514,12 @@ int init_mapping(void) {
 
     // inizializza la versione della correzione
     map_state.correction_version = 0;
+
+    // al primo giro buono del lidar l'angolo si prende dai muri, senza tetto: l'aggancio alla base può essere ruotato
+    map_state.is_initial_theta_pending = true;
+
+    // se il robot è sulla base carica la mappa attiva (prima che partano i task, quindi senza scadenze)
+    if (error_num == 0) load_map_if_on_base();
 
     return error_num;
 
@@ -1039,7 +1068,9 @@ static void publish_correction(bool is_stuck) {
 static void correct_theta_with_walls(int num_points) {
 
     // se il robot non si è spostato abbastanza dall'ultima correzione vede la stessa scena: niente correzione
-    if (hypot(map_state.aligned_x - map_state.wall_last_x, map_state.aligned_y - map_state.wall_last_y) < WALL_MIN_MOVE_M) return;
+    // (non vale per la prima, quella che prende l'angolo dai muri all'avvio)
+    if (!map_state.is_initial_theta_pending &&
+        hypot(map_state.aligned_x - map_state.wall_last_x, map_state.aligned_y - map_state.wall_last_y) < WALL_MIN_MOVE_M) return;
 
     // se il robot ruota troppo veloce i punti del giro sono deformati: niente correzione
     const lidar_giro_t *scan = &map_state.last_scan;
@@ -1082,6 +1113,16 @@ static void correct_theta_with_walls(int num_points) {
     // wrap_angle di 4 volte l'angolo riporta l'errore fra -45 e +45 gradi
     double walls_in_robot = atan2(sum_s, sum_c) / 4;
     double error = wrap_angle(4 * (walls_in_robot + map_state.aligned_theta)) / 4;
+
+    // la prima volta l'errore si toglie tutto: l'aggancio alla base può essere ruotato anche di 20 gradi, e
+    // fino a 45 non c'è ambiguità. La base sta contro un muro, quindi i muri si vedono sempre
+    if (map_state.is_initial_theta_pending) {
+        map_state.aligned_theta = wrap_angle(map_state.aligned_theta - error);
+        map_state.is_initial_theta_pending = false;
+        map_state.wall_last_x = map_state.aligned_x;
+        map_state.wall_last_y = map_state.aligned_y;
+        return;
+    }
 
     // un errore troppo grande è più probabilmente un muro storto che l'IMU: niente correzione
     if (fabs(error) > WALL_MAX_ERROR) return;
@@ -1881,9 +1922,12 @@ static void publish_base_zone(void) {
     zone_list.forbidden_zones[0].h = RECHARGING_STATION_ZONE_H;
     zone_list.num_zones = 1;
 
+    // dopo la base, le zone dell'utente caricate con la mappa
+    for (int i = 0; i < map_state.num_user_zones; i++) zone_list.forbidden_zones[zone_list.num_zones++] = map_state.user_zones[i];
+
     write_forbidden_zone_list(&zone_list);
 
-    mark_forbidden_cells(zone_list.forbidden_zones[0]);
+    for (int i = 0; i < zone_list.num_zones; i++) mark_forbidden_cells(zone_list.forbidden_zones[i]);
 }
 
 // Funzione helper che nei primi job controlla se il robot è partito dalla base di ricarica.
@@ -1910,8 +1954,199 @@ static void check_start_on_base(void) {
     }
 }
 
-// job del task
-void job_mapping(void *arg) {
+// funzione helper che restituisce la categoria di una cella fine per il file della mappa (docs/formato-mappa.md)
+static inline uint8_t fine_cell_category(int8_t score) {
+    if (score == 0) return MAP_CAT_UNKNOWN;
+    if (score == VOID_OBSTACLE) return MAP_CAT_VOID;
+    if (score == LOW_OBSTACLE) return MAP_CAT_FREE;     // il lidar lì vede libero: alla sessione dopo lo ritrova il paraurti
+    if (score > FINE_CELL_OCCUPATION_THRESHOLD) return MAP_CAT_OCCUPIED;
+    return MAP_CAT_FREE;
+}
+
+// funzione chiamata dal task aperiodico che copia la griglia fine a categorie mentre la
+// mappatura non sta lavorando. Il contatore dei job è dispari durante un job: se è dispari si aspetta, se cambia durante
+// la copia la copia mescola due versioni e si rifà. La mappatura non aspetta mai
+bool copy_map_categories(uint8_t *categories) {
+
+    for (int attempt = 0; attempt < MAP_COPY_MAX_ATTEMPTS; attempt++) {
+
+        uint32_t before = atomic_load(&map_job_counter);
+
+        // un job è in corso: aspetta un po' e riprova
+        if (before & 1) {
+            rt_dormi_fino_a(rt_adesso() + MAP_COPY_RETRY_WAIT);
+            continue;
+        }
+
+        // 4 celle per byte, la cella con indice più basso nei bit più bassi
+        for (uint32_t i = 0; i < MAP_CATEGORIES_BYTES; i++) {
+            const int8_t *cell = &map_state.fine_grid[i * 4];
+            categories[i] = (uint8_t)(fine_cell_category(cell[0]) | fine_cell_category(cell[1]) << 2 |
+                                      fine_cell_category(cell[2]) << 4 | fine_cell_category(cell[3]) << 6);
+        }
+
+        // i dati letti vanno guardati prima di rileggere il contatore (stesso schema di driver/scambio.c)
+        atomic_thread_fence(memory_order_acquire);
+        if (atomic_load(&map_job_counter) == before) return true;
+    }
+
+    return false;
+}
+
+// funzione chiamata dal task aperiodico: le zone dell'utente si scrivono solo in init_mapping, prima che partano i task
+int read_user_zones(mapping_forbidden_zone_t *zones) {
+    for (int i = 0; i < map_state.num_user_zones; i++) zones[i] = map_state.user_zones[i];
+    return map_state.num_user_zones;
+}
+
+// funzione helper che legge byte dal file della mappa e ne aggiorna il CRC. Ritorna false se il file finisce prima
+static bool read_map_bytes(FILE *f, uint32_t *crc, uint8_t *data, size_t size) {
+    if (fread(data, 1, size, f) != size) return false;
+    *crc = map_crc32(*crc, data, size);
+    return true;
+}
+
+// funzione helper che legge un uint16 little endian dal file della mappa
+static bool read_map_u16(FILE *f, uint32_t *crc, uint16_t *value) {
+    uint8_t bytes[2];
+    if (!read_map_bytes(f, crc, bytes, 2)) return false;
+    *value = (uint16_t)(bytes[0] | bytes[1] << 8);
+    return true;
+}
+
+// funzione helper che legge il file della mappa e scrive le celle nella griglia fine. Fa tutti i
+// controlli del formato: se uno fallisce la griglia torna vuota e ritorna false
+static bool read_map_file(FILE *f, int *x0, int *y0, int *width, int *height) {
+
+    uint32_t crc = 0;
+    uint8_t magic[MAP_FILE_MAGIC_LEN];
+    uint16_t x, y, w, h;
+    uint8_t zones_byte;
+
+    // header: magic number, rettangolo dentro la griglia, numero di zone
+    bool ok = read_map_bytes(f, &crc, magic, MAP_FILE_MAGIC_LEN) && memcmp(magic, MAP_FILE_MAGIC, MAP_FILE_MAGIC_LEN) == 0;
+    ok = ok && read_map_u16(f, &crc, &x) && read_map_u16(f, &crc, &y) && read_map_u16(f, &crc, &w) && read_map_u16(f, &crc, &h);
+    ok = ok && w > 0 && h > 0 && x + w <= FINE_MAP_CELL_NUMBER && y + h <= FINE_MAP_CELL_NUMBER;
+    ok = ok && read_map_bytes(f, &crc, &zones_byte, 1);
+
+    // numero di zone: al massimo una in meno della lista, il primo posto è della base
+    int num_zones = zones_byte;
+    ok = ok && num_zones <= MAX_FORBIDDEN_ZONES - 1;
+
+    // zone, da celle fini a metri
+    mapping_forbidden_zone_t zones[MAX_FORBIDDEN_ZONES - 1];
+    for (int i = 0; ok && i < num_zones; i++) {
+        uint16_t zx = 0, zy = 0, zw = 0, zh = 0;
+        ok = read_map_u16(f, &crc, &zx) && read_map_u16(f, &crc, &zy) && read_map_u16(f, &crc, &zw) && read_map_u16(f, &crc, &zh);
+        ok = ok && zx + zw <= FINE_MAP_CELL_NUMBER && zy + zh <= FINE_MAP_CELL_NUMBER;
+        zones[i].x = (zx - FINE_MAP_ORIGIN) * FINE_MAP_CELL_SIZE;
+        zones[i].y = (zy - FINE_MAP_ORIGIN) * FINE_MAP_CELL_SIZE;
+        zones[i].w = zw * FINE_MAP_CELL_SIZE;
+        zones[i].h = zh * FINE_MAP_CELL_SIZE;
+    }
+
+    // celle a sequenze, riga dopo riga
+    const uint32_t total = (uint32_t)w * h;
+    uint32_t done = 0;
+    while (ok && done < total) {
+        uint8_t run;
+        ok = read_map_bytes(f, &crc, &run, 1);
+        uint32_t count = run & MAP_RUN_COUNT_MASK;
+        uint8_t category = run >> MAP_RUN_CATEGORY_SHIFT;
+        ok = ok && count > 0 && count <= total - done;
+        for (uint32_t k = 0; ok && k < count; k++, done++) {
+            int cell_x = x + (int)(done % w), cell_y = y + (int)(done / w);
+            int8_t score = category == MAP_CAT_FREE ? LOAD_SCORE_FREE :
+                           category == MAP_CAT_OCCUPIED ? LOAD_SCORE_OCCUPIED :
+                           category == MAP_CAT_VOID ? VOID_OBSTACLE : 0;
+            map_state.fine_grid[cell_y << 10 | cell_x] = score;
+        }
+    }
+
+    // CRC, poi il file deve essere finito
+    uint8_t crc_bytes[MAP_FILE_CRC_LEN];
+    ok = ok && fread(crc_bytes, 1, MAP_FILE_CRC_LEN, f) == MAP_FILE_CRC_LEN;
+    ok = ok && (uint32_t)(crc_bytes[0] | crc_bytes[1] << 8 | crc_bytes[2] << 16 | (uint32_t)crc_bytes[3] << 24) == crc;
+    ok = ok && fgetc(f) == EOF;
+
+    if (!ok) {
+        memset(map_state.fine_grid, 0, sizeof map_state.fine_grid);
+        return false;
+    }
+
+    for (int i = 0; i < num_zones; i++) map_state.user_zones[i] = zones[i];
+    map_state.num_user_zones = num_zones;
+    *x0 = x; *y0 = y; *width = w; *height = h;
+    return true;
+}
+
+// funzione helper chiamata da init_mapping: se il robot è sulla base, carica la mappa attiva e ricalcola contatori e
+// griglia di navigazione. La mappa ha l'origine nella base, quindi fuori dalla base non si carica la mappa ma si esplora come se la mappa non esistesse
+static void load_map_if_on_base(void) {
+
+    // aspetta il driver pronto, poi guarda per un po' se il robot è sulla base (il bit può essere intermittente)
+    drv_stato_t drv_state = {0};
+    int64_t limit = rt_adesso() + LOAD_BASE_WAIT;
+    bool on_base = false;
+    while (rt_adesso() < limit && !on_base) {
+        drv_stato(&drv_state);
+        if (drv_state.fase == DRV_PRONTO && drv_state.sulla_base) on_base = true;
+        else rt_dormi_fino_a(rt_adesso() + RT_MS(50));
+    }
+    if (!on_base) {
+        fprintf(stderr, "mappatura: il robot non è sulla base, la mappa non si carica\n");
+        return;
+    }
+
+    char path[256];
+    if (map_file_path(path, sizeof path, "") != 0) return;
+    FILE *f = fopen(path, "rb");
+    if (!f) {
+        fprintf(stderr, "mappatura: nessuna mappa in %s, si esplora\n", path);
+        return;
+    }
+    int x0, y0, width, height;
+    bool ok = read_map_file(f, &x0, &y0, &width, &height);
+    fclose(f);
+    if (!ok) {
+        fprintf(stderr, "mappatura: la mappa %s non supera i controlli, si esplora\n", path);
+        return;
+    }
+
+    // contatori: celle osservate per cella di navigazione, celle occupate (anche il vuoto) attorno ai quadranti
+    for (int y = y0; y < y0 + height; y++) {
+        for (int x = x0; x < x0 + width; x++) {
+            int8_t score = map_state.fine_grid[y << 10 | x];
+            if (score == 0) continue;
+            map_state.num_observed_fine_cells[(x >> 2) | ((y >> 2) << 8)]++;
+            if (score > FINE_CELL_OCCUPATION_THRESHOLD || score == VOID_OBSTACLE) update_occupied_cells(x, y, 1);
+        }
+    }
+
+    // griglia di navigazione del rettangolo, più una cella di margine per l'ingrossamento degli ostacoli (i bordi della griglia restano bloccati)
+    int nav_x_min = x0 / FINE_CELL_IN_NAV_CELL - 1, nav_x_max = (x0 + width) / FINE_CELL_IN_NAV_CELL + 1;
+    int nav_y_min = y0 / FINE_CELL_IN_NAV_CELL - 1, nav_y_max = (y0 + height) / FINE_CELL_IN_NAV_CELL + 1;
+    if (nav_x_min < 1) nav_x_min = 1;
+    if (nav_y_min < 1) nav_y_min = 1;
+    if (nav_x_max > NAV_MAP_CELL_NUMBER - 2) nav_x_max = NAV_MAP_CELL_NUMBER - 2;
+    if (nav_y_max > NAV_MAP_CELL_NUMBER - 2) nav_y_max = NAV_MAP_CELL_NUMBER - 2;
+
+    pthread_mutex_lock(&navigation_map_data.mutex);
+    for (int nav_y = nav_y_min; nav_y <= nav_y_max; nav_y++) {
+        for (int nav_x = nav_x_min; nav_x <= nav_x_max; nav_x++) {
+            int nav_index = nav_y << 8 | nav_x;
+            uint8_t cell_mask = calc_nav_cell_bitmask(nav_index);
+            navigation_map_data.navigation_grid[nav_index] = calc_nav_cell_state(nav_index, cell_mask) | cell_mask;
+        }
+    }
+    navigation_map_data.version_number++;
+    pthread_mutex_unlock(&navigation_map_data.mutex);
+
+    fprintf(stderr, "mappatura: mappa caricata da %s (%d x %d celle, %d zone)\n", path, width, height, map_state.num_user_zones);
+}
+
+// lavoro di un job del task (lo chiama job_mapping, che ci mette attorno il contatore dei job)
+static void job_mapping_body(void *arg) {
     
     (void)arg;
 
@@ -2170,3 +2405,16 @@ void job_mapping(void *arg) {
     // Rilascia il mutex
     pthread_mutex_unlock(&navigation_map_data.mutex);
 }  
+
+// job del task: il lavoro vero sta in job_mapping_body, qui attorno c'è il contatore dei job. Chiamarlo da una funzione
+// a parte fa sì che nessun return anticipato del job possa saltare l'incremento finale
+void job_mapping(void *arg) {
+
+    // dispari: la mappa sta per cambiare
+    atomic_fetch_add(&map_job_counter, 1);
+
+    job_mapping_body(arg);
+
+    // pari: la mappa non cambia fino al prossimo job
+    atomic_fetch_add(&map_job_counter, 1);
+}

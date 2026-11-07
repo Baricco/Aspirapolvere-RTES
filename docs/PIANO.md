@@ -183,6 +183,38 @@ I task dell'esame li scrive l'utente da solo, sopra un framework e un driver pre
     davvero bloccata non è mai stata misurata). In `w4` spazzola accesa 321 s, mediana 511 mA, massimo 1.367 mA,
     nessun allarme. Nuova prova a comando nel driver: `RTES_PROVA_PREMI_DOPO_S` (una pressione del tasto di
     accensione dopo N s, solo nel valore pubblicato).
+  - **Task aperiodico nel framework e richieste** (decisioni dell'utente, 2026-11-07). Non un task sporadico di `rt/`
+    (avrebbe periodo e scadenza finti, e le scritture sulla flash conterebbero come scadenze mancate) ma un **tipo
+    nuovo**, `rt_aperiodico`: thread sul core 3 con lo scheduling **normale** di Linux (`SCHED_OTHER`, nessuna
+    priorità real-time: non può affamare i thread del kernel della flash spostati sul core 3 e resta fuori dal limite
+    del 95% dei thread real-time), fuori da Rate Monotonic e dalla sorveglianza del driver; `rt_aperiodico_sveglia()`
+    non blocca mai, chiamabile da qualsiasi thread, più sveglie durante un job valgono come una (cosa fare lo dicono i
+    numeri progressivi nei doppi buffer delle richieste); statistiche: numero di job, tempo massimo di esecuzione e
+    **tempo di risposta massimo** (dalla sveglia alla fine del job), niente scadenze. **Tutte le richieste passano da
+    funzioni di richiesta** in `tasks/vacuum/aperiodic.c` (`request_map_save(asse)` e, più avanti, ricerca della
+    posizione e comandi e zone dell'app): ognuna scrive il suo doppio buffer piccolo e sveglia il task, così chi chiede
+    fa una sola chiamata e non può sbagliare l'ordine. Il task aperiodico è l'unico che **esegue** le richieste, da
+    qualunque parte arrivino.
+  - **App, schema deciso** (2026-11-07, i dettagli si progettano dopo): un **thread di rete a parte** sul core 3,
+    scheduling normale, che non fa lavoro vero: i comandi ricevuti diventano chiamate alle funzioni di richiesta del
+    task aperiodico, lo stato da mandare lo legge dai doppi buffer che ci sono già. Così una rete lenta o bloccata non
+    rallenta mai il salvataggio o la ricerca della posizione. Il robot **non** riceve connessioni dirette dall'app:
+    si collega lui a un server, che fa da tramite (l'app deve funzionare anche fuori casa).
+  - **Implementazione del task aperiodico e del salvataggio** (2026-11-07, scritta da Claude su richiesta dell'utente,
+    da rivedere con lui): `rt_aperiodico` in `rt/` con 4 test; spostamento della flash sul core 3 all'avvio del driver
+    (`sposta_flash`, `drv_config_t.cpu_flash`, solo sul robot: sul robot 2 interruzioni e 7 thread spostati);
+    `tasks/vacuum/aperiodic.c/h` (task, `request_map_save`, `save_map`, CRC-32, percorso della mappa attiva);
+    contatore dei job e `copy_map_categories` in `mapping.c`; caricamento all'avvio (`load_map_if_on_base`, solo
+    sulla base) con punteggi `LOAD_SCORE_*`; primo angolo dai muri senza tetto (`is_initial_theta_pending`, sempre,
+    anche senza mappa); zone dell'utente caricate aggiunte a quella della base; missione che parte sempre
+    dall'esplorazione; asse calcolato e salvataggio a fine esplorazione; salvataggio all'aggancio riuscito;
+    `tools/leggi-mappa.py`; `prova.py` usa `build/prove-nav/maps` (o `RTES_MAPS`). Prove: simulatore (salvata 667
+    byte, ricaricata, esplorazione finita in 0,1 s, job del task aperiodico 2,4 ms); robot `s1` (esplorazione non
+    finita in 240 s: niente salvataggio, corretto), `s2` (salvata 228 × 260 celle; a 236 s guasto della spazzola
+    **vero**: alla partenza 2,3 A a 60, al contrario 6,2 A, contro 0,35-0,55 e 2,0-2,4 A con la spazzola libera).
+    Il primo angolo dai muri da agganciato: 15,8° in `s1` (aggancio ruotato, recuperato), −1,7° nel simulatore con
+    il robot dritto (errore di un giro solo, poi corretto dalla correzione graduale). Da fare: prova del caricamento
+    sul robot.
   - **Cosa serve al progetto e cosa è in più.** Serve: task aperiodico, salvataggio e caricamento della mappa,
     spostamenti della flash, ricerca della posizione nel task aperiodico, misure dei tempi con il task aperiodico al
     lavoro e analisi di schedulabilità. In più (l'utente, quando vuole): l'app (comandi, telemetria, disegno della
