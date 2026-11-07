@@ -480,6 +480,12 @@ static void pubblica_stato(int64_t t)
 	s.in_carica = d.s.in_carica;
 	s.sollevato = d.sollevato;
 	s.pressioni_accensione = d.pressioni[0];
+	if (d.cfg.prova_premi_s > 0 && (double)(t - d.t0) / RT_NS_PER_S >= d.cfg.prova_premi_s) {
+		static int detto;
+		if (!detto++)
+			evento("PROVA: da adesso i task vedono una pressione del tasto di accensione in più");
+		s.pressioni_accensione++;
+	}
 	s.pressioni_casa = d.pressioni[1];
 	s.sulla_base = d.s.sulla_base;
 	s.temperatura_c = d.s.temperatura_c;
@@ -1262,6 +1268,7 @@ void drv_config_default(drv_config_t *c)
 	c->senza_rt = getenv("RTES_GD32") != NULL;   /* nel simulatore si parte anche senza permessi per SCHED_FIFO */
 	c->registra = getenv("RTES_REGISTRA");       /* i programmi dei task non hanno opzioni: la registrazione si chiede così */
 	c->prova_rientro_s = getenv("RTES_PROVA_RIENTRO_DOPO_S") ? atof(getenv("RTES_PROVA_RIENTRO_DOPO_S")) : 0;
+	c->prova_premi_s = getenv("RTES_PROVA_PREMI_DOPO_S") ? atof(getenv("RTES_PROVA_PREMI_DOPO_S")) : 0;
 	c->cpu = 0;
 	c->priorita = RT_PRIO_DRIVER;
 	c->motori = 1;

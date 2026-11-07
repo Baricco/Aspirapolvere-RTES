@@ -42,6 +42,18 @@
 #define ALIGN_STEPS         5               // numero di passi della discesa del gradiente per ogni scansione
 #define ALIGN_MAX_STEP_M    0.05            // massimo spostamento in un passo della discesa del gradiente, lungo x e lungo y, espresso in m
 
+// Costanti della correzione dell'angolo con la direzione dei muri: la base sta contro un muro, quindi nella mappa i muri
+// sono a 0 gradi a meno di multipli di 90. L'IMU sbaglia di qualche grado in pochi minuti
+#define WALL_NEAR_POINTS_M  0.06            // due punti consecutivi del giro più vicini di così formano un tratto di muro, espresso in m
+#define WALL_MIN_SEGMENT_M  0.005           // tratti più corti di così si scartano (punti doppi), espresso in m
+#define WALL_MAX_RANGE_M    4.0             // punti più lontani di così non si usano (oltre il rumore del lidar cresce), espresso in m
+#define WALL_MIN_LENGTH_M   0.5             // lunghezza totale minima dei tratti per usare il giro, espressa in m
+#define WALL_MIN_STRENGTH   0.35            // quanto deve essere netta la direzione dei muri: 0 = nessuna, 1 = tutti i tratti paralleli o perpendicolari
+#define WALL_MAX_OMEGA      0.6             // giri fatti ruotando più veloce di così non correggono l'angolo, espressa in rad/s
+#define WALL_MAX_ERROR      (10 * M_PI / 180)   // errori più grandi di così non si correggono (muro storto o mobile in diagonale), espresso in radianti
+#define WALL_GAIN           0.02            // frazione dell'errore corretta a ogni giro: il rumore di un giro solo non sposta l'angolo 
+#define WALL_MIN_MOVE_M     0.05            // strada minima fra due correzioni: da fermo la vista è sempre la stessa e un suo piccolo difetto si sommerebbe giro dopo giro (da fermo l'IMU non deriva), espressa in m
+
 #define STUCK_WINDOW_SCANS     7        // numero di scansioni ferme prima che scatti l'allarme "robot incastrato"
 #define STUCK_MIN_ODOM_MOVE_M  0.05     // distanza minima che il robot deve percorrere prima che si consideri in movimento
 #define STUCK_MAX_MAP_MOVE_M   0.02     // distanza massima da percorrere perchè si consideri fermo
@@ -175,6 +187,9 @@ typedef struct {
 
     // indica se la stima è già inizializzata o meno
     bool aligned_valid;
+
+    // posizione della stima all'ultima correzione dell'angolo con i muri
+    double wall_last_x, wall_last_y;
 
     // punti misurati dal lidar da usare per l'allineamento 
     align_point_t lidar_point[LIDAR_GIRO_MAX_PUNTI];
@@ -1015,6 +1030,68 @@ static void publish_correction(bool is_stuck) {
     scambio_scrivi(&double_buffer_align, &mapping_correction);
 }
 
+// funzione helper che corregge l'angolo della stima allineata con la direzione dei muri. I punti sono quelli preparati da
+// prepare_lidar_points, rispetto al robot alla fine della scansione e già in ordine di angolo, quindi due punti consecutivi
+// vicini sono un pezzo dello stesso muro. Per la direzione a meno di 90 gradi si fa la media di 4 volte l'angolo dei tratti
+// (così un tratto a 0, 90, 180 o 270 gradi conta allo stesso modo), pesata con la loro lunghezza. 4 volte l'angolo si
+// ottiene senza funzioni trigonometriche: il versore del tratto è il numero complesso (c + i s), e la sua quarta potenza
+// è il quadrato del quadrato
+static void correct_theta_with_walls(int num_points) {
+
+    // se il robot non si è spostato abbastanza dall'ultima correzione vede la stessa scena: niente correzione
+    if (hypot(map_state.aligned_x - map_state.wall_last_x, map_state.aligned_y - map_state.wall_last_y) < WALL_MIN_MOVE_M) return;
+
+    // se il robot ruota troppo veloce i punti del giro sono deformati: niente correzione
+    const lidar_giro_t *scan = &map_state.last_scan;
+    double scan_seconds = (scan->t_fine_ns - scan->t_inizio_ns) / 1e9;
+    double start_x, start_y, start_theta, end_x, end_y, end_theta;
+    pose_at_time(scan->t_inizio_ns, &start_x, &start_y, &start_theta);
+    pose_at_time(scan->t_fine_ns, &end_x, &end_y, &end_theta);
+    if (scan_seconds <= 0 || fabs(wrap_angle(end_theta - start_theta)) / scan_seconds > WALL_MAX_OMEGA) return;
+
+    // somme pesate di 4 volte l'angolo dei tratti (parte reale e immaginaria) e lunghezza totale dei tratti
+    double sum_c = 0, sum_s = 0, sum_length = 0;
+
+    for (int i = 1; i < num_points; i++) {
+
+        const align_point_t *a = &map_state.lidar_point[i - 1];
+        const align_point_t *b = &map_state.lidar_point[i];
+
+        // scarta i punti lontani, dove il rumore del lidar è più alto
+        if (hypot(a->x, a->y) > WALL_MAX_RANGE_M || hypot(b->x, b->y) > WALL_MAX_RANGE_M) continue;
+
+        // il tratto fra i due punti: se sono troppo lontani non sono lo stesso muro, se sono troppo vicini è un punto doppio
+        double dx = b->x - a->x, dy = b->y - a->y;
+        double length = hypot(dx, dy);
+        if (length < WALL_MIN_SEGMENT_M || length > WALL_NEAR_POINTS_M) continue;
+
+        // versore del tratto, poi il suo quadrato (2 volte l'angolo) e il quadrato del quadrato (4 volte l'angolo)
+        double c = dx / length, s = dy / length;
+        double c2 = c * c - s * s, s2 = 2 * c * s;
+        double c4 = c2 * c2 - s2 * s2, s4 = 2 * c2 * s2;
+
+        sum_c += length * c4;
+        sum_s += length * s4;
+        sum_length += length;
+    }
+
+    // troppi pochi tratti, oppure muri senza una direzione netta (stanza piena di oggetti storti): niente correzione
+    if (sum_length < WALL_MIN_LENGTH_M || hypot(sum_c, sum_s) / sum_length < WALL_MIN_STRENGTH) return;
+
+    // direzione dei muri rispetto al robot, a meno di 90 gradi, poi nella mappa: deve essere 0 a meno di 90 gradi.
+    // wrap_angle di 4 volte l'angolo riporta l'errore fra -45 e +45 gradi
+    double walls_in_robot = atan2(sum_s, sum_c) / 4;
+    double error = wrap_angle(4 * (walls_in_robot + map_state.aligned_theta)) / 4;
+
+    // un errore troppo grande è più probabilmente un muro storto che l'IMU: niente correzione
+    if (fabs(error) > WALL_MAX_ERROR) return;
+
+    // correggi una piccola parte dell'errore, e ricorda dove è stata fatta la correzione
+    map_state.aligned_theta = wrap_angle(map_state.aligned_theta - WALL_GAIN * error);
+    map_state.wall_last_x = map_state.aligned_x;
+    map_state.wall_last_y = map_state.aligned_y;
+}
+
 // funzione helper che aggiorna la stima allineata del robot con l'ultima scansione.
 // ref_x, ref_y e ref_theta sono la posizione data dall'odometria alla fine della scansione.
 static void update_aligned_pose(double ref_x, double ref_y, double ref_theta) {
@@ -1040,6 +1117,9 @@ static void update_aligned_pose(double ref_x, double ref_y, double ref_theta) {
 
         // ogni passo avvicina la stima alla posizione in cui i punti cadono sugli ostacoli
         int num_points = prepare_lidar_points(ref_x, ref_y, ref_theta);
+
+        // prima l'angolo, con la direzione dei muri, così i passi su x e y usano già quello corretto
+        correct_theta_with_walls(num_points);
 
         for (int step = 0; step < ALIGN_STEPS; step++) {
             align_scan_step(map_state.lidar_point, num_points, &map_state.aligned_x, &map_state.aligned_y, map_state.aligned_theta);

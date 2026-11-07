@@ -46,8 +46,148 @@ I task dell'esame li scrive l'utente da solo, sopra un framework e un driver pre
     così il driver non aspetta mai un task;
   - task a 20 ms **svegliati dall'arrivo del frame** del GD32 (dati freschi, ogni frame una volta sola; nell'analisi
     sono sporadici con T = intervallo minimo), gli altri **a timer**;
-  - **server aperiodico** per batteria (lettura), spazzole, aspirazione, LED, comandi da remoto;
+  - **task aperiodico sul core 3** (deciso il 2026-11-07 al posto del server aperiodico, vedi "Task aperiodico" sotto):
+    salvataggio della mappa, ricerca della posizione dopo un sollevamento, più avanti comandi e telemetria dell'app.
+    Spazzole, aspirazione e LED non ci passano: li comandano la navigazione e il driver;
   - rete di sicurezza del kernel sui task RT (95% della CPU per secondo) lasciata attiva.
+- **Task aperiodico** (deciso il 2026-11-07, al posto del server aperiodico). Fa parte della fase 5.
+  - **Niente server, un thread su un core tutto suo (il 3).** Un server aperiodico (polling, deferrable, sporadico)
+    serve a limitare il tempo che il lavoro aperiodico toglie ai task periodici **dello stesso core**. Con RM
+    partizionato ogni core si analizza da solo: sul core 3 non c'è nessun task periodico da proteggere, quindi un budget
+    farebbe solo aspettare le richieste. Il task aperiodico si sveglia quando arriva una richiesta (`eventfd` o
+    `sem_post`, che non bloccano chi li chiama) e la esegue fino in fondo. Il core 3 è quindi riservato al lavoro
+    aperiodico; i task periodici stanno sui core 1 e 2 (il più pesante, la mappatura, usa ~12% di un core). Tre
+    condizioni, perché il partizionamento separa la CPU ma non il resto: (1) **nessun mutex** condiviso con i task
+    periodici; (2) **cache di secondo livello e bus della memoria** sono condivisi fra i core, quindi i tempi massimi dei
+    task vanno misurati **mentre il task aperiodico copia e salva**; (3) la **flash** (sotto).
+  - **Scambio dei dati**: comandi (più avanti dall'app), zone proibite e risultato della ricerca della posizione con
+    **doppi buffer piccoli** (`scambio.h`, un solo scrittore ciascuno). La mappa no (sotto).
+  - **Lettura della mappa fra un job e l'altro della mappatura.** La mappatura incrementa un contatore atomico
+    all'inizio e alla fine di ogni job (dispari = job in corso), in una funzione che chiama il job, così nessun `return`
+    anticipato salta l'incremento finale. Il task aperiodico legge il contatore, aspetta se è dispari, copia la mappa
+    nella sua memoria, rilegge il contatore: se è cambiato butta la copia e riprova. È lo schema del doppio buffer di
+    `scambio.h` (seqlock) senza la seconda copia. **Regola: la mappatura scrive la mappa solo dentro il suo job** (vero
+    oggi: griglia fine e griglia di navigazione condivisa le scrive solo lei nel job, l'azzeramento della sessione è nel
+    job, l'inizializzazione è prima dei task); la copia segnala un contatore rimasto dispari. Le interruzioni della
+    navigazione (stesso core, priorità più alta) non cambiano niente: il contatore resta dispari per tutto il job,
+    anche mentre la mappatura è sospesa. I task periodici non aspettano mai: nell'analisi non c'è nessun tempo di
+    blocco nuovo; resta solo l'effetto su cache e bus, da misurare. Misure sul robot (core 3, 2026-11-07): copia di 1 MB
+    0,8-2,4 ms; lettura dei punteggi con scrittura delle categorie a 2 bit 4,7-5,2 ms, contro una finestra libera fra due
+    job di almeno ~176 ms. **Scartati**: doppio buffer della mappa (~3,6 MB: due copie da 1,2 MB più quella di chi
+    legge, e la copia nel job della mappatura); lista delle celle cambiate (misura nel simulatore, soggiorno, 600 s:
+    a regime al massimo 64 punteggi e 13 categorie cambiati per job, ma fino a 5.131 punteggi e 2.908 categorie in un
+    job quando il robot vede la stanza la prima volta, quindi un buffer dimensionato sul picco, e il doppio buffer
+    perde le versioni non lette); blocchi cambiati con conferma di lettura (codice nuovo nella mappatura, 8 KB più una
+    copia della mappa nel task aperiodico); mappa compressa come struttura da aggiornare una cella alla volta.
+  - **Cosa si salva** (decisione dell'utente): la **griglia fine a categorie**, sconosciuta / libera / occupata, 2 bit
+    per cella (256 KB per tutta la griglia), senza punteggi (cambiano di continuo) e senza valori speciali (vuoto e
+    ostacolo basso valgono per la sessione). Il task aperiodico scrive le categorie direttamente mentre legge i
+    punteggi. Al caricamento la mappatura ricalcola contatori e griglia di navigazione; **da decidere**: il punteggio con
+    cui riparte una cella di ogni categoria (per esempio occupata +100, o meno, così un mobile spostato sparisce
+    prima). Compressione: non serve per il file (71 MB liberi su `/mnt/UDISK`, 1,2 MB scritti in 0,23 s); se servirà
+    all'app la fa il task aperiodico, in un colpo solo dalla copia (calcolo sulle mappe del simulatore: una stanza
+    pesa 0,3-0,6 KB come quadtree a 1 bit, ~1-1,6 KB come tratti di ostacolo + rettangoli liberi).
+  - **Ricerca della posizione dopo un sollevamento: si sposta nel task aperiodico** (decisione dell'utente,
+    2026-11-07, che potrebbe ancora cambiare). La conferma (`confirm_position`) resta nella mappatura. Il task
+    aperiodico legge la griglia fine con la lettura fra i job e restituisce il risultato con un doppio buffer piccolo;
+    senza fette da 10 ms per job, quindi i job della mappatura tornano corti (oggi fino a ~24 ms durante la ricerca).
+  - **Flash** (prova sul robot del 2026-11-07, senza motori). `/mnt/UDISK` e `/overlay` sono ext4 montate **`sync`**:
+    ogni `write` aspetta i dati sulla flash e il lavoro parte dal thread che scrive. `/tmp` è in RAM (le registrazioni
+    delle prove non toccano la flash). Tutte le interruzioni vanno al core 0 (quello del driver), anche quella della
+    flash (`nand`, la 102, ~15-25 al secondo anche a robot fermo) e del DMA (82). Si possono spostare sul core 3 (`8` in
+    `/proc/irq/N/smp_affinity`: provato, 3.904 interruzioni su 3.904 sul core 3) e così i thread del kernel `nand`,
+    `nand_rcd`, `jbd2/nandi-8`, `jbd2/nande-8`, `flush-93:0`, `bdi-default`, `sync_supers`; `kblockd` e i
+    `kworker/u` il kernel 3.4 non li lascia spostare. Ritardo massimo di risveglio di un task a priorità 90 mentre si
+    scrivono 1,2 MB tre volte dal core 3: senza scritture core 0 36,7 µs, core 2 21,5 µs; scritture con le impostazioni
+    di fabbrica 73,0 / 44,3 µs (scritture da 0,93, 0,44, 0,23 s); interruzioni e thread spostati sul core 3 47,3 /
+    37,2 µs (0,23 s ciascuna). 0 scadenze mancate. Gli spostamenti vanno messi nell'avvio del programma o nello script
+    della fase 6 (sul robot non c'è `taskset`: programmino `affinita`, oggi solo nello scratchpad della sessione).
+  - **Salvataggio della mappa, decisioni dell'utente** (2026-11-07; il codice lo scrive l'utente). **Quando**: a fine
+    esplorazione e ogni volta che il robot torna in riposo sulla base (fine missione, tasto casa, rientro per la
+    batteria). **Chi lo chiede**: la navigazione, con un doppio buffer piccolo che contiene anche l'asse delle strisce
+    (dato della navigazione: con una mappa caricata l'elenco delle celle raggiungibili dell'esplorazione non c'è, quindi
+    l'asse viene dal file), poi sveglia il task aperiodico. **Condizioni**: sessione partita dalla base, esplorazione
+    completata almeno una volta (fatta o caricata), mappatura in modo normale, niente guasto; si salva anche dopo un
+    sollevamento con la posizione ritrovata e confermata. **Contenuto**: solo il rettangolo delle celle viste, a
+    categorie 2 bit; asse delle strisce; **zone proibite dell'utente nello stesso file** (la zona della base resta
+    automatica). **Formato e controlli al caricamento: da rivedere con l'utente** (la proposta del 2026-11-07 aveva
+    numero magico, versione, lato della griglia e della cella, rettangolo, asse, celle a righe allineate al byte,
+    CRC-32). Se un controllo fallisce la mappa si ignora e si riparte con l'esplorazione (deciso). **Scrittura**: file
+    temporaneo rinominato sopra il vecchio, **nessuna copia della mappa precedente** (la flash dovrà contenere più
+    mappe). **Errore di salvataggio**: messaggio nel registro e un flag nel task aperiodico, che l'app mostrerà
+    all'utente; niente guasto. **Percorso**: `/mnt/UDISK/rt/maps/` (sul PC da variabile d'ambiente, per non toccare i
+    file del robot nelle prove). **Ripartire da zero**: dall'app. **Mobili spostati**: la mappa si aggiorna da sola
+    durante la pulizia (raggi che tolgono punteggio, colpi che lo aggiungono) e si salva a fine missione; limiti: tempo
+    per dimenticare un mobile legato al punteggio di caricamento, zone mai viste non esplorate con una mappa caricata,
+    deriva dell'IMU che si accumula da una sessione all'altra. **Più mappe** (2026-11-07): numerate, `/mnt/UDISK/rt/maps/0.rtm`, `1.rtm`, …, e un file di
+    configurazione con il numero della mappa attiva (lo cambierà l'app); se la mappa attiva manca o non supera i
+    controlli si riesplora e si salva con lo stesso numero. **Zone proibite**: con un comando ricevuto dal task
+    aperiodico (l'app riuserà lo stesso comando); serve anche segnarle nella mappa di navigazione, che oggi segna solo
+    la zona della base all'avvio. **Valori speciali**: si salva **solo il vuoto** (quarto valore dei 2 bit), così le
+    scale restano nella mappa; l'ostacolo basso resta solo per la sessione. **Zone nuove con una mappa caricata**:
+    a fine pulizia il robot rientra senza esplorare; la missione parte sempre dall'esplorazione, che con una mappa
+    completa non trova frontiere e passa subito oltre, e se la mappa salvata ha frontiere (celle libere accanto a
+    sconosciute, viste nella sessione prima, per esempio attraverso una porta aperta) esplora solo quelle.
+    **Porta riaperta e poi richiusa** (chiarito con l'utente il 2026-11-07): l'esplorazione va solo verso le frontiere
+    **raggiungibili** (la ricerca si allarga solo sulle celle libere). Se la porta è di nuovo chiusa, il lidar la vede
+    da lontano (ostacolo alto e solido), le sue celle tornano occupate in due giri, la navigazione ripianifica, la
+    frontiera dietro non si raggiunge più e l'esplorazione finisce; al massimo un breve tratto verso la porta in quella
+    sessione. Le celle dietro la porta restano nella mappa (il lidar non le vede più, nessuno le cambia) e si salvano;
+    dalla sessione dopo la frontiera risulta irraggiungibile già all'avvio e il robot non si muove. Quando la porta si
+    riapre e il robot la vede, la frontiera torna raggiungibile. Unico caso con urti: porte che il lidar non vede (vetro,
+    cancelletti bassi), segnate dal paraurti come ostacolo basso (non salvato): un tentativo per sessione, si chiude con
+    una zona proibita.
+  - **Deriva dell'IMU, analisi delle registrazioni** (2026-11-07, script `deriva_imu.py` nello scratchpad della sessione).
+    Per ogni giro del lidar a meno di 0,6 rad/s: direzione dei muri nel sistema dell'IMU, a meno di 90° (media circolare
+    di 4 volte l'angolo dei tratti fra punti vicini, pesata con la lunghezza); con un'IMU perfetta resta costante, quanto
+    cambia è l'errore dell'IMU (mediana su 20 s). Il metodo riconosce i sollevamenti (`m1` a 556 s, `m4` a 233 e 393 s,
+    dove l'angolo lo ritrova la ricerca). Fuori dai sollevamenti: `m1` fino a +8,3° in 540 s, `m2` fino a +7,8° e poi
+    +2°, `f2` fino a +5,6° e poi ~+1°, `r15` fino a +3,7°, le altre 1-3° di scarto medio. Nessun modello fisso spiega:
+    deriva nel tempo (segno che cambia, da fermo −0,3°/h), scala unica (da −0,9% a +0,7% fra missioni, 2-3° di scarto),
+    due scale oraria/antioraria (segno di solito uguale ma valori fra 0,1% e 2%, 1-2,7° di scarto). Quindi niente
+    taratura: **l'angolo va corretto con il lidar**. Proposta (da decidere con l'utente): nella mappatura, a ogni giro,
+    direzione dominante dei muri nella mappa (deve essere 0° a meno di 90°, perché la base sta contro un muro), piccola
+    frazione dell'errore per giro tramite `mapping_correction_t`, solo con direzione netta, rotazione lenta e un tetto
+    (es. ±10°). Scartato l'allineamento dell'angolo sulla mappa (il 2/11 derivava da solo fino a 12,6°).
+    **Scritta da Claude su richiesta dell'utente** (2026-11-07, `correct_theta_with_walls` in `mapping.c`, costanti `WALL_*`,
+    chiamata in `update_aligned_pose` prima dei passi su x e y): quarta potenza del versore dei tratti (niente funzioni
+    trigonometriche nel ciclo), solo dopo `WALL_MIN_MOVE_M` (5 cm) di strada dall'ultima correzione (da fermo la stessa
+    vista ripeteva lo stesso difetto: nella prima prova l'angolo era andato a −2° con il robot fermo 250 s sotto il
+    tavolo). Prove nel simulatore (soggiorno, seme 1, 600 s, dove l'IMU è quasi perfetta, quindi l'errore è tutto della
+    correzione): errore del metodo per giro −0,3° in media, fra −2,2° e +1,4° (10%-90%), mediana per zona di 1 m² fino a
+    ±1,5°; |errore d'angolo| mediana / 90%: senza correzione 0,10° / 0,72°, `WALL_GAIN` 0,05 0,32° / 0,86°, 0,02 0,20° /
+    0,63° (consigliato 0,02, non ancora messo nel codice). Errore di posizione: uguale (~3 cm) fino a 7 minuti; con la
+    correzione l'ultimo minuto sale a ~9 cm lungo il muro in alto e il divano, zona dove la prova senza correzione in quel
+    momento non era (percorsi diversi), quindi non attribuibile con certezza. 0 scadenze mancate. **Prova sul robot da
+    fare** con l'utente presente (lì l'IMU sbaglia di 5-8°): missione con `osserva-robot` e analisi dell'angolo corretto.
+    **Prove sul robot (2026-11-07)**: `WALL_GAIN` portato a 0,02 e `WALL_MIN_MOVE_M` 5 cm. Analisi con
+    `deriva_corretta.py` (scratchpad: direzione dei muri con la geometria di `drv_punto_xy` e scarto del lidar
+    14,5°, angolo dell'IMU grezza contro quello pubblicato nel `.oss`; attenzione: il primo frame di una registrazione
+    porta l'imbardata della sessione prima, l'avvio del driver la azzera dopo ~0,2 s). `w3` (5 min fino al guasto della
+    spazzola): IMU fino a −2,9°, corretto ~0 ± 1°. `w4` (12 min, esplorazione, bordi, rientro, tappeto all'uscita):
+    IMU da −1,5° a −6,3° (massimo −5,8° a 510 s), corretto fra −1,2° e +1,7° (−3,1° per un minuto a 510 s), alla fine
+    −1,5°; 0 scadenze mancate. **Agganci con rotazioni diverse**: in `w4` il robot si è riagganciato ruotato di ~18°
+    rispetto alla partenza (come in `f2`, ~20°): con la mappa salvata l'avvio dopo parte con l'angolo 0 ma ruotato
+    rispetto alla mappa, e la correzione dei muri (tetto 10°) non lo recupera. **Da risolvere nel caricamento della
+    mappa**: per esempio una prima correzione senza tetto all'avvio (entro ±45° nessuna ambiguità) o la ricerca della
+    posizione.
+  - **Soglie della spazzola centrale corrette** (2026-11-07, dopo il guasto di `w3` a 346,9 s: le provvisorie 600 e
+    1000 mA erano sotto la corrente di lavoro). Correnti vere della centrale a terra: a 60 mediana 0,34-0,54 A,
+    minimo su 10 frame fino a 0,77 A (`f2`), 1,44 A una volta in `m4` vicino a un sollevamento, all'accensione fino a
+    0,8 A (1,64 in `m4`); al contrario (−100) libera 2,0-2,4 A, picco 3,06 A (prova `rev1`), e con −100 il GD32 **non**
+    la ferma dopo ~4,2 s (andata avanti 8,6 s: i 4,2 s valgono per −30). Firmware originale (Ghidra,
+    `CFerrariExceptionDetect::detectRollBrush`, `CStallSlipDetect::isRollBrushOvercurrent`): sovraccarico grave con
+    corrente > 1,2 A (e un livello a 2,0 A) per il 70% di una finestra; non gira al contrario ma ferma la spazzola per
+    5, 10, 60, 300 s, alla quarta volta eccezione. Ora `THRESHOLD_BRUSH_CURRENT` 1200 mA per 35 frame (0,7 s, non
+    sarebbe mai scattata in `f2`, `f3`, `m2`, `w3`) e `THRESHOLD_BRUSH_UNLOCK_CURRENT` 3000 mA (stima: una spazzola
+    davvero bloccata non è mai stata misurata). In `w4` spazzola accesa 321 s, mediana 511 mA, massimo 1.367 mA,
+    nessun allarme. Nuova prova a comando nel driver: `RTES_PROVA_PREMI_DOPO_S` (una pressione del tasto di
+    accensione dopo N s, solo nel valore pubblicato).
+  - **Cosa serve al progetto e cosa è in più.** Serve: task aperiodico, salvataggio e caricamento della mappa,
+    spostamenti della flash, ricerca della posizione nel task aperiodico, misure dei tempi con il task aperiodico al
+    lavoro e analisi di schedulabilità. In più (l'utente, quando vuole): l'app (comandi, telemetria, disegno della
+    mappa) e la compressione della mappa. Le zone proibite servono (la credenza) ma si possono leggere da un file
+    all'avvio, senza app.
 - **Lidar a 6 giri/s** (come AuxCtrl, ~340 punti per giro), deciso il 2026-10-06 all'inizio della fase 4: il task
   del lidar elabora un giro ogni 200 ms.
 - **Navigazione ogni 100 ms** (2026-10-11): accorcia la catena sicurezza → navigazione → moto (circa 0,3 s nel caso
@@ -465,7 +605,7 @@ I task dell'esame li scrive l'utente da solo, sopra un framework e un driver pre
     - **sollevamento nei task, progetto approvato dall'utente** (2026-11-06; riusare il più possibile il codice che c'è, niente codice nuovo se non serve). **Mappatura**: fa la ricerca e ha uno stato (normale, posizione persa, da confermare, non ritrovata) che pubblica; legge `sollevato` direttamente dal driver (non `valid`, che resta falso durante la ricerca); fuori da "normale" non scrive niente sulla mappa. Ricerca a fette, in ordine: ultima posizione nota (con l'allineamento che c'è), riappoggiato sulla base (posizione della base, decisione da confermare), tutta la mappa a passi di 10 cm con un numero fisso di posizioni per job, tenendo le 2-3 migliori lontane fra loro (se la seconda vale quasi quanto la prima: ambiguo, non ritrovata). **Conferma** (corretta il 2026-11-06: ruotare sul posto non serve, il lidar vede già 360°): in `MAP_UNCONFIRMED` il robot riprende la missione normalmente (`valid` vero, navigazione invariata), la mappatura allinea e controlla a ogni scansione che almeno l'80% dei punti cada su celle occupate ma **non scrive sulla mappa**; dopo un tratto percorso (costante, ~1 m, da tarare) passa a `MAP_NORMAL`, se il controllo non regge torna a `MAP_LOST` e prova la candidata dopo. `valid` è falso solo in `MAP_LOST`. **Passi 1-3 fatti** (2026-11-06, scritti da Claude su richiesta dell'utente): stato in `mapping_correction_t.state`, `publish_correction` e `resume_after_lift` in `mapping.c` (per ora riappoggiato = si riparte dall'ultima posizione nota, ignorando odometria e IMU misurate in aria, eventi saltati), `is_position_lost` in `movement.c`, in `navigation.c` uscita dalla base annullata se sollevato e ripresa se riappoggiato sulla base. Prova nel simulatore (`prova.py --solleva T D`, stanza vuota): fermo in `WAIT` e ripresa del giro dei bordi, 0 scadenze mancate; spostato a mano al centro della stanza riparte credendosi dov'era (manca la ricerca). **Movimento**: `valid` falso se il driver dice sollevato o se la mappatura non è in "normale". **Navigazione**: ricorda la missione (come `interrupted_mission`), poi riparte dallo stato di pianificazione della missione, non dagli stati a metà strada. **Non ritrovata**: mappa **provvisoria** (precisazione dell'utente): la mappa vera resta salvata (quando ci sarà il salvataggio col server aperiodico; oggi si perde), il robot ne crea una nuova con l'origine dove è stato riappoggiato, esplora con l'esplorazione che c'è guardando gli infrarossi e, appena li vede, chiede l'aggancio al driver; esplorazione finita senza infrarossi: guasto. Agganciato, il robot è nell'origine della mappa vera, che si può ricaricare. Nota: con `valid` falso e zone proibite la sicurezza blocca il robot (`safety.c:228`), quindi nella mappa provvisoria `valid` deve tornare vero. **IMU da sollevato: non affidabile** (prova `imu1`, 2026-11-06, `build/robot/fase3/imu1/`: robot girato a mano di ~90° in un verso e ~90° nell'altro, ~15 s in aria). Il lidar, confrontando la scansione prima e dopo, dà -2,3° (67% dei punti entro 3 cm); l'IMU dà +16,8° (con +16,8° solo il 6% dei punti combacia), quindi ~19° di errore. In aria l'IMU conta ma, nei campioni a 1 al secondo, non supera +39° quando la rotazione vera era ~90°. La ricerca non può prendere l'angolo dall'IMU.
     - **ricerca globale, progetto e misure** (2026-11-06). Algoritmo approvato dall'utente: ramificazione e potatura sulla griglia fine (Olson, "Real-Time Correlative Scan Matching", 2009; come Cartographer), nella mappatura, 4 funzioni (mappe ingrossate, punti, passo della ricerca a blocchi fissi per job, rifinitura), parametri in un blocco di `#define` a parte. Scartato dall'utente l'angolo ricavato dai muri. Sulla base (in carica) la posizione è la base senza ricerca; prime candidate l'ultima posizione nota e la base. Prototipo nello scratchpad della sessione (non in repo), con rigioco dei `.reg` su pseudo-seriali e registratore delle scansioni. Misure: punteggio 2 sulla cella occupata e 1 sulle vicine (il binario perde precisione: fino a 1° nel simulatore), un punto ogni 15 cm entro 4 m (~70 punti), passo d'angolo = cella / portata (~0,7°), 6 livelli, soglia 80%; rifinitura: ±0,4° a passi di 0,1° con 5 passi di `align_scan_step` per angolo. Precisione contro la posizione allineata: simulatore (soggiorno, robot fermo) media 0,3 cm, max 1,4 cm, angolo max 0,47°; robot vero (`f2`, seconda metà della prova) max 1,5 cm e 0,22°. Sui primi 2 minuti di `f2` fino a 12 cm e 3°: la mappa finale è ruotata di ~3° rispetto all'inizio (il robot si è riagganciato ruotato di ~20° secondo il lidar, 22,6° secondo l'IMU: deriva dell'IMU di ~3° in 280 s, da guardare a parte). Nessuna posizione sbagliata in 41 + 115 ricerche; una scansione vera su 41 sotto la soglia dell'80% (al 70% le trova tutte, ma il caso peggiore raddoppia). Tempi sul robot: 22,6 ns per lettura, ricerca in media 2,6 milioni di letture (59 ms), massimo 5,0 milioni (113 ms) su una zona conosciuta di 14 × 10 m; preparazione delle mappe ingrossate 20 ms; rifinitura ~5.400 letture bilineari a 359 ns (1,9 ms). Partire dall'ultima posizione nota toglie solo il 9%. Decisioni dell'utente (2026-11-06): 10 ms di ricerca per job, soglia 80% (meglio fallire ogni tanto che essere imprecisi), niente candidate iniziali (solo in carica = base). **Una sola struttura per tutti i livelli** (idea dell'utente): il valore di una cella cresce salendo di livello (finestre una dentro l'altra), quindi per cella si salvano solo i primi livelli a cui vale ≥ 1, = 2 e contiene una cella libera, 3 bit ciascuno (7 = mai), in un `uint16_t`: 2 byte per cella invece di 14 (casa di 20 × 20 m: 320 KB), risultati identici, lettura +24% sul robot (28,4 ns con una tabellina per livello), ~15 job invece di ~12 nel caso peggiore misurato. Memoria sul PC: nessuna modifica a `rt/rt.c` (proposta sbagliata, ritirata): se il blocco della memoria non riesce il driver lo scrive e va avanti (`driver.c:1289`); provato con 320 KB in più, il programma parte e il blocco riesce ancora.
     - **ricerca globale e conferma scritte** (2026-11-06, da Claude su richiesta dell'utente, tutto in `tasks/vacuum/mapping.c`): costanti `SEARCH_*` e `CONFIRM_*` in un blocco a parte, tipi `search_phase_t` e `search_node_t`, struttura `map_state.search`; `restart_from_pose` (sostituisce `resume_after_lift`), `give_up_search` (per ora `drv_segnala_guasto(DRV_FAULT_POSITION_NOT_FOUND)`, poi la mappa provvisoria), `count_failed_attempt` (3 tentativi, poi si arrende), le 4 funzioni `build_search_grid`, `prepare_search_points`, `search_step`, `refine_search_result` con i loro aiuti, `relocate` (fasi in `MAP_LOST`) e `confirm_position` (`MAP_UNCONFIRMED`, 2 scansioni di fila sotto l'80% scartano, 1 m percorso conferma). La pila è per un angolo alla volta (+3% di letture nel prototipo, pila da 5.105 a 18 blocchi). Prove nel simulatore (soggiorno, missione dalla base, sollevato a 60 s per 6 s, `prova.py --solleva 60 6 --sposta X Y A`): rimesso dove era, spostato di 2,6 m e 66°, spostato di 4,4 m e 144°: trovato ~2 s dopo il riappoggio con 0,5-3 cm e < 0,1° di errore, confermato dopo ~15 s, 0 scadenze mancate. Da fare: tempo dei job della ricerca sul robot (budget calcolato con 28,4 ns per lettura del prototipo), provare un caso di fallimento e di posizione ambigua, mappa provvisoria.
-    - **ricerca e server aperiodico** (2026-11-06): l'utente ritiene più sensato, dal punto di vista logico, che la ricerca stia nel server aperiodico (richiesta aperiodica che arriva col sollevamento). Per ora resta nella mappatura; **quando il server sarà fatto, decidere con l'utente se spostarla** (la conferma resta comunque nella mappatura).
+    - **ricerca e server aperiodico** (2026-11-06): l'utente ritiene più sensato, dal punto di vista logico, che la ricerca stia nel server aperiodico (richiesta aperiodica che arriva col sollevamento). **Deciso il 2026-11-07: si sposta nel task aperiodico** (vedi "Task aperiodico" in cima); la conferma resta nella mappatura.
     - **posizione non ritrovata = guasto** (decisione dell'utente, 2026-11-06): niente mappa provvisoria, il robot va in guasto (`DRV_FAULT_POSITION_NOT_FOUND`); tolto `DRV_FAULT_BASE_NOT_FOUND`, e in `MAP_NOT_FOUND` la posizione non è valida. Prove nel simulatore: robot portato in una stanza mai vista (`separata`): 3 ricerche senza risultato, guasto 3,7 s dopo il riappoggio, corretto. **Problema aperto**: stanza vuota 12 × 3 m simmetrica (`simmetrica`, base al centro di un lato), robot appoggiato a un'estremità: la ricerca sceglie la posizione gemella ruotata di 180° (entro 4 m le due estremità sono identiche, punteggi uguali) e la conferma la accetta dopo 1 m (5-8 m di errore, la mappa verrebbe scritta nel posto sbagliato). **Decisione dell'utente**: si accetta, niente controllo dell'ambiguità (proposto: seconda ricerca lontano dalla migliore con soglia "migliore meno un margine", ambigua = tentativo fallito). Rischio residuo da tenere presente nelle prove vere: corridoi lunghi e lisci (ambiguità lungo l'asse). Codici del guasto nei task fatti: `stop_and_fail(motivo)` in `navigation.c` (9 chiamate) e `default` di `movement.c`.
     - **avvio e tasti** (decisioni dell'utente, 2026-11-06). Acceso, il robot aspetta un comando (tasto o, più avanti, app). In riposo sulla base: accensione = parte la pulizia (con esplorazione se la mappa non c'è, cioè se non è stata caricata o fatta in questa accensione), casa = niente. In missione: accensione = pausa / ripresa, casa = rientro subito (la missione finisce; la pressione dopo fa partire una pulizia nuova). Partenza fuori dalla base: come oggi. Fine missione: riposo sulla base fino al comando dopo. Guasto: entrambi i tasti lo azzerano e poi fanno la loro azione; si azzera da solo anche quando il robot viene rimesso sulla base. LED: azzurro fisso in riposo e al lavoro, azzurro che respira in pausa. Nuova pulizia nella stessa accensione: la mappa vale come caricata, ma **si azzera tutto quello che in una sessione non si aggiorna più** (celle troppo strette, quadranti attraversati, celle speciali del vuoto e degli ostacoli bassi, metà pulite); ostacoli e celle libere restano. **Driver fatto** (Claude): pressioni brevi (< 1 s, al rilascio) contate in `drv_stato_t.pressioni_accensione` / `pressioni_casa`, pressione o ritorno sulla base dopo almeno 1 s fuori = tentativo di azzerare il guasto prima di contare la pressione, `DRV_LED_AZZURRO` / `DRV_LED_AZZURRO_RESPIRA`, scenario 8c di `tools/prova-driver.py`. Navigazione e mappatura scritte da Claude su richiesta dell'utente (2026-11-06): `NAV_STATE_PAUSE`, `read_commands`, `apply_commands`, `start_new_mission`, `start_pause`, `go_home_now`, partenza in `SLEEP`, guasto del driver = `FAILURE` della navigazione; nella mappatura `reset_session_data` (chiesto con `navigation_closed_cells_t.mission_num`), `calc_nav_cell_state`, `clear_fine_cell_special_value`, `MAP_NOT_FOUND` che riprova dopo l'azzeramento del guasto. `tools/prove-nav/prova.py` preme da solo il tasto di accensione a 2 s (`--senza-avvio`, `--premi T TASTO`). Provati nel simulatore: avvio col tasto, pausa e ripresa, tasto casa, seconda pulizia con azzeramento (30 quadranti attraversati tolti), guasto azzerato dal tasto e dal ritorno sulla base, 0 scadenze mancate. **Risolto** (detto dall'utente il 2026-11-07): nel soggiorno del simulatore l'aggancio a infrarossi era rimasto 45 s fra ricerca, centratura e avvicinamento senza riuscire (prova con il tasto casa a 55 s).
     - **prove sul robot di avvio, tasti e sollevamento** (2026-11-06 sera, `build/robot/fase3/tasti1/`, `m2/`). Tasti letti anche in riposo sulla base con i sensori spenti (pressioni da 40-130 ms). Missione col tasto: partenza, pausa (LED che respira, spazzole ferme, lidar acceso: voluto), ripresa, tutto giusto, 0 scadenze mancate. **Sollevamento: due problemi.** (1) **Job della mappatura fino a 24,4 ms** invece dei 10 decisi (nessuna scadenza mancata, periodo 200 ms): sul PC, nel rigioco del `.reg`, preparazione della griglia 2,1 ms per job e passo della ricerca 1,5 ms, sul robot ~16 volte di più; i budget (`SEARCH_BUILD_CELLS_PER_JOB`, `SEARCH_LOOKUPS_PER_JOB`) vanno misurati sul robot, e la preparazione è più lenta del prototipo. (2) **Punteggi veri più bassi del simulatore**: rimesso dov'era, la posizione giusta fa 84% (simulatore > 90%); durante la conferma, nel rigioco, 257 scansioni con media 84,7% e minimo 75% (in rotazione a 1,2 rad/s): con la soglia all'80% la conferma scarta posizioni giuste (la mappatura va avanti e indietro fra persa e incerta, e l'aspirazione si accende e si spegne: l'ha sentito l'utente), e spostato di ~2 m la ricerca trova al massimo 79-80%, poi guasto. Tempo dal riappoggio alla posizione: 6,7 s (giro del lidar ~2 s, preparazione ~2 s, ricerca). Decisioni dell'utente: `SEARCH_MIN_SCORE_PCT` 70 (ricerca e conferma), `CONFIRM_MAX_BAD_SCANS` 5, scansioni in rotazione oltre `CONFIRM_MAX_OMEGA` (0,5 rad/s) non controllate in conferma; il tempo dei job della ricerca (~24 ms) va bene così, anche 30 ms. Rigiocando `m2.reg` con questi valori: primo sollevamento, una ricerca (85%), nessuna scansione sotto soglia, confermata dopo 1 m; secondo, una ricerca (80%) in una posizione a ~1,7 m da dove era il robot, plausibile, non verificabile (la registrazione finisce col robot fermo). **Prova sul robot con i valori nuovi** (`build/robot/fase3/m4/`, 2026-11-06 sera): partenza col tasto, rimesso dov'era (ritrovato 4,1 s dopo il riappoggio, 2 cm, angolo 107° invece di 126°: l'utente l'aveva girato), aspirazione ripartita una volta sola; spostato di 2,7 m (ritrovato 4,7 s dopo, ripartito in modo sensato secondo l'utente); pausa, tasto casa, rientro e aggancio al primo tentativo. 0 scadenze mancate in tutti i task, job della mappatura al massimo 23,0 ms. Prova `m3`: l'utente davanti al robot è stato mappato come ostacolo, la zona raggiungibile è diventata minuscola, bordi e pulizia finiti in 19 s e rientro senza strada = guasto `DRV_FAULT_NO_PATH_HOME`. Proposta da discutere: riprovare la ricerca del percorso per qualche secondo prima del guasto. Nota: `tools/osserva-robot` leggeva male il campo `state` della navigazione (`tools/driver-robot.sh` prendeva l'ultimo campo chiamato `state` delle informazioni di debug, quello della mappatura); **corretto** il 2026-11-07: si prende il `state` dichiarato subito prima di `mission`.
@@ -578,7 +718,7 @@ I task dell'esame li scrive l'utente da solo, sopra un framework e un driver pre
 - **Mappa e navigazione, punti aperti** (2026-10-13): ingombro della base, aggancio alla base nel driver (passaggio
   di consegne dai task al driver e ritorno). La larghezza della striscia è decisa (10 cm con le mezze celle,
   2026-10-28), e anche l'asse delle strisce (calcolato a ogni pulizia, vedi la pulizia con BA\*).
-- **Tipo di server aperiodico** (polling, deferrable, sporadic) e **tipo di app** (con l'home server, più avanti:
+- **Tipo di server aperiodico**: deciso il 2026-11-07, nessun server ma un task aperiodico sul core 3 (vedi "Task aperiodico" in cima). **Tipo di app** (con l'home server, più avanti:
   zone proibite, preferenze, programmazione della pulizia).
 - **Zone proibite** (da fare, ricordato dall'utente il 2026-11-03): le inserisce l'utente dall'app e le scrive un **task aperiodico** con `write_forbidden_zone_list`; è normale che oggi nessun task la chiami. Oggi le legge solo la sicurezza (`safety.c:225`). **Manca anche la mappa**: niente segna le celle come `NAV_CELL_FORBIDDEN` a partire dalle zone (`mapping.c` conserva solo lo stato se c'è già), quindi la navigazione non le vede e la pagina del simulatore non le disegna.
 - **Assegnazione dei task ai core**: rimandata (2026-10-06) a quando ci saranno i WCET misurati sul robot; il criterio
@@ -640,7 +780,7 @@ lidar → /dev/ttyS1 → AuxCtrl
    validato anche a terra. Aperti per le fasi dopo: aggancio alla base con l'IR, gradino.
 4. **Task RT** (utente, da solo) — sicurezza, controllo del moto, lidar, comportamento, watchdog dei task, mappatura
    in hard RT; WCET, jitter, analisi di schedulabilità.
-5. **App e server aperiodico** (insieme) — scelta del tipo di app e del server; comandi e telemetria.
+5. **Task aperiodico e app** — task aperiodico sul core 3 (salvataggio della mappa, ricerca della posizione), poi l'app (comandi e telemetria, in più).
 6. **Installazione persistente e relazione** — avvio automatico del nostro software con ritorno all'originale,
    eventuale rilancio automatico, SSH solo con chiave, documentazione finale.
 
@@ -658,7 +798,7 @@ batteria, watchdog dei task + stato di guasto (~50 ms).
 | Lidar | timer | 200 ms | elaborazione del giro: ostacoli, distanze, dati per mappa e navigazione |
 | Navigazione | timer | 100 ms | dove andare: esplorazione, copertura con BA*, evitare ostacoli e zone proibite |
 | Mappatura | timer | 200 ms (500 se il WCET non ci sta) | griglia di occupazione + allineamento delle scansioni |
-| Comandi, LED, spazzole, aspirazione, stato | server aperiodico | budget del server | eventi dall'app e dall'home server |
+| Salvataggio della mappa, ricerca della posizione, comandi dell'app | task aperiodico sul core 3 | evento (nessun budget: core tutto suo) | richieste dei task e dell'app |
 | Telemetria e log | sfondo | best effort | non RT |
 
 ## Comandi (`./rtes.sh`)

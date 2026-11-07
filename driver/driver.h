@@ -69,6 +69,9 @@ typedef struct {
 	double prova_rientro_s;      /* SOLO PROVE (env RTES_PROVA_RIENTRO_DOPO_S): dopo questi secondi i task leggono una batteria
 	                                bassa, così rientrano alla base senza finire la missione. Vale solo per drv_stato():
 	                                le protezioni del driver usano sempre la tensione vera. 0 = mai (default) */
+	double prova_premi_s;        /* SOLO PROVE (env RTES_PROVA_PREMI_DOPO_S): dopo questi secondi i task vedono una pressione
+	                                breve in più del tasto di accensione, così la missione parte senza premerlo. Vale solo
+	                                per drv_stato(): i tasti veri si contano come sempre. 0 = mai (default) */
 	int senza_rt;                /* 1 = se mancano i permessi per SCHED_FIFO parte lo stesso (solo per il PC) */
 	int forza;                   /* 1 = non controlla se un altro programma usa già le seriali */
 } drv_config_t;
@@ -178,7 +181,8 @@ void drv_punto_xy(const lidar_punto_t *p, double *x, double *y);
 /* Non si bloccano mai. Il driver applica il comando entro il suo prossimo risveglio (di solito < 1 ms). */
 
 void drv_velocita(double v_m_s, double w_rad_s);    /* v in [-0,5, 0,5] m/s, omega in [-2pi, 2pi] rad/s */
-void drv_spazzole(int laterale, int centrale);      /* -100..100; centrale < 0 = sblocco per ~4 s (lo ferma il GD32) */
+void drv_spazzole(int laterale, int centrale);      /* -100..100; centrale < 0 = al contrario alla velocità massima (con -30 il GD32 la
+                                                        ferma dopo ~4,2 s, con -100 no: va fermata mandando un altro valore) */
 void drv_aspirazione(int giri_min);                 /* 0..30000; rifiutata se drv_config_t.aspirazione = 0 */
 void drv_led(int modo);                             /* 0x8d: 0 spento, 1 azzurro... (tabella in docs/RIEPILOGO.md) */
 /* Modi del LED che possono servire ai task (gli altri in docs/fase2.md). Guasto, batteria e carica li decide il driver e
