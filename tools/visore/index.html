@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="it">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Visore missioni</title>
+<style>
+  :root { --sfondo: #f4f5f7; --pannello: #ffffff; --testo: #1d2330; --tenue: #6b7280; --bordo: #d9dce2; --accento: #2563eb; }
+  * { box-sizing: border-box; }
+  body { margin: 0; font: 13px/1.4 system-ui, sans-serif; color: var(--testo); background: var(--sfondo); display: flex; height: 100vh; }
+  #vista { flex: 1; position: relative; min-width: 0; display: flex; flex-direction: column; }
+  #tela { flex: 1; width: 100%; background: #e9ebef; cursor: grab; display: block; }
+  #tela.trascina { cursor: grabbing; }
+  #barra { background: var(--pannello); border-top: 1px solid var(--bordo); padding: 8px 12px; }
+  #riga-tempo { display: flex; gap: 8px; align-items: center; }
+  #tempo { flex: 1; }
+  #eventi-barra { width: 100%; height: 14px; display: block; margin-top: 4px; cursor: pointer; }
+  #lato { width: 360px; background: var(--pannello); border-left: 1px solid var(--bordo); overflow-y: auto; padding: 12px; }
+  h1 { font-size: 15px; margin: 0 0 8px; }
+  h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .04em; color: var(--tenue); margin: 14px 0 6px; }
+  select, button { font: inherit; padding: 3px 8px; border: 1px solid var(--bordo); border-radius: 4px; background: #fff; }
+  button { cursor: pointer; }
+  table { border-collapse: collapse; width: 100%; }
+  td { padding: 2px 0; vertical-align: top; }
+  td:last-child { text-align: right; font-variant-numeric: tabular-nums; }
+  .c { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 5px; vertical-align: -1px; }
+  .tenue { color: var(--tenue); }
+  #lista-eventi div { padding: 2px 4px; border-radius: 3px; cursor: pointer; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  #lista-eventi div:hover { background: #eef2ff; }
+  #lista-eventi .futuro { color: #b0b4bc; }
+  #lista-eventi .guasto { color: #c81e1e; font-weight: 600; }
+  #cella { font-family: ui-monospace, monospace; font-size: 12px; min-height: 2.8em; }
+  #messaggi { font-family: ui-monospace, monospace; font-size: 11px; white-space: pre-wrap; color: var(--tenue); }
+  #stato-grande { font-size: 15px; font-weight: 600; }
+</style>
+</head>
+<body>
+<div id="vista">
+  <canvas id="tela"></canvas>
+  <div id="barra">
+    <div id="riga-tempo">
+      <button id="play" title="Spazio">▶</button>
+      <select id="velocita" title="velocità"><option>1</option><option>5</option><option selected>20</option><option>60</option><option>200</option></select>
+      <input id="tempo" type="range" min="0" max="1" step="0.1" value="0">
+      <span id="ora" class="tenue" style="min-width: 90px; text-align: right">0,0 s</span>
+    </div>
+    <canvas id="eventi-barra"></canvas>
+  </div>
+</div>
+<div id="lato">
+  <h1>Visore missioni</h1>
+  <div><select id="missione"></select> <button id="centra" title="centra sul robot">centra</button> <label title="aggiunge i dati nuovi ogni 0,5 s e segue l'ultimo istante (con tools/visore/diretta.sh)"><input type="checkbox" id="diretta"> in diretta</label></div>
+  <h2>Adesso</h2>
+  <div id="stato-grande">—</div>
+  <table id="adesso"></table>
+  <h2>Mappa (istantanea)</h2>
+  <table id="mappa"></table>
+  <h2>Missioni (fino a qui)</h2>
+  <table id="missioni"></table>
+  <h2>Stati (ingressi fino a qui)</h2>
+  <table id="stati"></table>
+  <h2>Cella sotto il cursore</h2>
+  <div id="cella" class="tenue">—</div>
+  <h2>Eventi del driver</h2>
+  <div id="lista-eventi"></div>
+  <h2>Messaggi dei task</h2>
+  <div id="messaggi"></div>
+  <h2>Legenda</h2>
+  <div id="legenda"></div>
+  <p class="tenue">Trascina per spostare, rotella per lo zoom, clic su un evento per saltarci. Griglia ogni 10 s (in diretta ogni 0,5 s), posizione ogni 200 ms (tools/osserva-robot.c).</p>
+</div>
+<script src="visore.js"></script>
+</body>
+</html>

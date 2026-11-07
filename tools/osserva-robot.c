@@ -10,6 +10,8 @@
  *   NOME.oss, testo, ogni 200 ms: "P t x y theta_gradi stato missione" (stato e missione: enum di navigation.c)
  *   NOME.map, binario little endian, ogni 10 s: double t; uint32 versione; uint32 strip_axis_x; griglia di navigazione
  *            da 65.536 byte; clean_cell_mask da 16.384 byte
+ *   NOME.ultima, ogni 0,5 s: un record solo, come quelli di NOME.map, con l'ultima griglia (riscritto ogni volta: serve al
+ *            visore in diretta, tools/visore/, e non si accumula)
  *
  * Uso: osserva-robot PID NOME ind_mappa ind_stato ind_missione ind_pulite ind_asse ind_sc_posa ind_buf_posa
  * (indirizzi in esadecimale). Esce quando il programma finisce.
@@ -90,7 +92,10 @@ int main(int argc, char **argv)
 		return 1;
 	}
 
-	double t0 = avvio_processo(pid), prossima_mappa = 0;
+	double t0 = avvio_processo(pid), prossima_mappa = 0, prossima_ultima = 0;
+	char ultima[300], ultima_tmp[310];
+	snprintf(ultima, sizeof ultima, "%s.ultima", argv[2]);
+	snprintf(ultima_tmp, sizeof ultima_tmp, "%s.ultima.tmp", argv[2]);
 	double x = 0, y = 0, th = 0;
 	for (;;) {
 		int32_t stato, missione;
@@ -107,20 +112,30 @@ int main(int argc, char **argv)
 		double t = adesso_s() - t0;
 		fprintf(oss, "P %.2f %.3f %.3f %.1f %d %d\n", t, x, y, th * 57.29578, stato, missione);
 		fflush(oss);
-		if (t >= prossima_mappa) {
+		if (t >= prossima_mappa || t >= prossima_ultima) {
 			uint32_t versione = 0, asse = 0;
 			uint8_t b = 0;
 			if (pread(fd, griglia, CELLE, a[MAPPA]) == CELLE && pread(fd, &versione, 4, a[MAPPA] + CELLE) == 4 &&
 			    pread(fd, &b, 1, a[ASSE]) == 1 && pread(fd, pulite, PULITE, a[MASCHERA]) == PULITE) {
 				asse = b;
-				fwrite(&t, sizeof t, 1, map);
-				fwrite(&versione, 4, 1, map);
-				fwrite(&asse, 4, 1, map);
-				fwrite(griglia, 1, CELLE, map);
-				fwrite(pulite, 1, PULITE, map);
-				fflush(map);
+				FILE *uscite[2] = { t >= prossima_mappa ? map : NULL, t >= prossima_ultima ? fopen(ultima_tmp, "wb") : NULL };
+				for (int k = 0; k < 2; k++) {
+					if (!uscite[k])
+						continue;
+					fwrite(&t, sizeof t, 1, uscite[k]);
+					fwrite(&versione, 4, 1, uscite[k]);
+					fwrite(&asse, 4, 1, uscite[k]);
+					fwrite(griglia, 1, CELLE, uscite[k]);
+					fwrite(pulite, 1, PULITE, uscite[k]);
+					fflush(uscite[k]);
+				}
+				if (uscite[1] && fclose(uscite[1]) == 0)
+					rename(ultima_tmp, ultima);          /* chi legge trova sempre un file intero */
 			}
-			prossima_mappa = t + 10;
+			if (t >= prossima_mappa)
+				prossima_mappa = t + 10;
+			if (t >= prossima_ultima)
+				prossima_ultima = t + 0.5;
 		}
 		struct timespec ts = { 0, 200 * 1000000L };
 		nanosleep(&ts, NULL);
