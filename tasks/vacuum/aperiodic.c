@@ -14,6 +14,8 @@
 #define ACTIVE_MAP_DEFAULT  0                       // mappa attiva se il file non c'è
 #define MAP_FILE_EXT        ".rtm"                  // estensione dei file delle mappe
 #define MAP_TMP_EXT         ".tmp"                  // estensione aggiunta al file temporaneo, rinominato alla fine
+#define ZONES_APPLY_TIMEOUT RT_S(3)                 // tempo massimo per vedere applicate le zone nuove dalla mappatura (un job ogni 200 ms)
+#define ZONES_APPLY_WAIT    RT_MS(20)               // attesa fra due controlli
 
 // richiesta di salvataggio della mappa: la scrive solo la navigazione
 typedef struct {
@@ -23,6 +25,8 @@ typedef struct {
 // stato interno del task aperiodico
 typedef struct {
     uint32_t last_save_num;                         // numero dell'ultima richiesta di salvataggio eseguita
+    uint32_t last_search_num;                       // numero dell'ultima richiesta di ricerca della posizione eseguita
+    uint32_t last_zones_num;                        // numero dell'ultima richiesta di zone proibite eseguita
     uint8_t categories[MAP_CATEGORIES_BYTES];       // copia della griglia fine a categorie, 2 bit per cella
 } aperiodic_state_t;
 
@@ -33,6 +37,26 @@ static scambio_t save_request_buffer;
 static aperiodic_save_request_t save_buffer1, save_buffer2;
 static uint32_t save_request_num;
 
+// richiesta di ricerca della posizione: la scrive solo la mappatura
+typedef struct {
+    uint32_t num;           // numero progressivo della richiesta, 0 = nessuna richiesta
+} aperiodic_search_request_t;
+
+static scambio_t search_request_buffer;
+static aperiodic_search_request_t search_buffer1, search_buffer2;
+static uint32_t search_request_num;
+
+// richiesta di zone proibite: la scrive solo il thread dei comandi
+typedef struct {
+    uint32_t num;                                           // numero progressivo della richiesta, 0 = nessuna richiesta
+    int num_zones;
+    mapping_forbidden_zone_t zones[MAX_FORBIDDEN_ZONES - 1];
+} aperiodic_zones_request_t;
+
+static scambio_t zones_request_buffer;
+static aperiodic_zones_request_t zones_buffer1, zones_buffer2;
+static uint32_t zones_request_num;
+
 // true se l'ultimo salvataggio è fallito
 static _Atomic bool save_failed;
 
@@ -41,6 +65,8 @@ rt_aperiodico_t aperiodic_task;
 
 void init_aperiodic(void) {
     scambio_init(&save_request_buffer, &save_buffer1, &save_buffer2, sizeof(aperiodic_save_request_t));
+    scambio_init(&search_request_buffer, &search_buffer1, &search_buffer2, sizeof(aperiodic_search_request_t));
+    scambio_init(&zones_request_buffer, &zones_buffer1, &zones_buffer2, sizeof(aperiodic_zones_request_t));
     atomic_store(&save_failed, false);
 }
 
@@ -49,6 +75,24 @@ void request_map_save(void) {
     // scrivi la richiesta con un numero nuovo, poi sveglia il task
     aperiodic_save_request_t request = { .num = ++save_request_num };
     scambio_scrivi(&save_request_buffer, &request);
+    rt_aperiodico_sveglia(&aperiodic_task);
+}
+
+uint32_t request_position_search(void) {
+
+    // scrivi la richiesta con un numero nuovo, poi sveglia il task
+    aperiodic_search_request_t request = { .num = ++search_request_num };
+    scambio_scrivi(&search_request_buffer, &request);
+    rt_aperiodico_sveglia(&aperiodic_task);
+    return request.num;
+}
+
+void request_user_zones(const mapping_forbidden_zone_t *zones, int num_zones) {
+
+    // scrivi la richiesta con un numero nuovo, poi sveglia il task
+    aperiodic_zones_request_t request = { .num = ++zones_request_num, .num_zones = num_zones };
+    for (int i = 0; i < num_zones && i < MAX_FORBIDDEN_ZONES - 1; i++) request.zones[i] = zones[i];
+    scambio_scrivi(&zones_request_buffer, &request);
     rt_aperiodico_sveglia(&aperiodic_task);
 }
 
@@ -114,8 +158,10 @@ static inline int zone_size_to_cells(double size) {
 // salva la mappa nel file della mappa attiva. Ritorna true se ci riesce
 static bool save_map(void) {
 
-    // copia la griglia a categorie, fra un job e l'altro della mappatura
-    if (!copy_map_categories(aper_state.categories)) {
+    // copia la griglia a categorie e le zone dell'utente, fra un job e l'altro della mappatura
+    mapping_forbidden_zone_t zones[MAX_FORBIDDEN_ZONES - 1];
+    int num_zones = 0;
+    if (!copy_map_categories(aper_state.categories, zones, &num_zones)) {
         fprintf(stderr, "aperiodico: mappa non salvata, la mappatura non lascia la finestra libera per la copia\n");
         return false;
     }
@@ -137,10 +183,6 @@ static bool save_map(void) {
         fprintf(stderr, "aperiodico: mappa non salvata, è vuota\n");
         return false;
     }
-
-    // zone proibite dell'utente
-    mapping_forbidden_zone_t zones[MAX_FORBIDDEN_ZONES];
-    int num_zones = read_user_zones(zones);
 
     char path[256], tmp_path[256];
     if (map_file_path(path, sizeof path, "") != 0 || map_file_path(tmp_path, sizeof tmp_path, MAP_TMP_EXT) != 0) {
@@ -207,16 +249,79 @@ static bool save_map(void) {
     return true;
 }
 
+// funzione helper che controlla le zone volute, le passa alla mappatura e, appena applicate, salva la mappa (se un file
+// della mappa c'è già: altrimenti la mappa non è ancora completa, e le zone si salveranno con il primo salvataggio)
+static void apply_user_zones_request(const aperiodic_zones_request_t *request) {
+
+    // ogni zona deve stare dentro la griglia ed essere larga e alta almeno una cella
+    const double half_side = FINE_MAP_ORIGIN * FINE_MAP_CELL_SIZE;
+    if (request->num_zones < 0 || request->num_zones > MAX_FORBIDDEN_ZONES - 1) {
+        fprintf(stderr, "aperiodico: zone rifiutate, al massimo %d\n", MAX_FORBIDDEN_ZONES - 1);
+        return;
+    }
+    for (int i = 0; i < request->num_zones; i++) {
+        const mapping_forbidden_zone_t *z = &request->zones[i];
+        if (z->w < FINE_MAP_CELL_SIZE || z->h < FINE_MAP_CELL_SIZE || z->x < -half_side || z->y < -half_side ||
+            z->x + z->w > half_side || z->y + z->h > half_side) {
+            fprintf(stderr, "aperiodico: zone rifiutate, la zona %d esce dalla griglia o è vuota\n", i);
+            return;
+        }
+    }
+
+    // passa le zone alla mappatura, con la versione della richiesta
+    mapping_user_zones_t user_zones = { .version = request->num, .num_zones = request->num_zones };
+    for (int i = 0; i < request->num_zones; i++) user_zones.zones[i] = request->zones[i];
+    write_user_zones(&user_zones);
+
+    // aspetta che la mappatura le applichi (con la posizione persa non le applica: si salveranno più avanti)
+    int64_t limit = rt_adesso() + ZONES_APPLY_TIMEOUT;
+    while (read_applied_user_zones_version() != request->num) {
+        if (rt_adesso() > limit) {
+            fprintf(stderr, "aperiodico: zone non ancora applicate dalla mappatura, si salveranno con la mappa\n");
+            return;
+        }
+        rt_dormi_fino_a(rt_adesso() + ZONES_APPLY_WAIT);
+    }
+    fprintf(stderr, "aperiodico: %d zone proibite applicate\n", request->num_zones);
+
+    // salva subito, se esiste già un file della mappa
+    char path[256];
+    FILE *f = map_file_path(path, sizeof path, "") == 0 ? fopen(path, "rb") : NULL;
+    if (f) {
+        fclose(f);
+        atomic_store(&save_failed, !save_map());
+    }
+}
+
 // job del task: esegue le richieste nuove
 void job_aperiodic(void *arg) {
 
     (void)arg;
 
+    // Richiesta: Ricerca della posizione
+    aperiodic_search_request_t search_request = {0};
+    scambio_leggi(&search_request_buffer, &search_request);
+
+    if (search_request.num != aper_state.last_search_num) {
+        aper_state.last_search_num = search_request.num;
+        run_position_search(search_request.num);
+    }
+
+    // Richiesta: Salvataggio della Mappa
     aperiodic_save_request_t save_request = {0};
     scambio_leggi(&save_request_buffer, &save_request);
 
     if (save_request.num != aper_state.last_save_num) {
         aper_state.last_save_num = save_request.num;
         atomic_store(&save_failed, !save_map());
+    }
+
+    // Richiesta: Scrittura delle Zone Proibite
+        aperiodic_zones_request_t zones_request = {0};
+    scambio_leggi(&zones_request_buffer, &zones_request);
+
+    if (zones_request.num != aper_state.last_zones_num) {
+        aper_state.last_zones_num = zones_request.num;
+        apply_user_zones_request(&zones_request);
     }
 }

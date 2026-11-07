@@ -84,6 +84,8 @@
 #define NO_PATH_HOME_TIMEOUT RT_MS(30000)       // tempo per cui il ritorno alla base riprova a cercare il percorso (per esempio se una persona blocca il passaggio) prima che il robot vada in guasto
 #define HOOK_UP_TIMEOUT RT_MS(30000)            // tempo massimo che può impiegare il robot ad agganciarsi alla base di ricarica prima che vada in stato di guasto
 
+#define BATTERY_LOW_CONFIRM_TIME RT_S(20)       // la batteria deve restare bassa per tutto questo tempo prima del rientro, altrimenti un carico forte potrebbe farla scendere sotto la soglia per qualche istante, causando un rientro inutile
+#define HOME_IR_DOCK_DIST 1.0                   // se la cella davanti alla base non si raggiunge, da questa distanza dal punto di aggancio (o meno) l'aggancio a infrarossi parte da dove si trova il robot, espressa in metri
 #define BATTERY_RESUME_PERCENT 90               // percentuale di carica della batteria che deve raggiungere il robot prima che ricominci a pulire
 
 #define ALIGN_TIMEOUT RT_MS(15000)              // tempo massimo che può durare l'allineamento al centro di una cella, prima che il robot vada in guasto
@@ -229,6 +231,7 @@ typedef struct {
 
     double cross_theta;                     // attraversamento degli ostacoli bassi: direzione del robot quando si è incastrato
 
+    int64_t battery_low_since;              // istante da cui il driver dice batteria bassa (o critica), 0 se è normale
     nav_state_t interrupted_mission;        // la missione che aveva il robot prima che venisse interrotta per via della batteria scarica. se 0, significa che il robot non si è interrotto per la batteria scarica.
 
     uint32_t last_power_presses;            // pressioni del tasto di accensione già lette 
@@ -573,11 +576,15 @@ static bool is_battery_dead() {
 
     drv_stato(&cur_state);
 
-    // se la batteria è scarica e la missione attuale è di esplorazione o pulizia (interna o bordi) 
+    // da quanto tempo la batteria è bassa: un calo di qualche istante (carico forte) non conta
+    if (cur_state.batteria == BAT_OK) nav_state.battery_low_since = 0;
+    else if (nav_state.battery_low_since == 0) nav_state.battery_low_since = rt_adesso();
+
+    // se la batteria è scarica da almeno BATTERY_LOW_CONFIRM_TIME e la missione attuale è di esplorazione o pulizia
     // e lo stato attuale non è sblocco, attesa, guasto, riposo, uscita o aggancio alla base
     // ritorna il segnale che la batteria è scarica e bisogna interrompere la missione per andare a ricaricarla
     return (
-        cur_state.batteria != BAT_OK &&
+        nav_state.battery_low_since != 0 && rt_adesso() - nav_state.battery_low_since >= BATTERY_LOW_CONFIRM_TIME &&
         (nav_state.mission == NAV_STATE_EXPLORE || nav_state.mission == NAV_STATE_FOLLOW_BORDERS || nav_state.mission == NAV_STATE_CLEAN) &&
         (nav_state.state != NAV_STATE_UNLOCK && nav_state.state != NAV_STATE_WAIT && nav_state.state != NAV_STATE_FAILURE && nav_state.state != NAV_STATE_SLEEP && nav_state.state != NAV_STATE_LEAVE_BASE && nav_state.state != NAV_STATE_HOOK_UP && nav_state.state != NAV_STATE_PAUSE)
     );
@@ -709,6 +716,7 @@ typedef enum {
     GOAL_CELL,      // l'obiettivo della ricerca è trovare una cella precisa (indice della cella)
     GOAL_FREE,      // l'obiettivo della ricerca è trovare una cella libera, partendo da una bloccata
     GOAL_EDGE,      // l'obiettivo della ricerca è trovare una cella con un quadrante di bordo ancora non pulito
+    GOAL_NEAR_HOME, // l'obiettivo della ricerca è trovare una cella libera entro HOME_IR_DOCK_DIST dal punto di aggancio
 } nav_search_goal_t;
 
 
@@ -861,6 +869,13 @@ static bool cell_is_goal(const nav_search_goal_t goal, const uint16_t cell, cons
         case GOAL_FREE:
             return is_nav_cell_free(cell);
             break;
+        case GOAL_NEAR_HOME: {
+            // cella libera con il centro abbastanza vicino al punto di aggancio
+            if (!is_nav_cell_free(cell)) return false;
+            double x, y;
+            nav_index_to_coord(cell, &x, &y);
+            return hypot(x - AGG_PUNTO_X_M, y) <= HOME_IR_DOCK_DIST;
+        }
         case GOAL_EDGE:
            
             if (!is_nav_cell_free(cell)) return false;          // se la cella non è libera non è un bordo
@@ -2151,6 +2166,29 @@ static void go_home_now(void) {
     set_state(NAV_STATE_RETURN_HOME);
 }
 
+// funzione helper che, con la posizione persa (ricerca in corso o robot in aria), porta il robot alla base alla cieca:
+// la missione finisce, la mappatura annulla la ricerca e aspetta la base, e il driver fa l'aggancio a infrarossi da dove
+// si trova il robot (senza percorso: la posizione non c'è). Se l'aggancio non riesce il robot va in guasto
+static void start_blind_hook_up(void) {
+
+    send_objective(OBJ_STOP, 0, 0, 0, 0, 0);
+
+    drv_esci_dalla_base(0);
+    nav_state.interrupted_mission = 0;
+
+    drv_led(DRV_LED_AZZURRO);
+
+    // la mappatura annulla la ricerca (se gira) e aspetta che il robot sia sulla base
+    nav_state.closed_cells.stop_search_num++;
+    scambio_scrivi(&double_buffer_2, &nav_state.closed_cells);
+
+    // aggancio a infrarossi: lo fa il driver, la navigazione aspetta l'esito
+    drv_aggancia(1);
+    nav_state.hook_has_started = true;
+    set_state(NAV_STATE_HOOK_UP);
+    nav_state.mission = NAV_STATE_RETURN_HOME;
+}
+
 // funzione che applica i comandi (tasto di accensione e tasto casa) in base allo stato. Il guasto lo azzera già il driver
 // alla pressione: qui, se il guasto non c'è più, si passa al riposo e il tasto fa quello che farebbe in riposo
 static void apply_commands(const drv_stato_t *cur_drv_state, bool power_pressed, bool home_pressed) {
@@ -2160,6 +2198,14 @@ static void apply_commands(const drv_stato_t *cur_drv_state, bool power_pressed,
         if (cur_drv_state->fase == DRV_GUASTO) return;
         drv_led(DRV_LED_AZZURRO);
         set_state(NAV_STATE_SLEEP);
+    }
+
+    // posizione persa: qualsiasi tasto annulla la ricerca e porta il robot alla base alla cieca
+    // Se l'aggancio alla cieca è già partito, i tasti non fanno niente
+    if ((power_pressed || home_pressed) && read_mapping_correction().state == MAP_LOST &&
+        !(nav_state.state == NAV_STATE_HOOK_UP && nav_state.hook_has_started)) {
+        start_blind_hook_up();
+        return;
     }
 
     switch (nav_state.state) {
@@ -2301,6 +2347,13 @@ void job_navigation(void *arg) {
 
     // se la posizione corrente non è valida
     if (!cur_pos.valid) {
+
+        // aggancio alla cieca in corso (tasto premuto con la posizione persa): si aspetta solo l'esito del driver
+        if (nav_state.state == NAV_STATE_HOOK_UP && nav_state.hook_has_started) {
+            if (cur_drv_state.aggancio == AGG_FATTO) set_state(NAV_STATE_SLEEP);
+            else if (cur_drv_state.aggancio == AGG_FALLITO) stop_and_fail(DRV_FAULT_DOCKING_FAILED);
+            return;
+        }
         
         // se l'obiettivo corrente non è già OBJ_STOP, aggiungi l'obiettivo OBJ_STOP
         if (nav_state.cur_obj.obj_type != OBJ_STOP) send_objective(OBJ_STOP, 0, 0, 0, 0, 0);
@@ -2875,6 +2928,23 @@ void job_navigation(void *arg) {
 
             // cerca il percorso, alla fine si torna qui
             if (search_cell(robot_cell, GOAL_CELL, CHARGING_STATION_CELL) == 0) {
+
+                // la cella davanti alla base non si raggiunge: se il
+                // robot è già vicino al punto di aggancio l'aggancio a infrarossi lo fa il driver da qui, altrimenti ci si
+                // avvicina il più possibile e si torna qui
+                // (mezza cella in più: il robot arrivato al centro della cella trovata con GOAL_NEAR_HOME deve rientrarci)
+                if (hypot(cur_pos.x - AGG_PUNTO_X_M, cur_pos.y) <= HOME_IR_DOCK_DIST + NAV_MAP_CELL_SIZE / 2) {
+                    send_objective(OBJ_STOP, 0, 0, 0, 0, 0);
+                    drv_aggancia(1);
+                    nav_state.hook_has_started = true;
+                    set_state(NAV_STATE_HOOK_UP);
+                    break;
+                }
+                if (search_cell(robot_cell, GOAL_NEAR_HOME, 0) != 0) {
+                    start_following_path(cur_alarm, cur_pos, 0, false);
+                    break;
+                }
+
                 // non c'è una strada per tornare alla base: può essere un ostacolo che si sposta (una persona davanti al
                 // robot), quindi il robot resta fermo e riprova a ogni job. Resta in questo stato, quindi state_start dice
                 // da quanto tempo non trova la strada: solo dopo NO_PATH_HOME_TIMEOUT va in guasto

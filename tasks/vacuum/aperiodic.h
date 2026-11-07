@@ -6,6 +6,7 @@
 #include <stdint.h>
 
 #include "rt/rt.h"
+#include "mapping.h"
 
 // Task aperiodico: sta da solo sul core 3, con lo scheduling normale.
 // Esegue le richieste dei task e dell'app. Ogni richiesta passa da una funzione di richiesta qui sotto,
@@ -21,6 +22,14 @@ void job_aperiodic(void *arg);
 
 // richiesta di salvataggio della mappa (la chiama la navigazione)
 void request_map_save(void);
+
+// richiesta di ricerca della posizione dopo un sollevamento (la chiama la mappatura, che ha già preparato i punti):
+// restituisce il numero della richiesta, che torna nel risultato
+uint32_t request_position_search(void);
+
+// richiesta di nuove zone proibite dell'utente (la chiama il thread dei comandi, più avanti quello dell'app): la lista
+// intera voluta, senza la zona della base. Il task aperiodico la controlla, la passa alla mappatura e salva la mappa
+void request_user_zones(const mapping_forbidden_zone_t *zones, int num_zones);
 
 // true se l'ultimo salvataggio della mappa è fallito (lo leggerà l'app per avvisare l'utente)
 bool read_map_save_failed(void);

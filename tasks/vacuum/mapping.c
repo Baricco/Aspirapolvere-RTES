@@ -81,8 +81,8 @@
 #define SEARCH_LEVELS               6           // livello più alto della griglia della ricerca: blocchi da 2^6 = 64 celle fini per lato (3,2 m)
 #define SEARCH_MAX_CELLS            400         // lato massimo, in celle fini, della zona in cui si cerca (20 m)
 #define SEARCH_MIN_SCORE_PCT        70          // punteggio minimo per accettare una posizione, in percentuale del massimo (2 per punto).
-#define SEARCH_LOOKUPS_PER_JOB      300000      // numero di letture della griglia della ricerca in un job
-#define SEARCH_BUILD_CELLS_PER_JOB  100000      // celle della griglia della ricerca preparate in un job
+#define SEARCH_LOOKUPS_PER_JOB      300000      // letture della griglia della ricerca fra due controlli dell'annullamento
+#define SEARCH_BUILD_CELLS_PER_JOB  20000       // celle della griglia della ricerca preparate fra due controlli dell'annullamento
 #define SEARCH_STACK_SIZE           128         // blocchi che possono aspettare nella pila per un angolo (al massimo 49 radici più 3 per livello)
 #define SEARCH_MAX_ATTEMPTS         3           // ricerche o conferme fallite dopo un sollevamento prima di arrendersi
 #define SEARCH_REFINE_ANGLE         (0.4 * M_PI / 180)  // la rifinitura prova gli angoli entro questa distanza da quello trovato, espressa in radianti
@@ -148,10 +148,24 @@ typedef struct {
 // Fasi della ricerca della posizione dopo un sollevamento
 typedef enum {
     SEARCH_WAIT_SCAN,       // aspetta una scansione iniziata dopo il riappoggio
-    SEARCH_BUILD,           // prepara la griglia della ricerca, un pezzo per job
-    SEARCH_TREE,            // branch and bound, un numero fisso di letture per job
-    SEARCH_REFINE,          // rifinisce la posizione trovata, o conta il tentativo fallito
+    SEARCH_WAIT_RESULT,     // la ricerca gira nel task aperiodico (la mappa è prestata): aspetta il risultato
+    SEARCH_CANCELLED,       // ricerca annullata da un tasto: aspetta che il robot sia sulla base (aggancio alla cieca)
 } search_phase_t;
+
+// esito della ricerca fatta dal task aperiodico
+typedef enum {
+    SEARCH_FOUND,           // posizione trovata (e rifinita)
+    SEARCH_NOT_FOUND,       // nessuna posizione sopra la soglia
+    SEARCH_NO_AREA,         // la mappa è vuota: non c'è niente in cui cercare
+    SEARCH_ABORTED,         // annullata (tasto premuto o robot sollevato di nuovo)
+} search_outcome_t;
+
+// risultato della ricerca: lo scrive solo il task aperiodico, lo legge la mappatura
+typedef struct {
+    uint32_t request_num;   // numero della richiesta a cui risponde
+    search_outcome_t outcome;
+    double x, y, theta;     // posizione trovata, sulla mappa (solo con SEARCH_FOUND)
+} search_result_t;
 
 // Struttura che contiene un possibile blocco di posizioni del centro del robot ancora da guardare
 typedef struct {
@@ -206,6 +220,7 @@ typedef struct {
     // zone proibite dell'utente caricate con la mappa (la zona della base si aggiunge quando il robot parte dalla base)
     mapping_forbidden_zone_t user_zones[MAX_FORBIDDEN_ZONES - 1];
     int num_user_zones;
+    uint32_t user_zones_version;    // versione delle zone volute già applicata
 
     // punti misurati dal lidar da usare per l'allineamento 
     align_point_t lidar_point[LIDAR_GIRO_MAX_PUNTI];
@@ -237,6 +252,10 @@ typedef struct {
     // Ricerca della posizione dopo un sollevamento e conferma della posizione trovata
     struct {
         search_phase_t phase;                       // fase della ricerca
+        uint32_t request_num;                       // numero dell'ultima ricerca chiesta al task aperiodico
+        bool is_cancel_requested;                   // l'annullamento della ricerca in corso è stato chiesto (il risultato non vale)
+        bool is_stopped_by_user;                    // l'annullamento viene da un tasto (si aspetta la base) e non da un sollevamento
+        uint32_t last_stop_num;                     // ultimo stop_search_num della navigazione già visto
         uint8_t attempts;                           // numero di ricerche o conferme fallite dall'ultimo sollevamento
         int64_t put_down_t;                         // istante del riappoggio, valgono solo le scansioni del lidar iniziate dopo
         bool grid_ready;                            // indica se la griglia corrisponde alla mappa
@@ -265,6 +284,18 @@ static mapping_state_t map_state;
 
 // indica se il robot è partito dalla base di ricarica, è atomico perché lo legge il task di navigazione
 static _Atomic bool started_on_base;
+
+// risultato della ricerca della posizione (doppio buffer: scrive il task aperiodico, legge la mappatura)
+static scambio_t double_buffer_search;
+static search_result_t search_buffer1, search_buffer2;
+
+// zone volute dall'utente (doppio buffer: scrive il task aperiodico, legge la mappatura) e versione applicata
+static scambio_t double_buffer_zones;
+static mapping_user_zones_t zones_buffer1, zones_buffer2;
+static _Atomic uint32_t applied_zones_version;
+
+// numero della ricerca da annullare: lo scrive la mappatura, lo controlla la ricerca nel task aperiodico mentre gira
+static _Atomic uint32_t search_cancel_num;
 
 // contatore dei job, per la lettura della mappa fra un job e l'altro (copy_map_categories): sale di 1 all'inizio e alla
 // fine di ogni job, quindi è dispari mentre un job è in corso. REGOLA: la mappatura scrive la mappa (griglia fine,
@@ -492,6 +523,12 @@ int init_mapping(void) {
         sizeof(mapping_correction_t)
     );
 
+
+    // inizializza il doppio buffer delle zone volute dall'utente
+    scambio_init(&double_buffer_zones, &zones_buffer1, &zones_buffer2, sizeof(mapping_user_zones_t));
+
+    // inizializza il doppio buffer del risultato della ricerca della posizione
+    scambio_init(&double_buffer_search, &search_buffer1, &search_buffer2, sizeof(search_result_t));
 
     // Inizializza il mutex, salva il valore di ritorno per restituirlo alla fine
     int error_num = rt_mutex_init(&navigation_map_data.mutex);
@@ -1672,8 +1709,89 @@ static bool is_search_score_enough(int score) {
     return map_state.search.num_points >= SEARCH_MIN_POINTS && score * 100 >= SEARCH_MIN_SCORE_PCT * 2 * map_state.search.num_points;
 }
 
-// funzione che cerca la posizione del robot riappoggiato (stato MAP_LOST), una fase alla volta, un pezzo per job
+// funzione chiamata dal task aperiodico (gira nel suo thread, sul core 3): fa tutta la ricerca della posizione
+// e ne pubblica il risultato. PRESTITO: dalla richiesta al risultato, la mappa (griglia fine) e i dati della ricerca
+// (map_state.search: punti, posizione di riferimento, griglia della ricerca) li usa solo questa funzione. La mappatura non
+// li tocca: con la posizione persa non scrive sulla mappa (il job esce subito dopo relocate), e aspetta il risultato
+// prima di preparare una ricerca nuova. Fra un pezzo e l'altro controlla se la ricerca va annullata (search_cancel_num)
+void run_position_search(uint32_t request_num) {
+
+    search_result_t result = { .request_num = request_num, .outcome = SEARCH_NOT_FOUND };
+
+    // annullata prima ancora di partire
+    if (atomic_load(&search_cancel_num) == request_num) {
+        result.outcome = SEARCH_ABORTED;
+        scambio_scrivi(&double_buffer_search, &result);
+        return;
+    }
+
+    // la griglia della ricerca si rifà solo se la mappa è cambiata dall'ultima ricerca
+    if (!map_state.search.grid_ready) {
+
+        // mappa vuota: non c'è niente in cui cercare
+        if (!set_search_area()) {
+            result.outcome = SEARCH_NO_AREA;
+            scambio_scrivi(&double_buffer_search, &result);
+            return;
+        }
+
+        map_state.search.build_level = 0;
+        map_state.search.build_row = 0;
+        while (!build_search_grid()) {
+            if (atomic_load(&search_cancel_num) == request_num) {
+                result.outcome = SEARCH_ABORTED;
+                scambio_scrivi(&double_buffer_search, &result);
+                return;
+            }
+        }
+        map_state.search.grid_ready = true;
+    }
+
+    // prepara la ricerca: si parte dall'angolo -1, così il primo passo apre l'angolo 0
+    map_state.search.angle = -1;
+    map_state.search.stack_len = 0;
+    map_state.search.best_score = (SEARCH_MIN_SCORE_PCT * 2 * map_state.search.num_points + 99) / 100 - 1;
+    map_state.search.best_angle = -1;
+
+    // ramificazione e potatura, un pezzo alla volta
+    while (!search_step()) {
+        if (atomic_load(&search_cancel_num) == request_num) {
+            result.outcome = SEARCH_ABORTED;
+            scambio_scrivi(&double_buffer_search, &result);
+            return;
+        }
+    }
+
+    // posizione trovata: il centro della cella e l'angolo provato, poi la rifinitura
+    if (map_state.search.best_angle >= 0) {
+        result.x = (map_state.search.x0 + map_state.search.best_x - FINE_MAP_ORIGIN + 0.5) * FINE_MAP_CELL_SIZE;
+        result.y = (map_state.search.y0 + map_state.search.best_y - FINE_MAP_ORIGIN + 0.5) * FINE_MAP_CELL_SIZE;
+        result.theta = wrap_angle(map_state.search.best_angle * 2 * M_PI / SEARCH_NUM_ANGLES);
+        refine_search_result(&result.x, &result.y, &result.theta);
+        result.outcome = SEARCH_FOUND;
+    }
+
+    // la mappa torna alla mappatura
+    scambio_scrivi(&double_buffer_search, &result);
+}
+
+// funzione che cerca la posizione del robot dopo il riappoggio (stato MAP_LOST): prepara i punti, chiede la ricerca al
+// task aperiodico e ne usa il risultato
 static void relocate(const movement_position_data_t *cur_pos, const drv_stato_t *cur_drv_state, bool is_same_scan) {
+
+    // un tasto premuto con la posizione persa (la navigazione fa l'aggancio alla cieca): la ricerca si annulla e si aspetta
+    // che il robot sia sulla base. Se la ricerca sta girando, la mappa si riprende solo quando arriva il suo risultato
+    navigation_closed_cells_t closed_cells = read_closed_cells();
+    if (closed_cells.stop_search_num != map_state.search.last_stop_num) {
+        map_state.search.last_stop_num = closed_cells.stop_search_num;
+        if (map_state.search.phase == SEARCH_WAIT_RESULT) {
+            map_state.search.is_cancel_requested = true;
+            map_state.search.is_stopped_by_user = true;
+            atomic_store(&search_cancel_num, map_state.search.request_num);
+        } else {
+            map_state.search.phase = SEARCH_CANCELLED;
+        }
+    }
 
     switch (map_state.search.phase) {
 
@@ -1702,55 +1820,38 @@ static void relocate(const movement_position_data_t *cur_pos, const drv_stato_t 
             // pochi punti (per esempio il robot è contro un mobile): aspetta la prossima scansione
             if (map_state.search.num_points < SEARCH_MIN_POINTS) return;
 
-            // prepara la ricerca: si parte dall'angolo -1, così il primo passo apre l'angolo 0
-            map_state.search.angle = -1;
-            map_state.search.stack_len = 0;
-            map_state.search.best_score = (SEARCH_MIN_SCORE_PCT * 2 * map_state.search.num_points + 99) / 100 - 1;
-            map_state.search.best_angle = -1;
-
-            // la griglia si rifà solo se la mappa è cambiata dall'ultima volta
-            if (map_state.search.grid_ready) {
-                map_state.search.phase = SEARCH_TREE;
-                return;
-            }
-
-            if (!set_search_area()) {
-                restart_from_pose(cur_pos->odom_x, cur_pos->odom_y, cur_pos->odom_theta, cur_pos->odom_x, cur_pos->odom_y, cur_pos->odom_theta, MAP_NORMAL);
-                return;
-            }
-
-            map_state.search.build_level = 0;
-            map_state.search.build_row = 0;
-            map_state.search.phase = SEARCH_BUILD;
+            // la ricerca la fa il task aperiodico: da qui la mappa e i dati della ricerca gli sono prestati
+            map_state.search.is_cancel_requested = false;
+            map_state.search.is_stopped_by_user = false;
+            map_state.search.request_num = request_position_search();
+            map_state.search.phase = SEARCH_WAIT_RESULT;
             break;
         }
-        case SEARCH_BUILD: {
+        case SEARCH_WAIT_RESULT: {
 
-            if (build_search_grid()) {
-                map_state.search.grid_ready = true;
-                map_state.search.phase = SEARCH_TREE;
-            }
-            break;
-        }
-        case SEARCH_TREE: {
+            // il risultato di questa ricerca non è ancora arrivato: la mappa è ancora prestata
+            search_result_t result = {0};
+            scambio_leggi(&double_buffer_search, &result);
+            if (result.request_num != map_state.search.request_num) break;
 
-            if (search_step()) map_state.search.phase = SEARCH_REFINE;
-            break;
-        }
-        case SEARCH_REFINE: {
-
-            // nessuna posizione sopra la soglia
-            if (map_state.search.best_angle < 0) {
-                count_failed_attempt();
+            // ricerca annullata (anche se ha fatto in tempo a finire): da un tasto si aspetta la base, da un sollevamento
+            // si cerca di nuovo dopo il riappoggio
+            if (map_state.search.is_cancel_requested || result.outcome == SEARCH_ABORTED) {
+                map_state.search.phase = map_state.search.is_stopped_by_user ? SEARCH_CANCELLED : SEARCH_WAIT_SCAN;
                 break;
             }
 
-            // la posizione trovata: il centro della cella e l'angolo provato
-            double x = (map_state.search.x0 + map_state.search.best_x - FINE_MAP_ORIGIN + 0.5) * FINE_MAP_CELL_SIZE;
-            double y = (map_state.search.y0 + map_state.search.best_y - FINE_MAP_ORIGIN + 0.5) * FINE_MAP_CELL_SIZE;
-            double theta = wrap_angle(map_state.search.best_angle * 2 * M_PI / SEARCH_NUM_ANGLES);
+            // mappa vuota: si riparte da dove si è
+            if (result.outcome == SEARCH_NO_AREA) {
+                restart_from_pose(cur_pos->odom_x, cur_pos->odom_y, cur_pos->odom_theta, cur_pos->odom_x, cur_pos->odom_y, cur_pos->odom_theta, MAP_NORMAL);
+                break;
+            }
 
-            refine_search_result(&x, &y, &theta);
+            // nessuna posizione sopra la soglia
+            if (result.outcome == SEARCH_NOT_FOUND) {
+                count_failed_attempt();
+                break;
+            }
 
             // il robot riprende a lavorare, ma finché la posizione non è confermata la mappa non si scrive
             map_state.search.confirm_distance = 0;
@@ -1758,7 +1859,15 @@ static void relocate(const movement_position_data_t *cur_pos, const drv_stato_t 
             map_state.search.confirm_last_y = map_state.search.ref_y;
             map_state.search.bad_scans = 0;
 
-            restart_from_pose(map_state.search.ref_x, map_state.search.ref_y, map_state.search.ref_theta, x, y, theta, MAP_UNCONFIRMED);
+            restart_from_pose(map_state.search.ref_x, map_state.search.ref_y, map_state.search.ref_theta, result.x, result.y, result.theta, MAP_UNCONFIRMED);
+            break;
+        }
+        case SEARCH_CANCELLED: {
+
+            // la navigazione porta il robot alla base con l'aggancio a infrarossi: sulla base la posizione è l'origine
+            if (read_started_on_base() && cur_drv_state->sulla_base) {
+                restart_from_pose(cur_pos->odom_x, cur_pos->odom_y, cur_pos->odom_theta, 0, 0, 0, MAP_NORMAL);
+            }
             break;
         }
     }
@@ -1819,11 +1928,11 @@ static void reset_session_data(void) {
 
     if (!set_search_area()) return;
 
-    // celle fini del vuoto e degli ostacoli bassi
+    // celle fini degli ostacoli bassi. Il vuoto invece resta
     for (int y = map_state.search.y0; y < map_state.search.y0 + map_state.search.height; y++) {
         for (int x = map_state.search.x0; x < map_state.search.x0 + map_state.search.width; x++) {
             int8_t score = map_state.fine_grid[y << 10 | x];
-            if (score == VOID_OBSTACLE || score == LOW_OBSTACLE) clear_fine_cell_special_value(y << 10 | x);
+            if (score == LOW_OBSTACLE) clear_fine_cell_special_value(y << 10 | x);
         }
     }
 
@@ -1910,6 +2019,33 @@ static void mark_forbidden_cells(const mapping_forbidden_zone_t zone) {
     pthread_mutex_unlock(&navigation_map_data.mutex);
 }
 
+// funzione helper inversa di mark_forbidden_cells: le celle proibite della zona (allargata del raggio del robot) tornano
+// allo stato calcolato dalla mappa. Le zone che restano vanno segnate di nuovo dopo, perché possono toccare le stesse celle
+static void unmark_forbidden_cells(const mapping_forbidden_zone_t zone) {
+
+    const double radius = ROBOT_RADIUS / 1000.0;
+
+    uint16_t cell_min = coord_to_nav_index(zone.x - radius, zone.y - radius);
+    uint16_t cell_max = coord_to_nav_index(zone.x + zone.w + radius, zone.y + zone.h + radius);
+
+    pthread_mutex_lock(&navigation_map_data.mutex);
+
+    for (int cur_y = cell_min >> 8; cur_y <= cell_max >> 8; cur_y++) {
+        for (int cur_x = cell_min & 0xFF; cur_x <= (cell_max & 0xFF); cur_x++) {
+
+            int cur_index = cur_y << 8 | cur_x;
+            if (get_nav_cell_state(navigation_map_data.navigation_grid[cur_index]) != NAV_CELL_FORBIDDEN) continue;
+
+            uint8_t cell_mask = calc_nav_cell_bitmask(cur_index);
+            navigation_map_data.navigation_grid[cur_index] = calc_nav_cell_state(cur_index, cell_mask) | cell_mask;
+        }
+    }
+
+    navigation_map_data.version_number++;
+
+    pthread_mutex_unlock(&navigation_map_data.mutex);
+}
+
 // Funzione helper che inserisce la zona proibita della base di ricarica nella lista
 // delle zone proibite per il task di sicurezza e nelle celle della mappa per il task di navigazione
 static void publish_base_zone(void) {
@@ -1928,6 +2064,27 @@ static void publish_base_zone(void) {
     write_forbidden_zone_list(&zone_list);
 
     for (int i = 0; i < zone_list.num_zones; i++) mark_forbidden_cells(zone_list.forbidden_zones[i]);
+}
+
+// funzione helper che applica le zone volute dall'utente (scritte dal task aperiodico): toglie le celle proibite delle
+// zone vecchie, poi ripubblica la lista (la base, poi le zone nuove) e segna tutte le zone. Le zone hanno senso solo se
+// la sessione è partita dalla base (la mappa ha l'origine lì): finché il controllo non è finito si aspetta
+static void apply_user_zones(void) {
+
+    mapping_user_zones_t wanted = {0};
+    scambio_leggi(&double_buffer_zones, &wanted);
+
+    if (wanted.version == map_state.user_zones_version || !read_started_on_base()) return;
+
+    for (int i = 0; i < map_state.num_user_zones; i++) unmark_forbidden_cells(map_state.user_zones[i]);
+
+    map_state.num_user_zones = wanted.num_zones;
+    for (int i = 0; i < wanted.num_zones; i++) map_state.user_zones[i] = wanted.zones[i];
+
+    publish_base_zone();
+
+    map_state.user_zones_version = wanted.version;
+    atomic_store(&applied_zones_version, wanted.version);
 }
 
 // Funzione helper che nei primi job controlla se il robot è partito dalla base di ricarica.
@@ -1966,7 +2123,7 @@ static inline uint8_t fine_cell_category(int8_t score) {
 // funzione chiamata dal task aperiodico che copia la griglia fine a categorie mentre la
 // mappatura non sta lavorando. Il contatore dei job è dispari durante un job: se è dispari si aspetta, se cambia durante
 // la copia la copia mescola due versioni e si rifà. La mappatura non aspetta mai
-bool copy_map_categories(uint8_t *categories) {
+bool copy_map_categories(uint8_t *categories, mapping_forbidden_zone_t *user_zones, int *num_user_zones) {
 
     for (int attempt = 0; attempt < MAP_COPY_MAX_ATTEMPTS; attempt++) {
 
@@ -1985,6 +2142,10 @@ bool copy_map_categories(uint8_t *categories) {
                                       fine_cell_category(cell[2]) << 4 | fine_cell_category(cell[3]) << 6);
         }
 
+        // le zone dell'utente cambiano nel job della mappatura come la griglia: si copiano nella stessa finestra
+        *num_user_zones = map_state.num_user_zones;
+        for (int i = 0; i < map_state.num_user_zones; i++) user_zones[i] = map_state.user_zones[i];
+
         // i dati letti vanno guardati prima di rileggere il contatore (stesso schema di driver/scambio.c)
         atomic_thread_fence(memory_order_acquire);
         if (atomic_load(&map_job_counter) == before) return true;
@@ -1993,10 +2154,14 @@ bool copy_map_categories(uint8_t *categories) {
     return false;
 }
 
-// funzione chiamata dal task aperiodico: le zone dell'utente si scrivono solo in init_mapping, prima che partano i task
-int read_user_zones(mapping_forbidden_zone_t *zones) {
-    for (int i = 0; i < map_state.num_user_zones; i++) zones[i] = map_state.user_zones[i];
-    return map_state.num_user_zones;
+// funzione chiamata dal task aperiodico: scrive le zone volute dall'utente, che la mappatura applica nel suo job
+void write_user_zones(const mapping_user_zones_t *user_zones) {
+    scambio_scrivi(&double_buffer_zones, user_zones);
+}
+
+// funzione chiamata dal task aperiodico: versione delle zone volute che la mappatura ha già applicato
+uint32_t read_applied_user_zones_version(void) {
+    return atomic_load(&applied_zones_version);
 }
 
 // funzione helper che legge byte dal file della mappa e ne aggiorna il CRC. Ritorna false se il file finisce prima
@@ -2176,8 +2341,17 @@ static void job_mapping_body(void *arg) {
         }
 
         // a ogni sollevamento la ricerca ricomincia. L'istante si aggiorna finché il robot è in aria,
-        // così l'ultimo valore è quello del riappoggio
-        map_state.search.phase = SEARCH_WAIT_SCAN;
+        // così l'ultimo valore è quello del riappoggio. Se una ricerca sta girando nel task aperiodico si annulla, e si
+        // ricomincia quando arriva il suo risultato (la mappa le è prestata fino ad allora). Se la ricerca era stata
+        // annullata da un tasto il robot sta andando alla base, e resta così
+        if (map_state.search.phase == SEARCH_WAIT_RESULT) {
+            if (!map_state.search.is_cancel_requested) {
+                map_state.search.is_cancel_requested = true;
+                atomic_store(&search_cancel_num, map_state.search.request_num);
+            }
+        } else if (map_state.search.phase != SEARCH_CANCELLED) {
+            map_state.search.phase = SEARCH_WAIT_SCAN;
+        }
         map_state.search.put_down_t = rt_adesso();
         return;
     }
@@ -2221,6 +2395,9 @@ static void job_mapping_body(void *arg) {
             reset_session_data();
         }
     }
+
+    // zone proibite volute dall'utente (dal task aperiodico)
+    apply_user_zones();
 
     // Applica gli eventi speciali (sensori di caduta, incastro e bumper anteriore) sulla mappa
     bool has_applied_events = apply_queued_events();

@@ -38,6 +38,11 @@ a = [x for x in a if x != '--senza-avvio']
 while '--premi' in a:
     i = a.index('--premi'); PREMI.append((float(a[i + 1]), a[i + 2])); del a[i:i + 3]
 PREMI.sort()
+# --comando T TESTO (anche più volte): dopo T s scrive la riga TESTO nel file dei comandi del programma (tasks/vacuum/commands.h)
+COMANDI = []
+while '--comando' in a:
+    i = a.index('--comando'); COMANDI.append((float(a[i + 1]), a[i + 2])); del a[i:i + 3]
+COMANDI.sort()
 SPOSTA = None    # --sposta X Y ANGOLO (con --solleva): mentre è in aria il robot viene spostato lì (coordinate della stanza, gradi)
 if '--sposta' in a:
     i = a.index('--sposta'); SPOSTA = a[i + 1:i + 4]; del a[i:i + 4]
@@ -68,6 +73,7 @@ env = dict(os.environ, RTES_GD32='build/sim/gd32', RTES_LIDAR='build/sim/lidar',
 # mappe salvate (docs/formato-mappa.md): sul PC in build/prove-nav/maps, oppure nella cartella di RTES_MAPS. Una prova
 # lascia la mappa nel file, quella dopo con --dalla-base la ricarica: per ripartire da zero si cancella il file
 env.setdefault('RTES_MAPS', os.path.join(D, 'maps'))
+env.setdefault('RTES_COMANDI', os.path.join(D, 'comandi'))   # file speciale dei comandi (lo crea il programma)
 os.makedirs(env['RTES_MAPS'], exist_ok=True)
 fout = os.path.join(D, f'prog_{tag}.log')
 prog = subprocess.Popen(['build/host/osserva', '--uscita', 'build/sim/mappa_robot', '--', 'taskset', '-c', '0-3',
@@ -93,6 +99,11 @@ while time.time() - t0 < durata:
         vero.write(f"{time.monotonic():.3f},{d['t']:.3f},{r['x']:.4f},{r['y']:.4f},{r['dir']:.1f},"
                    f"{int(any(d['bumper']))},{int(bool(d['bloccato']))},{int(bool(d['incastrato']))}\n")
     nav = righe_nav()
+    while COMANDI and time.time() - t0 >= COMANDI[0][0]:
+        testo = COMANDI.pop(0)[1]
+        with open(env['RTES_COMANDI'], 'w') as fc:
+            fc.write(testo + '\n')
+        print(f"comando \"{testo}\" a {time.time() - t0:.1f} s", flush=True)
     while PREMI and time.time() - t0 >= PREMI[0][0]:
         tasto = PREMI.pop(0)[1]
         comando_sim(f'tasto {tasto} 1'); time.sleep(0.2); comando_sim(f'tasto {tasto} 0'); t_tasto = time.time()

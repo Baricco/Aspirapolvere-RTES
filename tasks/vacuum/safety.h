@@ -31,9 +31,9 @@
 #define THRESHOLD_STUCK_FRAME_COUNTER 38    // numero di frame consecutivi in cui il robot deve risultare bloccato, prima che si attivi l'allarme reale. corrispondono a circa 0,75s
 #define THRESHOLD_SLIP_FRAME_COUNTER  25    // numero di frame consecutivi in cui il robot deve risultare in slittamento, prima che si attivi l'allarme reale. corrispondono a circa 0,50s
 #define THRESHOLD_OVRLD_FRAME_COUNTER 25    // numero di frame consecutivi in cui il robot deve risultare in sovraccarico, prima che si attivi l'allarme reale. corrispondono a circa 0,50s
-#define THRESHOLD_BRUSH_CURRENT 1200        // corrente della spazzola centrale sopra la quale è considerata bloccata, espressa in mA
+#define THRESHOLD_BRUSH_CURRENT 2000        // corrente della spazzola centrale sopra la quale è considerata bloccata, espressa in mA. Frenata dal pavimento fino a 1,8 A, bloccata davvero 2,3 A (2026-11-07)
 #define THRESHOLD_BRUSH_FRAME_COUNTER 35    // numero di frame consecutivi in cui la spazzola centrale deve risultare bloccata, prima che si attivi l'allarme reale. corrispondono a circa 0,70s
-#define THRESHOLD_BRUSH_UNLOCK_CURRENT 3000 // corrente della spazzola centrale sopra la quale è considerata bloccata mentre gira al contrario (sblocco), espressa in mA
+#define THRESHOLD_BRUSH_UNLOCK_CURRENT 4500 // corrente della spazzola centrale sopra la quale è considerata bloccata mentre gira al contrario (sblocco), espressa in mA. Libera 2,0-2,4 A, frenata 3,0-3,6 A, bloccata 6,2 A
 
 #define THRESHOLD_DISTANCE  0.25              // soglia di distanza per considerare vicino un ostacolo/zona proibita, espresso in metri
 #define STOP_DISTANCE       0.01              // distanza dal bordo del robot alla quale la sicurezza porta la velocità in avanti a zero, espressa in metri

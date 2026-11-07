@@ -11,6 +11,7 @@
 #include "safety.h"
 #include "mapping.h"
 #include "aperiodic.h"
+#include "commands.h"
 
 #define SLEEP_TIME 1                      // il main contiene un loop infinito che serve solo ad aspettare di ricevere il segnale di arresto, dentro al loop aspetta 1 secondo per non mandare la CPU al 100%
 
@@ -246,6 +247,9 @@ int main(void) {
               drv_ferma();
               return 1;
        }
+
+       // thread dei comandi (zone proibite): se non parte, il programma va avanti senza comandi
+       start_commands();
 
        // sveglia il task del moto con l'arrivo del frame dai sensori
        drv_sveglia_ai_sensori(&movement_task);

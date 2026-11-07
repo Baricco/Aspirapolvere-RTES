@@ -12,6 +12,7 @@ typedef struct {
     uint32_t num;                                   // numero di celle chiuse
     uint16_t cells[CLOSED_CELLS_MAX];               // lista circolare con gli indici delle celle chiuse
     uint32_t mission_num;                           // numero della pulizia: quando cambia, la mappatura azzera quello che in una pulizia non si aggiorna più
+    uint32_t stop_search_num;                       // cresce quando un tasto viene premuto con la posizione persa: la mappatura annulla la ricerca e aspetta che il robot sia sulla base
 } navigation_closed_cells_t;
 
 

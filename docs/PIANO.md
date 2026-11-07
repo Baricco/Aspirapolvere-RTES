@@ -215,6 +215,62 @@ I task dell'esame li scrive l'utente da solo, sopra un framework e un driver pre
     Il primo angolo dai muri da agganciato: 15,8° in `s1` (aggancio ruotato, recuperato), −1,7° nel simulatore con
     il robot dritto (errore di un giro solo, poi corretto dalla correzione graduale). Da fare: prova del caricamento
     sul robot.
+  - **Ricerca della posizione spostata nel task aperiodico** (2026-11-07, scritta da Claude su richiesta dell'utente). La
+    mappa è **prestata**: con la posizione persa la mappatura non scrive sulla mappa (il job esce dopo `relocate`: niente
+    eventi dei contatti, l'azzeramento di una nuova pulizia aspetta la posizione normale), quindi il task aperiodico la
+    legge direttamente, senza copie. La mappatura prepara i punti e chiama `request_position_search()`; il task
+    aperiodico esegue `run_position_search()` (in `mapping.c`) tutta in una volta (griglia, albero, rifinitura) e
+    pubblica il risultato in un doppio buffer (`search_result_t`: trovata, non trovata, mappa vuota, annullata); fasi
+    della mappatura `SEARCH_WAIT_SCAN`, `SEARCH_WAIT_RESULT`, `SEARCH_CANCELLED`. `SEARCH_LOOKUPS_PER_JOB` e
+    `SEARCH_BUILD_CELLS_PER_JOB` sono ora i pezzi fra due controlli dell'annullamento (`search_cancel_num`). Un nuovo
+    sollevamento annulla la ricerca in corso e ne fa partire un'altra quando arriva il risultato. **Tasti con la
+    posizione persa** (decisione dell'utente): tutti e due fanno la stessa cosa, cioè la missione finisce, la mappatura
+    annulla la ricerca (`stop_search_num` nel doppio buffer delle celle chiuse) e aspetta la base, la navigazione chiede
+    l'aggancio a infrarossi da dove si trova il robot (`start_blind_hook_up`); aggancio non riuscito = guasto
+    (`DRV_FAULT_DOCKING_FAILED`). Prove nel simulatore: sollevato e spostato di 2,7 m, ritrovato entro 4,5 cm e 0,4°
+    ~4 s dopo il riappoggio; job della mappatura al massimo 0,84 ms (prima fino a ~24 ms sul robot durante la ricerca);
+    tasto casa 0,5 s dopo il riappoggio a ~1 m dalla base: aggancio alla cieca riuscito, riposo, posizione di nuovo
+    nell'origine; 0 scadenze mancate. Da provare sul robot (serve sollevarlo a mano).
+  - **Comando per le zone proibite** (2026-11-07, scritto da Claude su richiesta dell'utente). Thread dei comandi
+    (`tasks/vacuum/commands.c`, core 3, scheduling normale, primo pezzo del thread di rete dell'app): legge righe da un
+    file speciale (`/tmp/rtes/comandi-vacuum` sul robot, `RTES_COMANDI` sul PC): `zona aggiungi X Y L A` (metri, sulla
+    mappa), `zona togli N`, `zone`; tiene la lista voluta (solo se la sessione è partita dalla base) e chiama
+    `request_user_zones`. Il task aperiodico controlla le zone (dentro la griglia, al massimo 15), le passa alla mappatura
+    (`write_user_zones`), aspetta che siano applicate (`read_applied_user_zones_version`) e salva subito la mappa se un file
+    c'è già. La mappatura, nel job e con la posizione normale (`apply_user_zones`), toglie le celle proibite delle zone
+    vecchie (`unmark_forbidden_cells`), ripubblica la lista (base + utente) e segna tutte le zone. Le zone dell'utente
+    ora cambiano nel job, quindi `copy_map_categories` le copia nella stessa finestra della griglia. `prova.py --comando
+    T TESTO`. Prova nel simulatore: aggiungi, elenca, aggiungi, togli, elenca; mappa salvata con la zona rimasta, celle
+    proibite giuste (16 della base + 20 della zona), quelle della zona tolta tornate libere o bloccate.
+  - **Missioni complete sul robot del 7/11 sera** (`p1`, `p2`, mappa caricata). `p1`: guasto della spazzola a 291 s
+    (soglie 1,2 / 3 A): niente avvolto, la spazzola frenata dal **bordo di un tappeto** (fino a 1,8 A avanti, 3,0-3,6 A
+    al contrario; libera 0,16-0,25 A dopo la pulizia, al contrario 2,0-2,4; bloccata davvero 2,3 / 6,2 A) → soglie a
+    **2.000 / 4.500 mA**. `p2` (25 min): bordi fino a 662 s, **prima pulizia a strisce sul robot** fino a 1.425 s
+    (15,5 m² puliti su ~34 m² di celle libere), 0 scadenze mancate, nessun allarme della spazzola. Rientro partito per
+    una **falsa batteria bassa**: scendendo dal bordo del tappeto il robot si inclina in avanti (beccheggio fino a
+    −7,4°), la spazzola si schiaccia sul bordo (fino a 2,6 A) e la media di 1 s della tensione scende sotto 14,2 V per
+    un attimo (a riposo 15,0 V). Poi "nessuna strada per la base": un falso **vuoto** degli anti-caduta davanti alla base
+    (569-570 s, superficie scura) aveva bloccato la cella di partenza dell'aggancio. **Corretto in navigazione**: il
+    rientro per batteria parte solo dopo `BATTERY_LOW_CONFIRM_TIME` (20 s) di batteria bassa (provato nel simulatore:
+    20,7-20,8 s dopo il calo); se la cella davanti alla base non si raggiunge il robot va alla cella libera più vicina
+    entro `HOME_IR_DOCK_DIST` (1 m) dal punto di aggancio e da lì chiede l'aggancio a infrarossi (`GOAL_NEAR_HOME`; non
+    ancora vista in azione: nelle prove la cella davanti alla base restava raggiungibile). Scartato (decisione
+    dell'utente, pericoloso): ignorare il vuoto vicino alla base. **Contraddizione trovata**: `reset_session_data` a ogni
+    missione nuova cancella anche il vuoto, quindi il vuoto salvato nel file sparisce alla prima missione (da decidere).
+  - **Falso vuoto sul bordo del tappeto: causa e correzione** (2026-11-07). Nella prova `p2` il robot è salito di sbieco
+    sul bordo del tappeto davanti alla base: beccheggio +5,6° in salita, poi −5,7° e rollio +6,5° in cima; il laterale
+    destro ha visto "vuoto" per ~1 s (il pavimento accanto al tappeto, più basso di dove poggiavano le ruote), e il vuoto
+    è entrato nella mappa. **Filtro nel driver** (`contatti_frame`, `CONTATTI_INCLINAZIONE_CDEG` 300): con beccheggio o
+    rollio oltre 3° gli anti-caduta non danno eventi (la protezione immediata di driver e GD32 resta); test
+    `contatti_inclinato`. Scartato il filtro per lato (decisione presa insieme): nel caso vero il sensore era alzato di
+    soli 3-4 mm, non l'avrebbe scartato. **Opzione A** (decisione dell'utente): l'azzeramento di una nuova pulizia
+    (`reset_session_data`) toglie solo gli ostacoli bassi, il vuoto resta (e si salva nel file).
+  - **Da ragionare più avanti: modalità tappeto e spazzola sporca** (idee dell'utente, 2026-11-07). Riconoscere il tappeto
+    dalla corrente della spazzola centrale (pavimento 0,16-0,25 A con la spazzola pulita, bordo del tappeto 0,6-0,8 A) e
+    usare `SUCTION_POWER_MAX` (oggi mai usato) sul tappeto. Ma la corrente di base dipende da quanto è sporca la spazzola
+    (prima della pulizia del 7/11 sul pavimento 0,35-0,55 A): quindi il software può anche accorgersi che la spazzola è
+    sporca, se "vede tappeto" quasi sempre. Prima di scriverlo: misurare la corrente sopra il tappeto (non solo sul
+    bordo) e magari leggere come lo fa l'originale (`enable_carpet=1` in `hwdrivers.ini`).
   - **Cosa serve al progetto e cosa è in più.** Serve: task aperiodico, salvataggio e caricamento della mappa,
     spostamenti della flash, ricerca della posizione nel task aperiodico, misure dei tempi con il task aperiodico al
     lavoro e analisi di schedulabilità. In più (l'utente, quando vuole): l'app (comandi, telemetria, disegno della

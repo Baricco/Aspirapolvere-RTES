@@ -416,6 +416,42 @@ static gd32_sensori_t sensori_a_terra(void)
 	return s;
 }
 
+/* robot inclinato (bordo di un tappeto): un "vuoto" non dà eventi, che si tratti di beccheggio o di rollio */
+static void contatti_inclinato(void)
+{
+	contatti_t c;
+	contatti_init(&c);
+	gd32_sensori_t s = sensori_a_terra();
+	int64_t t = MS(1000);
+
+	/* rollio +6,5° (come nella prova p2): il laterale destro vede "vuoto" per 10 frame, nessun evento */
+	s.angolo[2] = 650;
+	s.cliff[3] = 1;
+	for (int i = 0; i < 10; i++)
+		CONTROLLA(contatti_frame(&c, &s, t += MS(20), NULL, 0) == 0);
+	CONTROLLA(c.pub.ultimo == 0);
+
+	/* beccheggio -5,7°, rollio a posto: ancora nessun evento */
+	s.angolo[2] = 0;
+	s.angolo[1] = -570;
+	for (int i = 0; i < 10; i++)
+		CONTROLLA(contatti_frame(&c, &s, t += MS(20), NULL, 0) == 0);
+	CONTROLLA(c.pub.ultimo == 0);
+
+	/* torna in piano (entro la soglia) con il vuoto ancora lì: dopo 3 frame l'evento c'è */
+	s.angolo[1] = -150;
+	CONTROLLA(contatti_frame(&c, &s, t += MS(20), NULL, 0) == 0);
+	CONTROLLA(contatti_frame(&c, &s, t += MS(20), NULL, 0) == 0);
+	CONTROLLA(contatti_frame(&c, &s, t += MS(20), NULL, 0) == 1);
+	CONTROLLA(c.pub.ultimo == 1 && c.pub.ev[1].sensore == CONTATTO_VUOTO_DX_LAT);
+
+	/* il bumper invece conta anche da inclinato */
+	s.angolo[1] = -570;
+	s.bumper_dx = 1;
+	CONTROLLA(contatti_frame(&c, &s, t += MS(20), NULL, 0) == 1);
+	CONTROLLA(c.pub.ultimo == 2 && c.pub.ev[2].sensore == CONTATTO_BUMPER_DX);
+}
+
 static void contatti(void)
 {
 	contatti_t c;
@@ -675,6 +711,7 @@ int main(void)
 	ESEGUI(lidar_regolatore);
 	ESEGUI(a_terra);
 	ESEGUI(contatti);
+	ESEGUI(contatti_inclinato);
 	ESEGUI(aggancio_infrarossi);
 	return TEST_FINE();
 }

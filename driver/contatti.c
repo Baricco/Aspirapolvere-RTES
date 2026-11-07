@@ -1,4 +1,5 @@
 /* contatti.c - Registro degli scatti di anti-caduta e bumper, e degli incastri (vedi contatti.h). */
+#include <stdlib.h>
 #include <string.h>
 
 #include "contatti.h"
@@ -22,8 +23,10 @@ int contatti_frame(contatti_t *c, const gd32_sensori_t *s, int64_t t, const drv_
 		azzera(c);
 		return 0;
 	}
-	int attivo[CONTATTO_SENSORI] = { s->cliff[0], s->cliff[1], s->cliff[2], s->cliff[3], s->bumper_sx, s->bumper_dx,
-	                                  incastro != 0 };
+	/* robot inclinato: gli anti-caduta non danno eventi (vedi contatti.h) */
+	int inclinato = abs(s->angolo[1]) > CONTATTI_INCLINAZIONE_CDEG || abs(s->angolo[2]) > CONTATTI_INCLINAZIONE_CDEG;
+	int attivo[CONTATTO_SENSORI] = { s->cliff[0] && !inclinato, s->cliff[1] && !inclinato, s->cliff[2] && !inclinato,
+	                                  s->cliff[3] && !inclinato, s->bumper_sx, s->bumper_dx, incastro != 0 };
 	int nuovi = 0;
 	for (int k = 0; k < CONTATTO_SENSORI; k++) {
 		if (!attivo[k]) {

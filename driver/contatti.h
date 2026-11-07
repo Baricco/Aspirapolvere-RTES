@@ -23,6 +23,13 @@
  * istante. Così chi applica l'evento sa dove stava il
  * robot in quel momento, qualunque cosa abbia fatto dopo (si è fermato, è tornato indietro, ha girato).
  *
+ * Robot inclinato (beccheggio o rollio oltre CONTATTI_INCLINAZIONE_CDEG, in piano sta entro ±1,5°): un "vuoto" degli
+ * anti-caduta non dà eventi. Il robot sta superando qualcosa (il bordo di un tappeto, una soglia) e il vuoto è quasi
+ * sempre il pavimento accanto a quello che sta superando: prova p2 del 7/11, sul bordo del tappeto davanti alla base
+ * beccheggio -5,7° e rollio +6,5°, falso vuoto sul laterale destro, finito nella mappa come un gradino. Una scala vera gli
+ * anti-caduta la vedono con il robot in piano (stanno davanti alle ruote). Il moto in avanti lo fermano comunque il
+ * driver e il GD32: cambia solo il ricordo nella mappa.
+ *
  * Quando NON nasce: anti-caduta, bumper e incastro non significano niente (e i contatori ripartono da zero) se i sensori sono
  * spenti (0x9d 00), se il robot è sulla base, o se tutti e quattro gli anti-caduta vedono "vuoto" (robot sollevato).
  * Limite noto: sollevando il robot inclinato, un anti-caduta può vedere "vuoto" per più di 60 ms prima degli altri
@@ -38,6 +45,7 @@
 
 #define CONTATTI_N            32     /* eventi tenuti nella lista (chi legge ogni 200 ms ne vede al massimo ~10) */
 #define CONTATTI_FRAME_VUOTO  3      /* frame di fila con "vuoto" per un evento di anti-caduta (60 ms) */
+#define CONTATTI_INCLINAZIONE_CDEG 300  /* beccheggio o rollio oltre cui (centesimi di grado) un "vuoto" non dà eventi: vedi sotto */
 #define CONTATTI_FRAME_BUMPER 1      /* frame con il bumper premuto per un evento */
 #define CONTATTI_FRAME_INCASTRO 1    /* frame con l'incastro segnalato per un evento */
 

@@ -214,11 +214,22 @@ bool is_nav_cell_invisible_obstacle(uint16_t cell);
 
 int init_mapping(void);
 // funzione chiamata dal task aperiodico: copia tutta la griglia fine a categorie (2 bit per cella, 4 celle per byte,
-// cella x della riga y nel byte (y * 1024 + x) / 4, ai bit 2 * (x % 4)) leggendola fra un job e l'altro della mappatura.
-// Ritorna false se non ci riesce (la mappatura non lascia mai la finestra libera: non deve succedere)
-bool copy_map_categories(uint8_t *categories);
-// zone proibite dell'utente caricate con la mappa (senza quella della base), per salvarle di nuovo: ne restituisce il numero
-int read_user_zones(mapping_forbidden_zone_t *zones);
+// cella x della riga y nel byte (y * 1024 + x) / 4, ai bit 2 * (x % 4)) e le zone proibite dell'utente, leggendole fra un
+// job e l'altro della mappatura. Ritorna false se non ci riesce (la mappatura non lascia mai la finestra libera)
+bool copy_map_categories(uint8_t *categories, mapping_forbidden_zone_t *user_zones, int *num_user_zones);
+// funzione chiamata dal task aperiodico: esegue la ricerca della posizione numero request_num (chiesta dalla mappatura con
+// request_position_search) e ne pubblica il risultato. La mappa le è prestata: mentre la posizione è persa la mappatura non la scrive
+void run_position_search(uint32_t request_num);
+// zone proibite volute dall'utente (senza quella della base): le scrive il task aperiodico, la mappatura le applica nel suo
+// job (con la posizione normale) e lo dice con read_applied_user_zones_version
+typedef struct {
+    uint32_t version;                                       // numero progressivo, 0 = nessuna richiesta
+    int num_zones;
+    mapping_forbidden_zone_t zones[MAX_FORBIDDEN_ZONES - 1];
+} mapping_user_zones_t;
+
+void write_user_zones(const mapping_user_zones_t *user_zones);
+uint32_t read_applied_user_zones_version(void);
 mapping_forbidden_zone_list_t read_forbidden_zone_list(void);
 mapping_correction_t read_mapping_correction(void);
 // funzione per sapere se il robot è partito dalla base di ricarica (lo leggerà il task navigation), è false anche finché
