@@ -75,9 +75,15 @@ case "${1:-}" in
         /DW_AT_name/ { n = $NF; next }
         /DW_AT_data_member_location/ && n == s { v = $NF } END { print v }'
     }
+    campo_prima() {   # l'ultimo campo $1 visto prima del campo $2: "state" c'è anche in altre strutture (la mappatura)
+      LC_ALL=C "$B-readelf" --debug-dump=info "$EXE" | awk -v s="$1" -v t="$2" '
+        /DW_AT_name/ { n = $NF; next }
+        /DW_AT_data_member_location/ { if (n == s) v = $NF; else if (n == t && !fatto) { print v; fatto = 1 } }'
+    }
     nav=$((16#$(simbolo nav_state)))
     ind() { printf %x $((nav + $(campo "$1"))); }
-    arg="$(simbolo navigation_map_data) $(ind state) $(ind mission) $(ind clean_cell_mask) $(ind strip_axis_x) $(simbolo sc_posa) $(simbolo buf_posa)"
+    ind_stato=$(printf %x $((nav + $(campo_prima state mission))))
+    arg="$(simbolo navigation_map_data) $ind_stato $(ind mission) $(ind clean_cell_mask) $(ind strip_axis_x) $(simbolo sc_posa) $(simbolo buf_posa)"
     copia osserva-robot
     AMBIENTE="RTES_REGISTRA=$nome.reg ${*:3}" avvia vacuum "$nome"
     robot "cd $D; start-stop-daemon -S -b -m -p $D/osserva.pid -x $D/osserva-robot -- \$(pidof vacuum) $nome $arg; sleep 1; tail -n 2 $nome.oss"

@@ -18,6 +18,7 @@
 #define SAFETY_ERROR_OBSTACLE   (1u << 3)       // XXXX1XXX --> Ostacolo Vicino
 #define SAFETY_ERROR_FORB_ZONE  (1u << 4)       // XXX1XXXX --> Zona Proibita Vicina
 #define SAFETY_ERROR_CONTACT    (1u << 5)       // XX1XXXXX --> Contatto: Bumper premuto o sensori anti-caduta
+#define SAFETY_ERROR_BRUSH      (1u << 6)       // X1XXXXXX --> Spazzola centrale bloccata
 
 
 #define MAX_ABSOLUTE_SPEED      0.5         // velocità massima che il robot può raggiungere espressa in m/s
@@ -30,6 +31,9 @@
 #define THRESHOLD_STUCK_FRAME_COUNTER 38    // numero di frame consecutivi in cui il robot deve risultare bloccato, prima che si attivi l'allarme reale. corrispondono a circa 0,75s
 #define THRESHOLD_SLIP_FRAME_COUNTER  25    // numero di frame consecutivi in cui il robot deve risultare in slittamento, prima che si attivi l'allarme reale. corrispondono a circa 0,50s
 #define THRESHOLD_OVRLD_FRAME_COUNTER 25    // numero di frame consecutivi in cui il robot deve risultare in sovraccarico, prima che si attivi l'allarme reale. corrispondono a circa 0,50s
+#define THRESHOLD_BRUSH_CURRENT 600         // corrente della spazzola centrale sopra la quale è considerata bloccata, espressa in mA.
+#define THRESHOLD_BRUSH_FRAME_COUNTER 10    // numero di frame consecutivi in cui la spazzola centrale deve risultare bloccata, prima che si attivi l'allarme reale.
+#define THRESHOLD_BRUSH_UNLOCK_CURRENT 1000 // corrente della spazzola centrale sopra la quale è considerata bloccata mentre gira al contrario (sblocco), espressa in mA.
 
 #define THRESHOLD_DISTANCE  0.25              // soglia di distanza per considerare vicino un ostacolo/zona proibita, espresso in metri
 #define STOP_DISTANCE       0.01              // distanza dal bordo del robot alla quale la sicurezza porta la velocità in avanti a zero, espressa in metri

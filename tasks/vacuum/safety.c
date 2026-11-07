@@ -18,6 +18,8 @@ typedef struct {
     uint32_t stuck_frame_counter;       // conta per quanti frame di fila il robot è incastrato
     uint32_t slip_frame_counter;        // conta per quanti frame di fila le ruota slittano
     uint32_t overload_frame_counter;    // conta per quanti frame di file il motore è sotto sforzo
+    uint32_t brush_frame_counter;       // conta per quanti frame di fila la spazzola centrale è bloccata
+    uint32_t brush_unlock_frame_counter;    // conta per quanti frame di fila la spazzola centrale è bloccata mentre gira al contrario
 
 } safety_state_t;
 
@@ -172,6 +174,39 @@ void job_safety(void *arg) {
                 cur_error_mask |= SAFETY_ERROR_MOT_OVRLD;
             }
         } else safe_state.overload_frame_counter = 0;      // se il robot non risulta in sovraccarico azzera il contatore
+
+    }
+
+    // Controllo della spazzola centrale bloccata
+    {       // Istanzio queste variabili in un blocco di codice separato perchè le devo usare solo qui
+
+        // Verifica se la spazzola centrale è bloccata (se gira nel verso normale e la sua corrente è > della soglia, true).
+        // Il controllo si salta quando la spazzola è spenta o gira al contrario (sblocco): al contrario la corrente è alta da sola
+        bool is_brush_blocked = (cur_state.spazzola_centrale > 0) &&
+                                (cur_frame.s.correnti[3] >= THRESHOLD_BRUSH_CURRENT);
+
+
+        if (is_brush_blocked) {
+            // Se la spazzola è bloccata, aumenta il contatore dei frame consecutivi in cui risulta bloccata
+            safe_state.brush_frame_counter++;
+            if (safe_state.brush_frame_counter >= THRESHOLD_BRUSH_FRAME_COUNTER) {
+                // se la spazzola è bloccata per THRESHOLD_BRUSH_FRAME_COUNTER, attiva l'allarme
+                cur_error_mask |= SAFETY_ERROR_BRUSH;
+            }
+        } else safe_state.brush_frame_counter = 0;      // se la spazzola non risulta bloccata azzera il contatore
+
+        // Verifica se la spazzola centrale è bloccata anche mentre gira al contrario
+        bool is_brush_blocked_unlock = (cur_state.spazzola_centrale < 0) &&
+                                       (cur_frame.s.correnti[3] >= THRESHOLD_BRUSH_UNLOCK_CURRENT);
+
+        if (is_brush_blocked_unlock) {
+            // Se la spazzola è bloccata durante lo sblocco, aumenta il contatore dei frame consecutivi in cui risulta bloccata
+            safe_state.brush_unlock_frame_counter++;
+            if (safe_state.brush_unlock_frame_counter >= THRESHOLD_BRUSH_FRAME_COUNTER) {
+                // stesso bit del verso normale
+                cur_error_mask |= SAFETY_ERROR_BRUSH;
+            }
+        } else safe_state.brush_unlock_frame_counter = 0;      // se la spazzola non risulta bloccata azzera il contatore
 
     }
 

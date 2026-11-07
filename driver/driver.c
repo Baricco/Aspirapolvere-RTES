@@ -63,7 +63,7 @@ static drv_contatti_t buf_contatti[2];
 /* Nell'altro verso: la posizione che il moto dà al driver (un solo scrittore, il task del moto). */
 static scambio_t sc_posa;
 static drv_posa_t buf_posa[2];
-static atomic_int posa_pronta;               /* sc_posa inizializzato: drv_posa può scrivere */
+static _Atomic int posa_pronta;               /* sc_posa inizializzato: drv_posa può scrivere */
 static drv_sensori_t buf_sensori[2];
 static lidar_giro_t buf_giro[2];
 static drv_stato_t buf_stato[2];
@@ -90,7 +90,7 @@ static struct {
 	int fd_gd32, fd_lidar, fd_sveglia;
 	pthread_t thread, ricezione, servizio;
 	pthread_mutex_t mx;                   /* stato interno, fra il thread del tempo e quello di ricezione */
-	atomic_int stop;
+	_Atomic int stop;
 	int avviato;
 	int senza_rt;
 	int gd32_chiusa, lidar_chiusa;
@@ -438,7 +438,8 @@ const char *drv_task_fault_text(drv_task_fault_t reason)
 	case DRV_FAULT_INCONSISTENT_STATE:        return "inconsistent navigation state";
 	case DRV_FAULT_UNKNOWN_OBJECTIVE:         return "unknown objective type";
 	case DRV_FAULT_POSITION_NOT_FOUND:        return "position not found after the robot was lifted";
-	default:                                  return "generic fault";
+	case DRV_FAULT_BRUSH_STUCK:               return "main brush still blocked after its unlock";
+	default:                                 return "generic fault";
 	}
 }
 #pragma GCC diagnostic pop

@@ -68,6 +68,11 @@
 #define BRUSH_SPEED_OFF 0
 #define BRUSH_SPEED_NORMAL 60
 #define BRUSH_SPEED_MAX 100
+#define BRUSH_SPEED_UNLOCK (-100)       // valore negativo per la spazzola centrale (velocità massima, verso opposto)
+
+#define BRUSH_UNLOCK_TIME RT_MS(4500)           // durata dello sblocco della spazzola centrale, poi torna a girare normalmente
+#define BRUSH_UNLOCK_MAX_ATTEMPTS 5             // numero massimo di sblocchi della spazzola centrale di fila: se si blocca ancora, il robot va in guasto
+#define BRUSH_UNLOCK_RESET_TIME RT_MS(10000)    // tempo in cui, finito uno sblocco, la spazzola deve girare normalmente perchè lo sblocco sia riuscito
 
 // costanti di potenza di aspirazione, espressa in giri al minuto
 #define SUCTION_POWER_OFF 0
@@ -228,6 +233,9 @@ typedef struct {
     uint32_t last_power_presses;            // pressioni del tasto di accensione già lette 
     uint32_t last_home_presses;             // pressioni del tasto casa già lette
     bool is_map_ready;                      // true se la mappa c'è già, una nuova pulizia salta l'esplorazione
+
+    int64_t brush_unlock_start;             // istante di inizio dell'ultimo sblocco della spazzola centrale, 0 se non ce n'è mai stato uno
+    uint8_t brush_unlock_attempt;           // numero di sblocchi della spazzola centrale fatti di fila
 
 } navigation_state_t;
 
@@ -2192,6 +2200,39 @@ static bool should_activate_brushes() {
     );
 }
 
+// funzione helper che dice se lo sblocco della spazzola centrale è in corso 
+static inline bool is_brush_unlocking() {
+    return nav_state.brush_unlock_start != 0 && elapsed_time(nav_state.brush_unlock_start) < BRUSH_UNLOCK_TIME;
+}
+
+// funzione helper che, se la sicurezza segnala la spazzola centrale bloccata, avvia il suo sblocco oppure manda il robot in guasto
+static void check_brush_unlock(const safety_alarm_t cur_alarm) {
+
+    // se la spazzola non è bloccata non c'è niente da fare
+    if (!(cur_alarm.error_mask & SAFETY_ERROR_BRUSH)) return;
+
+    // se la spazzola è bloccata anche mentre gira al contrario, lo sblocco non serve, quindi va in guasto
+    if (is_brush_unlocking()) {
+        stop_and_fail(DRV_FAULT_BRUSH_STUCK);
+        return;
+    }
+
+    // se dopo l'ultimo sblocco la spazzola ha girato normalmente per BRUSH_UNLOCK_RESET_TIME, quello sblocco era riuscito:
+    // questo è un blocco nuovo e i tentativi ripartono da zero
+    if (nav_state.brush_unlock_start == 0 || elapsed_time(nav_state.brush_unlock_start) >= BRUSH_UNLOCK_TIME + BRUSH_UNLOCK_RESET_TIME) nav_state.brush_unlock_attempt = 0;
+
+    // se ha già fatto BRUSH_UNLOCK_MAX_ATTEMPTS sblocchi di fila e la spazzola è ancora bloccata, quindi va in guasto
+    if (nav_state.brush_unlock_attempt >= BRUSH_UNLOCK_MAX_ATTEMPTS) {
+        stop_and_fail(DRV_FAULT_BRUSH_STUCK);
+        return;
+    }
+
+    // avvia un nuovo sblocco
+    nav_state.brush_unlock_attempt++;
+    nav_state.brush_unlock_start = rt_adesso();
+
+}
+
 // job del task
 void job_navigation(void *arg) {
     
@@ -2227,10 +2268,19 @@ void job_navigation(void *arg) {
     read_commands(&cur_drv_state, &power_pressed, &home_pressed);
     if (power_pressed || home_pressed || nav_state.state == NAV_STATE_FAILURE) apply_commands(&cur_drv_state, power_pressed, home_pressed);
 
+    // leggi gli allarmi mandati dal task safety, servono per lo sblocco della spazzola e per la velocità massima degli obiettivi
+    safety_alarm_t cur_alarm = read_safety();
+
+    // se la spazzola centrale è bloccata avvia il suo sblocco, o manda il robot in guasto
+    if (should_activate_brushes()) check_brush_unlock(cur_alarm);
+
     // se bisogna attivare spazzole e aspirazione attivali, altrimenti disattivali
     if (should_activate_brushes()) {
         drv_aspirazione(SUCTION_POWER_NORMAL);
-        drv_spazzole(BRUSH_SPEED_NORMAL, BRUSH_SPEED_NORMAL);
+
+        // durante lo sblocco la spazzola centrale gira al contrario, la laterale continua normalmente
+        if (is_brush_unlocking()) drv_spazzole(BRUSH_SPEED_NORMAL, BRUSH_SPEED_UNLOCK);
+        else drv_spazzole(BRUSH_SPEED_NORMAL, BRUSH_SPEED_NORMAL);
     } else {
         drv_aspirazione(SUCTION_POWER_OFF);
         drv_spazzole(BRUSH_SPEED_OFF, BRUSH_SPEED_OFF);
@@ -2270,10 +2320,6 @@ void job_navigation(void *arg) {
 
     // se la pulizia è in corso, segna come pulite le mezze celle su cui si trova il robot
     if (is_active_cleaning()) set_robot_cell_clean(cur_pos);
-
-
-    // leggi gli allarmi mandati dal task safety, serve per la velocità massima degli obiettivi
-    safety_alarm_t cur_alarm = read_safety();
 
     // l'incastro si segnala alla mappa solo quando parte lo sblocco
     drv_incastro(0);

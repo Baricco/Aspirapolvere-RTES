@@ -216,6 +216,7 @@ typedef enum {
 	DRV_FAULT_INCONSISTENT_STATE,        /* navigation: inconsistent state machine (a bug) */
 	DRV_FAULT_UNKNOWN_OBJECTIVE,         /* movement: unknown objective type (a bug) */
 	DRV_FAULT_POSITION_NOT_FOUND,        /* mapping: position not found again after the robot was lifted */
+	DRV_FAULT_BRUSH_STUCK,               /* navigation: main brush still blocked (during its unlock or after all of them) */
 } drv_task_fault_t;
 
 /* A task puts the driver in the fault state: motors stopped, LED 8 and sound, like the driver's own faults. It happens

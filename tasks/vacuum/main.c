@@ -233,13 +233,13 @@ int main(void) {
        drv_sveglia_ai_sensori(&safety_task);
 
 
-       // attiva il watchdog dei task, questa verifica che non 
-       // missati più di 3 periodi
-       drv_sorveglia(&lidar_task, 0, 0);
+       // attiva il watchdog dei task, questa verifica che non vengano missati più di 1 periodi
+       // tutti i task sono critici, quindi un job che non finisce mai non conta come scadenza mancata
+       drv_sorveglia(&lidar_task, 1, 0);
        drv_sorveglia(&movement_task, 1, 0);
        drv_sorveglia(&safety_task, 1, 0);
        drv_sorveglia(&navigation_task, 1, 0);
-       drv_sorveglia(&mapping_task, 0, 0);
+       drv_sorveglia(&mapping_task, 1, 0);
 
 
 	// ciclo di esecuzione main loop
