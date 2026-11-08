@@ -169,7 +169,7 @@ int batteria_aggiorna(batteria_t *b, int tensione_dv, int in_carica, int sulla_b
 	long s = b->somma, n = b->n;
 	if (n < 10)
 		return b->livello;              /* meno di 200 ms di misure: troppo poche per decidere */
-	if (in_carica) {
+	if (in_carica || sulla_base) {      /* sui contatti la carica passa anche con il bit "in carica" spento */
 		b->livello = BAT_OK;
 	} else if (s < (long)BAT_SOGLIA_CRITICA_DV * n) {
 		b->livello = BAT_CRITICA;

@@ -27,6 +27,7 @@
 #define THRESHOLD_STUCK_RATIO_V 0.2         // frazione della velocità comandata sotto al quale la velocità effettiva è considerata 0
 #define THRESHOLD_STUCK_RATIO_W 0.2         // frazione della velocità angolare comandata sotto al quale la velocità angolare effettiva è considerata 0
 #define THRESHOLD_SLIP_W        0.3         // differenza massima tra velocità angolare sulle ruote e velocità angolare misurata dall'IMU sopra la quale il robot sta scivolando, espressa in rad/s
+#define THRESHOLD_SLIP_RATIO    0.5         // la soglia dello slittamento cresce con la rotazione delle ruote
 #define THRESHOLD_MAX_CURRENT   1000        // massima corrente a cui possono essere sottoposti i motori prima che scatti l'allarme, espressa in mA
 #define THRESHOLD_STUCK_FRAME_COUNTER 38    // numero di frame consecutivi in cui il robot deve risultare bloccato, prima che si attivi l'allarme reale. corrispondono a circa 0,75s
 #define THRESHOLD_SLIP_FRAME_COUNTER  25    // numero di frame consecutivi in cui il robot deve risultare in slittamento, prima che si attivi l'allarme reale. corrispondono a circa 0,50s

@@ -477,7 +477,9 @@ static void pubblica_stato(int64_t t)
 		if (s.percentuale > 50)
 			s.percentuale = 50;          /* sotto la soglia per ripartire: una volta agganciato resta sulla base */
 	}
-	s.in_carica = d.s.in_carica;
+	/* il bit "in carica" del GD32 vuol dire carica finita: la carica passa ogni volta che i contatti toccano */
+	s.in_carica = d.s.sulla_base;
+	s.carica_completa = d.s.in_carica;
 	s.sollevato = d.sollevato;
 	s.pressioni_accensione = d.pressioni[0];
 	if (d.cfg.prova_premi_s > 0 && (double)(t - d.t0) / RT_NS_PER_S >= d.cfg.prova_premi_s) {
@@ -537,7 +539,7 @@ static int limiti_generali(int64_t t)
 		return DRV_LIM_GUASTO;
 	if (!d.ha_sensori || t - d.t_sensori > SENSORI_VECCHI_NS)
 		return DRV_LIM_SENSORI_VECCHI;
-	if (d.bat.livello == BAT_CRITICA && !d.s.in_carica)
+	if (d.bat.livello == BAT_CRITICA && !d.s.sulla_base)
 		return DRV_LIM_BATTERIA;
 	return 0;
 }
@@ -661,7 +663,7 @@ static void aggiorna_attuatori(int64_t t)
 		led = LED_GUASTO;
 	else if (d.bat.livello != BAT_OK)
 		led = LED_BATTERIA;
-	else if (d.s.in_carica)
+	else if (d.s.sulla_base)
 		led = LED_CARICA;
 	if (led != d.led_inv || rinfresca) {
 		invia1(GD32_LED_TASTO, (uint8_t)led);

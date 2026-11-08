@@ -702,6 +702,120 @@ I task dell'esame li scrive l'utente da solo, sopra un framework e un driver pre
     - **cucina, problema tenuto** (decisione dell'utente, 2026-11-04): nella prova con partenza dalla base (seme 1) il robot finisce la pulizia sotto il tavolo, le celle chiuse gli tagliano la strada e `RETURN_HOME` va in guasto per mancanza di un percorso. Proposto e scartato dall'utente: attraversare le celle chiuse durante il rientro. Fatto invece il tempo massimo in `ALIGN` (15 s, poi sblocco); **risolto** (detto dall'utente il 2026-11-07).
     - **scadenze mancate** (decisione dell'utente, 2026-11-04): **sul robot qualsiasi scadenza mancata di qualsiasi task deve causare il guasto**, anche una sola e anche di mappatura e lidar. Oggi il driver scatta dopo 3 di fila e solo per i task critici (`driver/driver.c:750`): da cambiare prima delle prove sul robot, senza fermare le prove sul PC, dove manca `SCHED_FIFO`. Nella prima missione sul PC la navigazione ha mancato una scadenza (job da 161,7 ms contro 0,09 ms di media, in `FOLLOW_PATH`): attribuita al portatile, causa non dimostrata.
     - **controllo del piano prima del server aperiodico** (2026-11-07), **fatto** (scritto da Claude su richiesta dell'utente). (1) **Task bloccato = guasto anche per lidar e mappatura**: la scadenza mancata si conta solo a job finito (`rt/rt.c:69`), quindi un job che non finisce non risultava mancato, e per i task non critici "bloccato" era solo un avviso (`driver/driver.c:1023`); ora in `main.c` tutti i task sono critici (soglia di blocco predefinita: 3 periodi, 600 ms per lidar e mappatura, contro job della mappatura fino a ~24 ms). (2) **Sblocco della spazzola centrale** (deciso il 27/10): la sicurezza accende `SAFETY_ERROR_BRUSH` (bit 6) se la corrente della centrale (`correnti[3]`) resta sopra `THRESHOLD_BRUSH_CURRENT` per `THRESHOLD_BRUSH_FRAME_COUNTER` frame (10, ~0,2 s), solo con la spazzola che gira nel verso normale; la navigazione, dove comanda le spazzole, manda `BRUSH_SPEED_UNLOCK` (-100) per `BRUSH_UNLOCK_TIME` (4,5 s: il comando negativo è una manovra del GD32 che si ferma da sola dopo ~4,2 s, `docs/fase2.md` D5), poi torna normale; con le spazzole spente lo sblocco si annulla. **Soglia di 600 mA provvisoria**: la corrente di una spazzola bloccata non è mai stata misurata (accesa ~200 mA, al contrario ~620-750); le soglie dell'originale (`detectNewRollBrushOverCurrent`, tre livelli) sono nel binario, da leggere con Ghidra o da misurare. **Guasto** (`DRV_FAULT_BRUSH_STUCK`, decisione dell'utente): dopo `BRUSH_UNLOCK_MAX_ATTEMPTS` (5) sblocchi di fila con la spazzola ancora bloccata, oppure subito se la spazzola risulta bloccata mentre gira al contrario (soglia a parte, `THRESHOLD_BRUSH_UNLOCK_CURRENT`, 1000 mA, **provvisoria**, con un contatore suo; stesso bit, la navigazione sa se lo sblocco è in corso). Uno sblocco è riuscito se poi la spazzola gira normalmente per `BRUSH_UNLOCK_RESET_TIME` (10 s): allora i tentativi ripartono da zero. Le spazzole spente (pausa, sblocco delle ruote) non annullano lo sblocco: conta il tempo dall'inizio. Provato solo che compila (PC e ARM, nessun avviso). (3) **Rientro senza strada**: c'era già, il robot riprova per `NO_PATH_HOME_TIMEOUT` (30 s) prima del guasto. (4) **Ricerca a tentativi su richiesta dell'allineamento: scartata** dall'utente (inutile: nelle prove l'allineamento non ha mai perso la posizione, la credenza diventa una zona proibita, e sul robot i punteggi in movimento scendono fino al 75%, quindi darebbe falsi allarmi). **Dopo il server**: zone proibite dell'app nella mappa di navigazione (`mark_forbidden_cells` oggi solo per la base all'avvio), prova vera della pulizia a strisce sul robot, deriva dell'IMU (~3° in 280 s, da misurare sulle registrazioni insieme alla mappa salvata).
+    - **passo in diagonale sempre permesso** (deciso con l'utente il 2026-11-08, fatto da Claude). Guasto di `p5`
+      (`build/robot/fase3/p5/`, `trappola.png`): a fine giro dei bordi il robot era nell'ultima fila di quadranti
+      liberi accanto al muro; un urto vero del bumper destro (oggetto basso per terra, invisibile al lidar) ha chiuso
+      il quadrante sopra di lui; l'unico quadrante libero vicino era in diagonale, e la ricerca non faceva passi in
+      diagonale: dalla cella del robot 1 sola cella raggiungibile, rientro senza strada. Il lidar e la posizione erano
+      giusti (verificato ruotando il robot sul posto e toccando il muro col bumper sinistro: `build/robot/fase3/rot1/`).
+      Prima la diagonale era esclusa per prudenza (mai misurato un problema). Conto del margine: fra due punti liberi a
+      10 cm il centro resta ad almeno 21,5 cm dai centri delle celle fini occupate, in diagonale 20,9 cm (6 mm in meno,
+      la stessa distanza che il robot accetta già al centro di ogni cella tutta libera). Cambiato: `mapping.c`
+      (`calc_nav_cell_bitmask` non blocca più un terzo quadrante quando restano liberi due quadranti in diagonale),
+      `navigation.c` (`get_contact_quads` con le coppie in diagonale fra celle affiancate e la coppia d'angolo fra celle
+      che si toccano solo nello spigolo; ricerca su 8 vicini, `SEARCH_NEIGHBOR_SHIFT`; scorciatoie senza il controllo
+      dei due punti di fianco). La frontiera dell'esplorazione e i quadranti di bordo restano a 4 vicini. Rigiocata la
+      griglia del guasto di `p5`: da 1 a 405 celle raggiungibili. **Prova sul robot** (`p6`, 2026-11-08): il robot è
+      ripassato nello stesso angolo di `p5` (urto a 175,9 s) ed è uscito; guasto a 394 s per sblocchi esauriti sotto un
+      mobile pieno di cavi (entrato col giro di un bordo, che non usa la ricerca: per l'utente non c'entra, ci va una
+      zona proibita). 0 scadenze mancate; navigazione al massimo 223 µs (`p5`: 303 µs). Da fare: prova nel simulatore
+      (cucina) quando lo dice l'utente.
+    - **bordo del tappeto: celle bloccate invece dell'attraversamento** (analisi della notte 2026-11-08, da decidere
+      con l'utente; nessun codice cambiato; `build/robot/fase3/p7/tappeto.png`). In `p7` a 62-93 s, a (1,6-1,8; 0,3-0,4),
+      si formano la "T" bloccata (135,128-129) e le celle troppo strette (136,128-130). Ricalcolando gli allarmi della
+      sicurezza dalla registrazione (comandi `0x66` e frame dei sensori): (1) 65,9 s **slittamento**, non incastro: il
+      robot entra sul bordo curvando (v 0,13, ω 0,75), ruote +0,63 rad/s e IMU −0,42, beccheggio −2,6°; lo slittamento
+      va dritto allo sblocco (`should_start_cross` vuole `SAFETY_ERROR_STUCK`), lo sblocco chiude la cella del robot
+      (nessun contatto, quindi `close_cell` → troppo stretta) e porta `unlock_attempt` a 1; (2) 67,2 s incastro dal
+      rilevatore della mappatura (odometria > 5 cm, lidar < 2 cm in 7 scansioni), ma `unlock_attempt != 0` e
+      l'attraversamento non parte: `drv_incastro(1)` segna l'ostacolo basso a 19,5 cm davanti, (1,53; 0,21), che
+      allargato di 22 cm fa la T; (3) 75,6 e 83,5 s slittamento in rotazione sul posto a 1,2 rad/s (ruote 1,2, IMU 0,8):
+      altri sblocchi e altre celle chiuse. **In `p5`, `p6`, `p7` l'incastro misurato dagli encoder non scatta mai e
+      nemmeno lo sforzo dei motori**: solo slittamento (34 volte). Rotazioni sul posto a 1,05-1,2 rad/s: sul pavimento
+      IMU/ruote 1,05-1,08 in tutte le zone, sul tappeto (0,5-2,0; 0-0,5) mediana 0,61-0,97 e 10% a 0,57-0,78, cioè sul
+      tappeto le ruote strisciano e lo slittamento scatta anche solo girando. Perché altrove il robot passa: arrivando
+      dritto non c'è differenza di rotazione (niente slittamento), il primo allarme è l'incastro della mappatura con
+      `unlock_attempt` a 0, e l'attraversamento parte. **Strade da discutere**: attraversamento anche con lo
+      slittamento in avanti lungo un percorso; lo sblocco per slittamento non chiude la cella e non consuma il primo
+      tentativo; lo slittamento durante la rotazione sul posto non come allarme (o rotazione più lenta, o soglia in
+      proporzione alla velocità); l'incastro degli encoder che non scatta mai (le ruote girano anche sul tappeto).
+      **Correzione decisa dall'utente (2026-11-08 notte, da scrivere)**: con lo slittamento (come con l'incastro)
+      mentre il robot va avanti lungo un percorso si prova **subito** l'attraversamento, per un numero massimo di
+      tentativi in un `#define`, contati da una variabile di stato nuova (non `unlock_attempt`), con una funzione in
+      mezzo; finiti i tentativi senza successo, si fa come oggi (sblocco, cella chiusa, ostacolo basso se è incastro).
+      Da decidere quando si scrive: cosa fare con lo slittamento durante la rotazione sul posto (l'attraversamento
+      spinge in avanti, lì il robot non avanza) e quando si azzera il contatore dei tentativi.
+      **Scritta da Claude il 2026-11-08** (decisioni dell'utente, da rivedere con lui): `should_start_cross` accetta
+      incastro **o** slittamento; contatore `cross_attempt` con `CROSS_MAX_ATTEMPTS` (2), contato in `start_cross`,
+      azzerato quando un attraversamento riesce, in `start_following_path` e in `start_leaving_base`; il vecchio
+      controllo su `unlock_attempt` è tolto (anche `unlock_attempt = 1` in `end_cross_failed`); l'attraversamento è
+      riuscito solo se a metà spinta non ci sono né incastro né slittamento. Slittamento durante la rotazione sul posto:
+      soglia proporzionale in `safety.c`, `fmax(THRESHOLD_SLIP_W, THRESHOLD_SLIP_RATIO * |ω ruote|)` con
+      `THRESHOLD_SLIP_RATIO` 0,5. Ricalcolato sulle registrazioni: p7 da 5 a 2 slittamenti (restano 65,8 s, il bordo
+      del tappeto in curva, che ora fa partire l'attraversamento, e 199,5 s con l'IMU a zero), p6 da 25 a 17, p5 da 4 a 3;
+      spariti quelli delle rotazioni sul tappeto (75,6 e 83,5 s). Compila su PC e ARM senza avvisi. Da provare sul robot.
+    - **prova `p8` sul robot (2026-11-08)**, con le correzioni del tappeto e della carica, mappa caricata: 40 min di
+      pulizia a strisce, 3 attraversamenti riusciti, 24 sblocchi, 0 scadenze mancate in tutti i task. Rientro per
+      batteria bassa a 2397 s fallito: il robot girava a ~1 m dalla base; preso in mano dall'utente, rimesso sulla base,
+      guasto 9 (posizione non ritrovata). Causa: **la mappa scivolava** (muro in basso da y −2,2/−2,4 a −3,4 m, muro a
+      destra da ~3,0 a 4,2 m, a scatti di ~20 cm, solo mentre il robot puliva lì vicino), quindi anche la posizione.
+      La mappa salvata (`0.rtm`) è stata cancellata dal robot (copia in `build/robot/fase3/p8/mappa-salvata/`).
+    - **mappa che scivola: causa e correzione** (2026-11-08, ripassi di `p8` sul PC con `tools/rigioca/`, 10 volte più
+      veloce del tempo reale). Punto più basso in cui il robot si crede, 2100-2400 s (muro vero a ~−2,5): codice di
+      allora −3,60; raggi di striscio esclusi (ipotesi di Claude, sbagliata) −3,44; allineamento con 20 passi −3,70;
+      scansioni ignorate sopra 0,5 rad/s −3,26; mappa ferma dopo 400 s −2,42; **niente scrittura con un ostacolo entro
+      0,5 m (idea dell'utente) −2,20**; entro 1 m −2,10 ma solo il 6% delle scansioni scritte e mappa incompleta.
+      Quindi l'allineamento regge su una mappa ferma: lo scivolamento nasce dal circolo mappa → posizione → mappa
+      quando il robot ripassa tante volte vicino ai muri. **Scritta da Claude** (decisione dell'utente): in `mapping.c`
+      `NEAR_OBSTACLE_NO_WRITE_M` (0,5) e `is_near_obstacle` (le celle `LOW_OBSTACLE` del bumper non contano); vicino a un
+      ostacolo la scansione serve solo per allinearsi. Le 2 celle prima del colpo restano. Ripasso col codice vero: muro
+      in basso fra −2,35 e −2,55 per tutta la missione (resta una deriva lenta di ~15 cm in 40 min), a destra fermo
+      fra 2,85 e 3,4; scritto il 24% delle scansioni; a fine missione la stanza è vista come prima (6768 celle fini
+      contro 6945). Da provare sul robot, con l'esplorazione da capo.
+    - **blocco di ostacoli attorno a (2,6-3,4; −0,4/−2,4)**: segnalato dall'utente come ostacoli che non esistono; c'è
+      già nella mappa caricata in `p8` e nel ripasso compare durante l'esplorazione, quindi il lidar vede qualcosa lì.
+      Da capire con l'utente cosa c'è fisicamente; legato alla sua idea di pesare i punteggi con la distanza.
+    - **prova `p9` sul robot (2026-11-08)**, con la mappa che non si scrive vicino agli ostacoli, esplorazione da capo:
+      esplorazione 146 s, giro dei bordi fino a 434 s, strisce fino a 1404 s; muri fermi per tutta la pulizia (muro in
+      basso −2,0/−2,2, a destra 2,8/3,2); 5 attraversamenti del tappeto tutti riusciti, 8 sblocchi (2 nelle strisce),
+      5 celle troppo strette, nessuna sul bordo del tappeto. Zona proibita rimessa da Claude a 840 s con le coordinate
+      di prima (x 1,05-2,50, y 0,95-1,55): l'utente ha deciso di lasciarla. Rientro per batteria bassa in 14 s e
+      aggancio al primo tentativo, riuscito 0,5 s dopo il contatto (correzione della carica), LED giallo acceso.
+    - **`p9` completa dall'inizio alla fine** (2026-11-08): il ritorno a 1404 s era la **fine della pulizia** (la
+      batteria era risalita a 14,40 V a 1318 s), non la batteria bassa; poi carica fino al 100% (16,6 V). 0 scadenze
+      mancate in tutti i task (massimi: mappatura 3,15 ms, lidar 1,30 ms, navigazione 1,08 ms, movimento 0,13 ms,
+      sicurezza 0,09 ms; task aperiodico 169 ms sul core 3); 664 metà pulite (~13 m²).
+    - **prova del sollevamento sul robot, riuscita** (`p10`, 2026-11-08, mappa di `p9` caricata): sollevato due volte e
+      spostato di ~4 m, posizione ritrovata ~5 s dopo il riappoggio entrambe le volte (la prima volta il robot è poi
+      tornato dritto, 4,3 m in 15 s, al punto dove era stato sollevato); pausa, tasto casa, rientro in 15 s e aggancio
+      al primo tentativo; 0 scadenze mancate; task aperiodico al massimo 129 ms.
+    - **costo della mappa che non si scrive vicino agli ostacoli, nel simulatore** (2026-11-08, una prova per versione,
+      missione dalla base, 25 min): soggiorno con la regola 22 celle chiuse e 19 troppo strette, giro dei bordi 661 s;
+      senza 13 e 8, 562 s. Cucina con la regola 86,5% pulito e guasto (nessuna strada per la base), senza 98,5% e
+      guasto all'aggancio (68 urti): la cucina va in guasto in tutti e due i casi. Ipotesi: i bordi degli ostacoli
+      restano quelli visti da lontano, meno precisi. Decisione dell'utente: si tengono 50 cm; da provare più avanti un
+      raggio di 30 cm o la scrittura dei soli colpi vicino agli ostacoli (verifica: ripasso di `p8` più simulatore).
+      Attenzione: `tools/prove-nav/prova.py` ricarica la mappa lasciata in `build/prove-nav/maps/` dalla prova prima,
+      anche di un'altra stanza: per le missioni dalla base usare una cartella vuota con `RTES_MAPS`.
+    - **aggancio storto: possibile miglioramento futuro** (misura del 2026-11-08, decisione dell'utente: per ora resta
+      così, è solo estetico). Angolo del robot agganciato rispetto alla stanza, misurato con il lidar sul muro lungo a
+      destra (il mobile nero dietro la base quasi non si vede): messo a mano ~0°, aggancio di `p7` ~10° verso destra
+      (orario), aggancio di `p9` ~6° verso sinistra (antiorario). Non è costante, quindi una correzione fissa del giro
+      di 180° non serve. Causa probabile: la stima del centro del fascio infrarosso (rifinitura in `driver/aggancio.c`),
+      mentre il giro con l'IMU è preciso (180,6° in `p9`). Idea: la navigazione, quando chiede l'aggancio, passa al
+      driver la direzione "dritta" presa dalla mappa (assi allineati ai muri) da usare al posto di "fascio + 180°";
+      ~30 righe. Dubbio: dopo l'aggancio di `p9` la mappa credeva il robot girato di 11° contro i 6° del lidar.
+      Punti e disegno in `build/rigioca/punti/` (`agganci.png`), strumento `tools/rigioca/`.
+    - **bit "in carica" del GD32 = carica finita, non carica in corso** (registrazione della notte 2026-11-08,
+      `build/robot/fase3/carica1/`, driver senza motori, 13,5 h). Arrivato sulla base al 46% (15,43 V), il robot ha
+      caricato subito con il bit spento: tensione fino a 16,70 V in ~1 h, poi ferma; bit acceso solo a 6550 s (1 h 49 min),
+      poi la tensione è scesa a 16,50 V e lì è rimasta. Il 5/11 (arrivo all'87-94%) il bit si accendeva in pochi secondi, il
+      3/10 (ferma a 16,3 V) era sempre acceso: tutto torna se vuol dire "carica finita". La carica in corso la dice il bit
+      **contatto** (tensione che sale ogni volta che è acceso, che scende appena si stacca). La batteria arriva a 16,70 V:
+      non è degradata come si pensava il 3/10. Nel driver il bit è usato come "in carica" per LED, scritta del registro,
+      `FRAME_CARICA` dell'aggancio (con la batteria scarica l'aggancio riesce solo dopo i 15 s di contatto stabile) e
+      blocco dei motori per batteria critica. **Proposta, da decidere con l'utente**: "in carica" = contatto, il bit
+      diventa "carica completa". I task non lo usano. Stima nostra: 90% dopo 77 min, 100% dopo 93 min.
   - **quadranti attraversati** (deciso 2026-11-01, insieme al giro dei bordi): dove il robot è passato davvero, il
     quadrante resta libero per tutta la sessione, qualunque cosa dica il lidar. Serve in cucina: i passaggi da ~45 cm
     verso la metà sinistra, che la mappa (margine 22 cm, celle fini da 5 cm) chiude ma il giro dei bordi (guidato

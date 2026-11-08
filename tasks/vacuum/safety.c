@@ -142,8 +142,8 @@ void job_safety(void *arg) {
     {       // Istanzio queste variabili in un blocco di codice separato perchè le devo usare solo qui
 
         
-        // Verifica se il robot sta slittando (se le ruote e l'IMU misurano due velocità angolari differenti true)
-        bool is_slip = fabs(encoder_w - imu_w) >= THRESHOLD_SLIP_W;
+        // Verifica se il robot sta slittando la soglia è la più grande fra quella fissa e una frazione della rotazione delle ruote
+        bool is_slip = fabs(encoder_w - imu_w) >= fmax(THRESHOLD_SLIP_W, THRESHOLD_SLIP_RATIO * fabs(encoder_w));
 
 
         if (is_slip) {

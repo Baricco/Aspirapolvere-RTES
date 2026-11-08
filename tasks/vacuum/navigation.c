@@ -19,6 +19,7 @@
 #define PASS_MAX_TURN DEG_TO_RAD(30)        // un punto del percorso si attraversa senza fermarsi se la svolta è sotto questo angolo
 #define CROSS_ANGLE DEG_TO_RAD(30)          // attraversamento di tappeti e cavi: di quanto il robot si mette di traverso rispetto alla direzione di partenza, così una ruota sale prima dell'altra
 #define CROSS_PUSH_TIME RT_MS(3000)         // attraversamento: per quanto il robot spinge dritto da ognuna delle due parti
+#define CROSS_MAX_ATTEMPTS 2                // attraversamenti provati di fila prima di passare allo sblocco che chiude la cella
 #define CRUISING_SPEED 0.35                  // velocità di crociera del robot, m/s
 #define LEAVE_BASE_SPEED 0.1                 // velocità con cui il robot esce dalla base, espressa in m/s
 #define LEAVE_BASE_TIMEOUT RT_MS(15000)      // tempo massimo per uscire dalla base, scaduto il quale il robot va in guasto
@@ -121,6 +122,12 @@ static const unlock_step_t UNLOCK_TABLE[UNLOCK_MAX_ATTEMPTS] = {
 
 // array costante con i valori da sommare all'indice per ottenere i vicini
 static const int NEIGHBOR_SHIFT[4] = {1, -1, NAV_MAP_CELL_NUMBER, -NAV_MAP_CELL_NUMBER};
+
+// i vicini usati dalla ricerca del percorso: i 4 con un lato in comune e i 4 con solo uno spigolo in comune,
+static const int SEARCH_NEIGHBOR_SHIFT[8] = {
+    1, -1, NAV_MAP_CELL_NUMBER, -NAV_MAP_CELL_NUMBER,
+    NAV_MAP_CELL_NUMBER + 1, NAV_MAP_CELL_NUMBER - 1, -NAV_MAP_CELL_NUMBER + 1, -NAV_MAP_CELL_NUMBER - 1
+};
 
 // Primo doppio buffer per comunicare con il task di movimento
 // canale di scambio del doppio buffer
@@ -230,6 +237,7 @@ typedef struct {
     bool hook_has_started;                  // indica se sia già stato richiesto al driver di agganciarsi alla base di ricarica
 
     double cross_theta;                     // attraversamento degli ostacoli bassi: direzione del robot quando si è incastrato
+    uint8_t cross_attempt;                  // attraversamenti provati di fila: si azzera quando uno riesce o parte un percorso nuovo
 
     int64_t battery_low_since;              // istante da cui il driver dice batteria bassa (o critica), 0 se è normale
     nav_state_t interrupted_mission;        // la missione che aveva il robot prima che venisse interrotta per via della batteria scarica. se 0, significa che il robot non si è interrotto per la batteria scarica.
@@ -654,41 +662,80 @@ static inline void search_queue_flush(void) {
 }
 
 // funzione helper che verifica se due celle vicine hanno due quadranti "di contatto" liberi
-// riempiendo i due quadranti passati per puntatore con i quadranti liberi in contatto
+// riempiendo i due quadranti passati per puntatore con i quadranti liberi in contatto.
+// due quadranti sono "di contatto" se i loro centri sono vicini sul reticolo da 10 cm, in orizzontale, in verticale
+// o in diagonale: il passo in diagonale è sempre permesso (deciso con l'utente il 2026-11-08, guasto di p5)
 static inline bool get_contact_quads(const uint16_t cellA, const uint16_t cellB, uint8_t *quadA, uint8_t *quadB) {
 
     // calcola la differenza tra l'indice della cella B e l'indice della cella A
     int diff = cellB - cellA;
 
-    // le due coppie di quadranti affacciati, una per ogni metà del lato in comune fra A e B:
+    // le coppie di quadranti in contatto, in ordine di preferenza (prima quelle affacciate, il passo dritto):
     // in ogni coppia il primo quadrante è di A e il secondo è di B
-    uint8_t pairs[2][2];
+    uint8_t pairs[4][2];
+
+    // numero di coppie valide in pairs
+    int num_pairs;
 
     // se le celle sono adiacenti (se non è così chi ha chiamato la funzione non ha capito cosa fa)
-    // le differenze possono essere solo +-1 o +-NAV_MAP_CELL_NUMBER, da cui si ricavano le 4 direzioni dell'una rispetto all'altra
+    // le differenze possono essere solo +-1, +-NAV_MAP_CELL_NUMBER (celle con un lato in comune)
+    // o +-NAV_MAP_CELL_NUMBER +-1 (celle con solo uno spigolo in comune)
     switch (diff) {
         case 1:                         // la cella B è alla destra di A
-            // i quadranti di destra di A toccano quelli di sinistra di B alla stessa altezza
+            // i quadranti di destra di A toccano quelli di sinistra di B alla stessa altezza, poi in diagonale
             pairs[0][0] = NAV_CELL_TOP_RIGHT;       pairs[0][1] = NAV_CELL_TOP_LEFT;
             pairs[1][0] = NAV_CELL_BOTTOM_RIGHT;    pairs[1][1] = NAV_CELL_BOTTOM_LEFT;
+            pairs[2][0] = NAV_CELL_TOP_RIGHT;       pairs[2][1] = NAV_CELL_BOTTOM_LEFT;
+            pairs[3][0] = NAV_CELL_BOTTOM_RIGHT;    pairs[3][1] = NAV_CELL_TOP_LEFT;
+            num_pairs = 4;
         break;
 
         case -1:                        // la cella B è alla sinistra di A
-            // i quadranti di sinistra di A toccano quelli di destra di B alla stessa altezza
+            // i quadranti di sinistra di A toccano quelli di destra di B alla stessa altezza, poi in diagonale
             pairs[0][0] = NAV_CELL_TOP_LEFT;        pairs[0][1] = NAV_CELL_TOP_RIGHT;
             pairs[1][0] = NAV_CELL_BOTTOM_LEFT;     pairs[1][1] = NAV_CELL_BOTTOM_RIGHT;
+            pairs[2][0] = NAV_CELL_TOP_LEFT;        pairs[2][1] = NAV_CELL_BOTTOM_RIGHT;
+            pairs[3][0] = NAV_CELL_BOTTOM_LEFT;     pairs[3][1] = NAV_CELL_TOP_RIGHT;
+            num_pairs = 4;
         break;
 
         case NAV_MAP_CELL_NUMBER:       // la cella B è sopra A
-            // i quadranti in alto di A toccano quelli in basso di B dalla stessa parte
+            // i quadranti in alto di A toccano quelli in basso di B dalla stessa parte, poi in diagonale
             pairs[0][0] = NAV_CELL_TOP_LEFT;        pairs[0][1] = NAV_CELL_BOTTOM_LEFT;
             pairs[1][0] = NAV_CELL_TOP_RIGHT;       pairs[1][1] = NAV_CELL_BOTTOM_RIGHT;
+            pairs[2][0] = NAV_CELL_TOP_LEFT;        pairs[2][1] = NAV_CELL_BOTTOM_RIGHT;
+            pairs[3][0] = NAV_CELL_TOP_RIGHT;       pairs[3][1] = NAV_CELL_BOTTOM_LEFT;
+            num_pairs = 4;
         break;
 
         case -NAV_MAP_CELL_NUMBER:      // la cella B è sotto A
-            // i quadranti in basso di A toccano quelli in alto di B dalla stessa parte
+            // i quadranti in basso di A toccano quelli in alto di B dalla stessa parte, poi in diagonale
             pairs[0][0] = NAV_CELL_BOTTOM_LEFT;     pairs[0][1] = NAV_CELL_TOP_LEFT;
             pairs[1][0] = NAV_CELL_BOTTOM_RIGHT;    pairs[1][1] = NAV_CELL_TOP_RIGHT;
+            pairs[2][0] = NAV_CELL_BOTTOM_LEFT;     pairs[2][1] = NAV_CELL_TOP_RIGHT;
+            pairs[3][0] = NAV_CELL_BOTTOM_RIGHT;    pairs[3][1] = NAV_CELL_TOP_LEFT;
+            num_pairs = 4;
+        break;
+
+        case NAV_MAP_CELL_NUMBER + 1:   // la cella B è in alto a destra di A
+            // si tocca solo lo spigolo: il quadrante in alto a destra di A con quello in basso a sinistra di B
+            pairs[0][0] = NAV_CELL_TOP_RIGHT;       pairs[0][1] = NAV_CELL_BOTTOM_LEFT;
+            num_pairs = 1;
+        break;
+
+        case NAV_MAP_CELL_NUMBER - 1:   // la cella B è in alto a sinistra di A
+            pairs[0][0] = NAV_CELL_TOP_LEFT;        pairs[0][1] = NAV_CELL_BOTTOM_RIGHT;
+            num_pairs = 1;
+        break;
+
+        case -NAV_MAP_CELL_NUMBER + 1:  // la cella B è in basso a destra di A
+            pairs[0][0] = NAV_CELL_BOTTOM_RIGHT;    pairs[0][1] = NAV_CELL_TOP_LEFT;
+            num_pairs = 1;
+        break;
+
+        case -NAV_MAP_CELL_NUMBER - 1:  // la cella B è in basso a sinistra di A
+            pairs[0][0] = NAV_CELL_BOTTOM_LEFT;     pairs[0][1] = NAV_CELL_TOP_RIGHT;
+            num_pairs = 1;
         break;
 
     default:                            // A e B non sono adiacenti
@@ -696,7 +743,7 @@ static inline bool get_contact_quads(const uint16_t cellA, const uint16_t cellB,
     }
 
     // cerca la prima coppia con tutti e due i quadranti liberi (bit del quadrante a 0 --> libero)
-    for (int i = 0; i < 2; i++) {
+    for (int i = 0; i < num_pairs; i++) {
         if ((nav_state.map[cellA] & pairs[i][0]) == 0 && (nav_state.map[cellB] & pairs[i][1]) == 0) {
             *quadA = pairs[i][0];
             *quadB = pairs[i][1];
@@ -842,8 +889,8 @@ static bool is_clean_half_near(const double x, const double y) {
 }
 
 // Funzione helper per stabilire se la cella fornita corrisponde all'obiettivo della ricerca
-// qui la ricerca viene fatta sempre sulle 4 celle adiacenti (su, giù, dx, sx), il percorso
-// verrà poi tagliato usando l'algoritmo di bresenham per permettere percorsi in diagonale
+// la ricerca guarda le 8 celle vicine (anche in diagonale), il percorso verrà poi tagliato usando l'algoritmo di
+// bresenham; la frontiera invece guarda solo le 4 celle con un lato in comune (una vicina sconosciuta da un lato)
 static bool cell_is_goal(const nav_search_goal_t goal, const uint16_t cell, const uint16_t goal_cell) {
     
     switch (goal) {
@@ -1043,7 +1090,7 @@ static uint8_t get_middle_quad(const uint16_t cell, const uint8_t quad1, const u
     if ((nav_state.map[cell] & middle1) == 0) return middle1;
     if ((nav_state.map[cell] & middle2) == 0) return middle2;
 
-    // nessuno dei due è libero: non dovrebbe succedere, la mappatura non lascia mai liberi solo due quadranti opposti
+    // nessuno dei due è libero: il robot va dritto in diagonale da un quadrante all'altro (il passo in diagonale è sempre permesso)
     return NAV_PATH_NO_QUAD;
 }
 
@@ -1221,11 +1268,11 @@ static uint32_t search_cell(const uint16_t start_cell, const nav_search_goal_t g
         // se corrisponde al goal, ricorstruisci il percorso completo e restituiscine la lunghezza
         if (cell_is_goal(goal, cur_cell, goal_cell)) return expand_path(reconstruct_path(start_cell, cur_cell));
 
-        // se siamo qui significa che cur_cell non è il goal, quindi controlliamo le celle vicine
-        for (int i = 0; i < 4; i++) {
+        // se siamo qui significa che cur_cell non è il goal, quindi controlliamo le 8 celle vicine
+        for (int i = 0; i < 8; i++) {
 
             // calcola l'indice della cella vicina alla cella corrente
-            uint16_t neigh_cell = cur_cell + NEIGHBOR_SHIFT[i];
+            uint16_t neigh_cell = cur_cell + SEARCH_NEIGHBOR_SHIFT[i];
             
             // Verifica se la vicina attuale potrebbe essere una candidata come prossima cella
             if (nav_state.came_from[neigh_cell] == CELL_NOT_VISITED && cell_can_enter(cur_cell, neigh_cell, start_cell)) {
@@ -1337,11 +1384,7 @@ static bool line_of_sight(uint32_t start_idx, uint32_t end_idx) {
 
             // avanza di un passo nella direzione corrente in base all'errore
 
-            if (vert_error && hor_error) {  
-                
-                // se uno dei due punti in diagonale non è libero, ritorna false
-                if (!is_lattice_point_free(cur_cell_x, cur_cell_y + sy) || !is_lattice_point_free(cur_cell_x + sx, cur_cell_y)) return false;
-            }
+            // il passo in diagonale è sempre permesso (get_contact_quads): non si controllano i due punti di fianco
             if (hor_error) { err += dy; cur_cell_x += sx; }
             if (vert_error) { err += dx; cur_cell_y += sy; }
 
@@ -1753,13 +1796,15 @@ static void start_unlock_after_alarm(const safety_alarm_t cur_alarm, const movem
 }
 
 // Funzione helper che dice se provare ad attraversare l'ostacolo basso che tiene incastrato il robot: solo se va
-// avanti lungo un percorso o sta uscendo dalla base ed è già staccato dai contatti 
+// avanti lungo un percorso o sta uscendo dalla base ed è già staccato dai contatti.
+// Vale anche per lo slittamento: sul bordo di un tappeto preso in curva una ruota sale e l'altra no, e scatta prima
+// lo slittamento dell'incastro
 static bool should_start_cross(const uint8_t error_mask) {
 
-    if (!(error_mask & SAFETY_ERROR_STUCK) || (error_mask & SAFETY_ERROR_CONTACT)) return false;
+    if (!(error_mask & (SAFETY_ERROR_STUCK | SAFETY_ERROR_SLIP)) || (error_mask & SAFETY_ERROR_CONTACT)) return false;
 
-    // se c'è già stato uno sblocco in questo tratto di percorso, l'attraversamento è già stato provato
-    if (nav_state.unlock_attempt != 0) return false;
+    // finiti i tentativi si passa allo sblocco, come per un ostacolo vero
+    if (nav_state.cross_attempt >= CROSS_MAX_ATTEMPTS) return false;
 
     if (nav_state.state == NAV_STATE_FOLLOW_PATH) return nav_state.cur_obj.v > 0;
 
@@ -1781,14 +1826,21 @@ static void start_cross_rotation(const double angle) {
     nav_state.phase_start = rt_adesso();
 }
 
+// Funzione helper che fa partire un tentativo di attraversamento e lo conta
+static void start_cross(const movement_position_data_t cur_pos) {
+
+    nav_state.cross_attempt++;
+    nav_state.cross_theta = cur_pos.theta;
+    set_state(NAV_STATE_CROSS);
+    start_cross_rotation(CROSS_ANGLE);
+}
+
 // Funzione helper per quando l'attraversamento non riesce: dalla base non si arretra, altrove si passa allo sblocco
 static void end_cross_failed(const safety_alarm_t cur_alarm, const movement_position_data_t cur_pos) {
 
     if (read_started_on_base() && !nav_state.has_left_base) {
 
-        // segna che l'attraversamento è stato provato: resta il tempo massimo dell'uscita dalla base
-        nav_state.unlock_attempt = 1;
-
+        // i tentativi rimasti li conta cross_attempt, poi resta il tempo massimo dell'uscita dalla base
         set_state(NAV_STATE_LEAVE_BASE);
 
     } else start_unlock_after_alarm(cur_alarm, cur_pos);
@@ -1798,6 +1850,9 @@ static void end_cross_failed(const safety_alarm_t cur_alarm, const movement_posi
 static void start_following_path(const safety_alarm_t cur_alarm, const movement_position_data_t cur_pos, const double lat_shift, const bool is_first_point) {
 
     nav_state.path_idx = 0;
+
+    // percorso nuovo: gli attraversamenti si possono provare di nuovo
+    nav_state.cross_attempt = 0;
 
     nav_state.cur_lat_shift = lat_shift;
 
@@ -1820,9 +1875,10 @@ static void start_following_path(const safety_alarm_t cur_alarm, const movement_
 }
 
 
-// Funzione helper che fa partire l'uscita dalla base, questo p l'ultimo momento in cui il robot ha il permesso di muoversi con i contatti chiusi
+// Funzione helper che fa partire l'uscita dalla base
 static void start_leaving_base(void) {
     nav_state.has_left_base = false;
+    nav_state.cross_attempt = 0;
     drv_esci_dalla_base(1);
     set_state(NAV_STATE_LEAVE_BASE);
 }
@@ -2392,9 +2448,7 @@ void job_navigation(void *arg) {
 
     // se il robot è incastrato su qualcosa di basso, prima dello sblocco prova ad attraversarlo
     if (should_start_cross(cur_alarm.error_mask)) {
-        nav_state.cross_theta = cur_pos.theta;
-        set_state(NAV_STATE_CROSS);
-        start_cross_rotation(CROSS_ANGLE);
+        start_cross(cur_pos);
         return;
     }
 
@@ -2801,8 +2855,10 @@ void job_navigation(void *arg) {
             write_objective(&nav_state.cur_obj);
 
             // l'allarme di incastro guarda l'ultimo secondo e mezzo: prima di metà spinta non dice ancora niente.
-            // se dopo è spento il robot si è liberato, e torna a quello che stava facendo
-            if (elapsed_time(nav_state.phase_start) >= CROSS_PUSH_TIME / 2 && !(cur_alarm.error_mask & SAFETY_ERROR_STUCK)) {
+            // se dopo è spento, e non c'è nemmeno lo slittamento, il robot si è liberato, e torna a quello che stava facendo
+            if (elapsed_time(nav_state.phase_start) >= CROSS_PUSH_TIME / 2 && !(cur_alarm.error_mask & (SAFETY_ERROR_STUCK | SAFETY_ERROR_SLIP))) {
+
+                nav_state.cross_attempt = 0;
 
                 if (read_started_on_base() && !nav_state.has_left_base) set_state(NAV_STATE_LEAVE_BASE);
                 else resume_after_stop(cur_alarm, cur_pos);

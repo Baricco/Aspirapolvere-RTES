@@ -210,7 +210,8 @@ static void riga_stato(double t, const drv_stato_t *st, const drv_sensori_t *s, 
 	printf("%7.1f %-6s %5.2f V %3d%%%s%s | bump %d%d vuoto %x | sens %2.0f Hz | v %+.2f w %+.2f lim %s"
 	       " (misurate v %+.3f w %+.3f, imbardata %+.1f°) | cassetto %d ir %x/%x ventola %d%s | spazz %d/%d led %d |"
 	       " lidar %s %.2f g/s p%d giri %u | tick+%.0f lav %.0f us | tasti %u/%u",
-	       t, nome_fase(st->fase), st->volt, st->percentuale, st->in_carica ? " carica" : "",
+	       t, nome_fase(st->fase), st->volt, st->percentuale,
+	       st->carica_completa ? " carica completa" : st->in_carica ? " carica" : "",
 	       st->sulla_base ? " BASE" : "", s->s.bumper_sx, s->s.bumper_dx,
 	       s->s.cliff[0] | s->s.cliff[1] << 1 | s->s.cliff[2] << 2 | s->s.cliff[3] << 3, st->sensori_hz, st->v, st->w,
 	       lim, s->s.vel_sx / GD32_SCALA_V, s->s.vel_dx / GD32_SCALA_W, s->s.angolo[0] / 100.0,
@@ -293,7 +294,7 @@ int main(int argc, char **argv)
 	if (csv)
 		fprintf(csv, "t_s,fase,volt,percentuale,in_carica,sulla_base,sensori_hz,eta_sensori_ms,tick_ritardo_max_us,"
 		             "lavoro_max_us,intervallo_sensori_max_ms,intervallo_sensori_min_ms,lidar_giri_s,lidar_potenza,lidar_giri,frame_errati,errori_scrittura,keepalive,"
-		             "v,w,limiti,task_lat_max_us,task_esec_max_us,task_persi,task_mancate\n");
+		             "v,w,limiti,task_lat_max_us,task_esec_max_us,task_persi,task_mancate,carica_completa\n");
 
 	if (drv_avvia(&c))
 		return 1;
@@ -345,7 +346,7 @@ int main(int argc, char **argv)
 			if (!silenzioso)
 				riga_stato(t, &st, &s, task);
 			if (csv) {
-				fprintf(csv, "%.1f,%d,%.2f,%d,%d,%d,%.0f,%.1f,%.1f,%.1f,%.3f,%.3f,%.2f,%d,%u,%llu,%llu,%llu,%.3f,%.3f,%d,%.1f,%.1f,%llu,%llu\n",
+				fprintf(csv, "%.1f,%d,%.2f,%d,%d,%d,%.0f,%.1f,%.1f,%.1f,%.3f,%.3f,%.2f,%d,%u,%llu,%llu,%llu,%.3f,%.3f,%d,%.1f,%.1f,%llu,%llu,%d\n",
 				        t, st.fase, st.volt, st.percentuale, st.in_carica, st.sulla_base, st.sensori_hz,
 				        st.eta_sensori_ns / 1e6, st.tick_ritardo_max_ns / 1e3, st.lavoro_max_ns / 1e3,
 				        st.intervallo_sensori_max_ns / 1e6, st.intervallo_sensori_min_ns / 1e6, st.lidar_giri_s,
@@ -353,7 +354,7 @@ int main(int argc, char **argv)
 				        (unsigned long long)st.errori_scrittura, (unsigned long long)st.keepalive, st.v, st.w, st.limiti,
 				        task ? t_sensori.stats.latenza_max_ns / 1e3 : 0, task ? t_sensori.stats.esec_max_ns / 1e3 : 0,
 				        task ? (unsigned long long)atomic_load(&t_sensori.attivazioni_perse) : 0ULL,
-				        task ? (unsigned long long)atomic_load(&t_sensori.mancate_totali) : 0ULL);
+				        task ? (unsigned long long)atomic_load(&t_sensori.mancate_totali) : 0ULL, st.carica_completa);
 				fflush(csv);
 			}
 			prossima += RT_MS(ogni_ms);

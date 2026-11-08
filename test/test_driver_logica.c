@@ -690,13 +690,15 @@ static void aggancio_infrarossi(void)
 	/* senza base: un giro e poi rinuncia */
 	modello_agg_t n = { .x = 1.0, .con_base = 0, .carica = 1, .asse_contatti = 1 };
 	CONTROLLA(simula_aggancio(&n, 30) == AGG_FALLITO);
-	/* contatto stabile senza carica: batteria piena */
+	/* contatto stabile senza il bit "in carica" (batteria scarica: il bit arriva solo a carica finita, prova carica1
+	   dell'8/11): riesce dopo FRAME_CARICA frame di contatto, senza aspettare i 15 s */
 	modello_agg_t p = { .x = 0.5, .th = M_PI, .con_base = 1, .carica = 0, .asse_contatti = 1 };
 	CONTROLLA(simula_aggancio(&p, 280) == AGG_FATTO);
-	/* carica che dura 3 frame: "riuscito" non può arrivare subito, solo dopo l'attesa con il contatto stabile */
+	CONTROLLA(p.t_fine < 2);
+	/* bit "in carica" per 3 frame e poi solo contatto (la prova r2): conta il contatto, che è stabile */
 	modello_agg_t c = { .x = 0.5, .th = M_PI, .con_base = 1, .carica = 2, .asse_contatti = 1 };
 	CONTROLLA(simula_aggancio(&c, 280) == AGG_FATTO);
-	CONTROLLA(c.t_fine > 14);
+	CONTROLLA(c.t_fine < 2);
 	/* contatti che non si chiudono: riprova AGG_TENTATIVI volte e rinuncia */
 	modello_agg_t q = { .x = 0.5, .th = M_PI, .con_base = 1, .carica = 1, .asse_contatti = 0 };
 	CONTROLLA(simula_aggancio(&q, 290) == AGG_FALLITO);

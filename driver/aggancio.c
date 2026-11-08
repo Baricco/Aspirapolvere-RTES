@@ -71,7 +71,7 @@
 #define STRADA_PREMI        0.01     /* m: oltre si sposterebbe la base */
 #define PREMI_MAX_NS        (1000 * 1000000LL)
 
-#define FRAME_CARICA        26       /* come l'originale: la carica vale solo se resta attiva per tanti frame di fila */
+#define FRAME_CARICA        26       /* come l'originale: il contatto vale solo se resta per tanti frame di fila */
 #define CONTATTO_ATTESA_NS  (15000 * 1000000LL)
 #define CONTATTO_PERSO_NS   (1500 * 1000000LL)
 #define CONTATTO_QUOTA      0.8      /* bit "contatto" acceso almeno in questa frazione di frame: è intermittente */
@@ -457,7 +457,9 @@ void aggancio_frame(aggancio_t *a, const gd32_sensori_t *s, int64_t t)
 
 	case AGG_F_CONTATTO:
 		a->v = a->w = 0;
-		a->frame = s->in_carica ? a->frame + 1 : 0;
+		/* il bit "in carica" del GD32 si accende solo a carica finita: con la batteria scarica non arriva mai,
+		   mentre sui contatti la carica passa (prova carica1 dell'8/11). Quindi conta il contatto */
+		a->frame = s->sulla_base ? a->frame + 1 : 0;
 		if (a->frame >= FRAME_CARICA) {
 			riesce(a);
 			break;

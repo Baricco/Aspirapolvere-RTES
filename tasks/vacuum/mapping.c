@@ -23,6 +23,7 @@
 #define FINE_CELL_INFLATION_RADIUS  (int)(ceil(((ROBOT_RADIUS + INFLATION_MARGIN_MM) / 1000) / FINE_MAP_CELL_SIZE)) // indica di quanto vengono ingrossate le celle con ostacoli nella mappa di navigazione, il margine serve per essere certi che il robot non sbatta contro gli ostacoli, considerando anche le dimensioni del robot e un piccolo margine d'errore
 #define FINE_CELL_OCCUPATION_THRESHOLD 50        // soglia sopra al quale una cella è considerata occupata
 #define UNKNOWN_CELL_THRESHOLD      8           // numero minimo di celle fini da osservare affinchè la cella di navigazione risulti osservata
+#define NEAR_OBSTACLE_NO_WRITE_M    0.5         // se entro questa distanza dal robot c'è un ostacolo della mappa, la scansione serve solo per allinearsi e non si scrive, espressa in m
 #define ROTATION_SPEED_MAX_THRESHOLD 1.5        // massima velocità angolare che può avere il robot prima che la scansione del lidar venga scartata, oltre questa velocità la scansione è deformata. espressa in rad/s
 #define VOID_OBSTACLE                -128       // punteggio speciale da assegnare ad una cella che viene rilevata come "dirupo" dai sensori anti-caduta, una volta che una cella viene messa a questo valore, non può essere modificata dal ciclo di aggiornamento lidar-based
 #define LOW_OBSTACLE                 127        // punteggio speciale da assegnare ad una cella che viene rilevata come ostacolo dal bumper, ma non rilevato dal lidar, una volta che una cella viene messa a questo valore, non può essere modificata dal ciclo di aggiornamento lidar-based
@@ -321,19 +322,8 @@ static uint8_t calc_nav_cell_bitmask(uint16_t index) {
         }
     }
 
-    // shift di 4 a dx per fare il trick qui sotto
-    bitmask >>= 4;
-
-    // Questo è un modo assolutamente intuitivo e facile da leggere per indicare
-    // che sono bloccate due celle in diagonale (9 = 1001; 6 = 0110)
-    if (bitmask == 9 || bitmask == 6) {
-        // Se sono bloccate solo due celle in diagonale, blocca anche una terza cella
-        // in questo modo il robot non vede come libera la strada che connette i due quadranti passando per il centro
-        bitmask |= 3;       // altro metodo simpatico sempre sulla stessa linea per bloccare le due celle in alto (quindi forzando il blocco di una terza cella)   
-    }
-
-    // rimettiamo a posto la bitmask
-    bitmask <<= 4;
+    // due quadranti liberi in diagonale restano liberi tutti e due: il passo in diagonale è sempre permesso
+    // (deciso con l'utente il 2026-11-08, guasto di p5; prima qui si bloccava anche un terzo quadrante)
 
     return bitmask;
 }
@@ -852,6 +842,30 @@ static void add_score_to_fine_cell(const uint32_t cell_index, const int score) {
     // assegna lo score clampato alla cella
     map_state.fine_grid[cell_index] = tot_score;
 
+}
+
+// Funzione helper che dice se entro NEAR_OBSTACLE_NO_WRITE_M dalla posizione (x, y) c'è una cella fine occupata.
+// Le celle segnate dal bumper (LOW_OBSTACLE) non contano: un urto vicino non deve impedire di scrivere la scansione
+static bool is_near_obstacle(const double x, const double y) {
+
+    // cella fine della posizione e raggio del cerchio da controllare, in celle fini
+    uint32_t center_index = coord_to_fine_index(x, y);
+    int center_x = center_index & 0x3FF;
+    int center_y = center_index >> 10;
+    int radius = (int)(NEAR_OBSTACLE_NO_WRITE_M / FINE_MAP_CELL_SIZE);
+
+    for (int cell_y = center_y - radius; cell_y <= center_y + radius; cell_y++) {
+        for (int cell_x = center_x - radius; cell_x <= center_x + radius; cell_x++) {
+
+            // solo le celle dentro il cerchio
+            if ((cell_x - center_x) * (cell_x - center_x) + (cell_y - center_y) * (cell_y - center_y) > radius * radius) continue;
+
+            int score = map_state.fine_grid[cell_y << 10 | cell_x];
+            if (score > FINE_CELL_OCCUPATION_THRESHOLD && score != LOW_OBSTACLE) return true;
+        }
+    }
+
+    return false;
 }
 
 // Funzione Helper che esegue l'algoritmo di Bresenham
@@ -2447,10 +2461,12 @@ static void job_mapping_body(void *arg) {
         // aggiorna la stima allineata, prima di scrivere la scansione nella mappa
         update_aligned_pose(ref_x, ref_y, ref_theta);
 
+        // vicino a un ostacolo la scansione serve solo per allinearsi
+        bool write_scan = !is_near_obstacle(map_state.aligned_x, map_state.aligned_y);
         
         // Scorri tutti i punti della scansione del lidar e se sono != 0
         // Calcola la posizione del punto rispetto al robot nella mappa
-        for (int i = 0; i < map_state.last_scan.n; i++) {
+        for (int i = 0; write_scan && i < map_state.last_scan.n; i++) {
             
             // se un punto ha distanza 0, non considerarlo
             if (map_state.last_scan.p[i].distanza_mm == 0) continue;

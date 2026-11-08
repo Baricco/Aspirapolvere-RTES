@@ -128,7 +128,9 @@ typedef struct {
 	double volt;                 /* media dell'ultimo secondo */
 	int percentuale;             /* stima come il software originale (batteria.h) */
 	int batteria;                /* BAT_OK, BAT_BASSA, BAT_CRITICA */
-	int in_carica, sulla_base, temperatura_c;
+	int in_carica;               /* sui contatti della base: la carica passa (bit "contatto" del GD32, prova carica1 dell'8/11) */
+	int carica_completa;         /* bit "in carica" del GD32: si accende quando la carica è finita, non mentre carica */
+	int sulla_base, temperatura_c;
 	int sollevato;               /* 1 da quando sotto tutti e 4 gli anti-caduta c'è il vuoto a quando rivedono il pavimento per 0,5 s */
 
 	/* tasti: pressioni brevi (meno di DRV_TASTO_BREVE_MS), contate al rilascio. Un task confronta il numero con quello
