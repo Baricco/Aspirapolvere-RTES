@@ -50,8 +50,8 @@
 #define COMMANDS_FIFO_STACK         (128 * 1024)                // stack del thread che legge la FIFO dei comandi
 
 // --- FIFO dei comandi ---
-#define COMMANDS_PATH_DEFAULT       "/tmp/rtes/vacuum-commands" // file speciale dei comandi sul robot: ogni riga è un comando JSON
-#define COMMANDS_PATH_ENV           "RTES_COMMANDS"             // sul PC: variabile d'ambiente con il percorso del file dei comandi
+#define COMMANDS_PATH_ENV           "RTES_COMMANDS"             // variabile d'ambiente con il percorso del file speciale dei comandi (solo per le prove: senza, niente file e niente thread)
+#define COMMANDS_FIFO_MODE          0600                        // permessi del file speciale: legge e scrive solo il proprietario
 #define COMMAND_LINE_MAX            2048                        // lunghezza massima di una riga di comando
 
 #endif

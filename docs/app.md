@@ -482,7 +482,7 @@ Tutto quello che collega il robot al server sta in **`tasks/vacuum/cloud/`**, se
 | `robot_state.c/.h` | stato JSON (cJSON) e quando mandarlo |
 | `live_map.c/.h` | rettangolo delle posizioni, confronto, differenze in RTM1 |
 | `app_commands.c/.h` | l'unico interprete dei comandi JSON |
-| `commands.c/.h` | la FIFO `/tmp/rtes/vacuum-commands` (`RTES_COMMANDS`): ogni riga è un comando JSON passato all'interprete |
+| `commands.c/.h` | la FIFO dei comandi, solo per le prove: c'è solo con `RTES_COMMANDS` (sul robot, nelle prove, `/tmp/rtes/vacuum-commands`); ogni riga è un comando JSON passato all'interprete |
 | `config.h` | **tutta la configurazione robot-server**; ignorato da git (sotto) |
 | `config.example.h` | lo stesso con valori finti; versionato |
 | `server_roots.h` | le tre radici, certificati pubblici di Let's Encrypt |

@@ -51,7 +51,7 @@ cookie); mbedTLS ha i mutex attivi, perché i due thread di rete usano TLS insie
 | `robot_state.c/.h` | lo stato JSON della sezione 4.1, letto solo con `read_*` e `drv_*`, e la regola di invio della sezione 4.2 |
 | `live_map.c/.h` | mappa dal vivo (sezione 7.3): copia privata, rettangolo delle posizioni, lettura a rettangolo, confronto, invio delle differenze, 409, mappa intera; invio della mappa salvata; controllo dei file RTM1 |
 | `app_commands.c/.h` | l'unico interprete dei comandi JSON (sezione 9.4) |
-| `commands.c/.h` | la FIFO dei comandi (`/tmp/rtes/vacuum-commands`, sul PC `RTES_COMMANDS`): ogni riga è un comando JSON passato all'interprete. Sostituisce `tasks/vacuum/commands.c/.h` |
+| `commands.c/.h` | la FIFO dei comandi, solo per le prove: c'è solo se `RTES_COMMANDS` dice dove crearla, il programma installato parte senza (2026-11-11). Un file che c'è già si riusa solo se è un file speciale del programma con i permessi `0600`, altrimenti si cancella e si ricrea; se durante il funzionamento diventa un file normale il thread si ferma. Ogni riga è un comando JSON passato all'interprete. Sostituisce `tasks/vacuum/commands.c/.h` |
 | `config.example.h` | tutta la configurazione robot-server con valori finti (versionato); `config.h` è la copia privata, ignorata da git |
 | `config_check.h` | ferma la compilazione con un messaggio se manca `config.h` |
 | `server_roots.h` | Root YE, ISRG Root X2, ISRG Root X1, scaricate da letsencrypt.org, con le loro impronte SHA-256 |

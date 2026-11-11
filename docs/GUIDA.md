@@ -589,9 +589,12 @@ RTES_TOKEN_FILE=build/app-dev/robot-token ./rtes.sh sim sim/stanze/vuota.txt bui
 ```
 
 Senza `RTES_TOKEN_FILE` (o con un file che non c'è) la rete non parte e il programma funziona come prima. I comandi
-JSON si possono mandare anche senza app, scrivendoli nel file speciale (`RTES_COMMANDS`, sul robot
-`/tmp/rtes/vacuum-commands`): `echo '{"type":"start"}' > build/.../vacuum-commands`, oppure
-`tools/prove-nav/prova.py --comando 30 '{"type":"pause"}'`.
+JSON si possono mandare anche senza app, scrivendoli nel file speciale dei comandi. Serve solo per le prove: c'è solo
+se la variabile `RTES_COMMANDS` dice dove crearlo (`tools/sim-app.sh` e `tools/prove-nav/prova.py` la impostano da
+soli; sul robot `tools/driver-robot.sh missione NOME RTES_COMMANDS=/tmp/rtes/vacuum-commands`). Il programma installato
+parte senza. Poi `echo '{"type":"start"}' > build/.../vacuum-commands`, oppure
+`tools/prove-nav/prova.py --comando 30 '{"type":"pause"}'`. Un file che c'è già si riusa solo se è un file speciale del
+programma con i permessi `0600`; qualsiasi altra cosa si cancella e si ricrea.
 
 | Comando | Cosa fa |
 |---|---|
