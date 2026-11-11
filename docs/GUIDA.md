@@ -563,3 +563,52 @@ Cose da sapere:
   Il driver applica sempre i limiti: guarda `drv_stato().limiti` per sapere perché un comando non passa.
 - **Unità dei sensori** (`gd32_sensori_t` in `gd32/gd32.h`): encoder in tick (~4580 per metro, `GD32_SCALA_V`),
   imbardata in 0,01° (positiva in senso antiorario, deriva), velocità angolare in 0,01 °/s, tensione in decimi di volt.
+
+## 14. L'app (backend, parte di rete del robot, app Flutter)
+
+Il progetto è in `docs/app.md`, quello che è stato fatto e provato in `docs/app-implementazione.md`. Qui solo i comandi.
+
+**Backend sul PC** (`backend/`, Python in un venv):
+
+| Comando (da `backend/`) | Cosa fa |
+|---|---|
+| `python3 -m venv .venv && .venv/bin/pip install -r requirements.txt` | prepara il venv (una volta) |
+| `cp config.example.env .env` e scrivere la cartella dei dati | configurazione privata di sviluppo (git la ignora) |
+| `.venv/bin/python admin.py` | utenti, token del robot, importazione di mappe (menu a frecce) |
+| `dev/make-cert.sh` | certificato autofirmato per `localhost` in `build/app-dev/` |
+| `dev/run.sh` | backend in HTTP su `127.0.0.1:5000` e, se c'è il certificato, HTTPS su `5443` per il programma del robot |
+| `.venv/bin/python dev/fake_robot.py --token-file FILE` | robot finto, per provare l'app senza simulatore |
+| `.venv/bin/python -m unittest discover -s tests -t .` | prove automatiche del backend |
+
+**Programma del robot collegato al backend sul PC.** Serve `tasks/vacuum/cloud/config.h` (copiato da
+`config.example.h`). Il programma accetta solo HTTPS e si collega solo se trova il file del token:
+
+```
+RTES_SERVER_URL=https://localhost:5443 RTES_SERVER_CA=build/app-dev/localhost-cert.pem \
+RTES_TOKEN_FILE=build/app-dev/robot-token ./rtes.sh sim sim/stanze/vuota.txt build/host/vacuum
+```
+
+Senza `RTES_TOKEN_FILE` (o con un file che non c'è) la rete non parte e il programma funziona come prima. I comandi
+JSON si possono mandare anche senza app, scrivendoli nel file speciale (`RTES_COMMANDS`, sul robot
+`/tmp/rtes/vacuum-commands`): `echo '{"type":"start"}' > build/.../vacuum-commands`, oppure
+`tools/prove-nav/prova.py --comando 30 '{"type":"pause"}'`.
+
+| Comando | Cosa fa |
+|---|---|
+| `tools/build-net-libs.sh` | scarica (con controllo dello SHA-256) e compila mbedTLS e libcurl per il robot in `build/arm/netlibs/` |
+| `make build/host/vacuum build/arm/vacuum` | il programma per il PC (libcurl del sistema) e per il robot (statico) |
+| `backend/.venv/bin/python tools/prove-app/scenari.py [nomi]` | prove complete nel simulatore con backend e programma vero: comandi, telecomando, guasto, zone, mappe, rete |
+| `backend/.venv/bin/python tools/prove-app/missione.py` | la missione di confronto dei task con il backend collegato |
+
+Quando l'app cambia mappa il programma esce con il codice 3 e chi l'ha avviato lo rilancia (`./rtes.sh sim`,
+`tools/prove-nav/prova.py`, `tools/driver-robot.sh`).
+
+**App Flutter** (`app/`):
+
+| Comando (da `app/`) | Cosa fa |
+|---|---|
+| `cp config.example.json config.json` e scrivere l'indirizzo del server | configurazione privata (git la ignora) |
+| `CHROME_EXECUTABLE=/usr/bin/brave flutter run -d chrome --web-port 8090 --dart-define-from-file=config.json` | app web sul PC (l'origine `http://localhost:8090` va in `MAURICE_ALLOWED_ORIGINS` del backend) |
+| `flutter build web --no-web-resources-cdn --pwa-strategy=none --dart-define-from-file=config.json` | app web da servire dallo stesso indirizzo del backend |
+| `flutter build apk --dart-define-from-file=config.json` | app Android |
+| `flutter test` | prove automatiche dell'app |

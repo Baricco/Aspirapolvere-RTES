@@ -15,7 +15,8 @@
 import json, math, os, re, signal, subprocess, sys, time, urllib.request
 REPO = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..'))
 D = os.path.join(REPO, 'build', 'prove-nav')
-NOMI = ['WAIT', 'EXPLORE', 'CLEAN', 'BORDERS', 'HOME', 'HOOK', 'FOLLOW', 'UNLOCK', 'SLEEP', 'ALIGN', 'FAILURE', 'LAP', 'LEAVE', 'CROSS', 'PAUSE']
+NOMI = ['WAIT', 'EXPLORE', 'CLEAN', 'BORDERS', 'HOME', 'HOOK', 'FOLLOW', 'UNLOCK', 'SLEEP', 'ALIGN', 'FAILURE', 'LAP', 'LEAVE', 'CROSS', 'PAUSE', 'REMOTE']
+RESTART_EXIT_CODE = 3   # il programma chiede di essere rilanciato (cambio di mappa dall'app, tasks/vacuum/cloud/network.h)
 CLEAN, FAILURE, SLEEP, HOME = NOMI.index('CLEAN'), NOMI.index('FAILURE'), NOMI.index('SLEEP'), NOMI.index('HOME')
 BORDERS, LAP = NOMI.index('BORDERS'), NOMI.index('LAP')
 LAP_TIMEOUT = 1800   # BORDER_LAP_TIMEOUT di navigation.c: la rete di sicurezza, non deve mai scattare
@@ -38,11 +39,16 @@ a = [x for x in a if x != '--senza-avvio']
 while '--premi' in a:
     i = a.index('--premi'); PREMI.append((float(a[i + 1]), a[i + 2])); del a[i:i + 3]
 PREMI.sort()
-# --comando T TESTO (anche più volte): dopo T s scrive la riga TESTO nel file dei comandi del programma (tasks/vacuum/commands.h)
+# --comando T TESTO (anche più volte): dopo T s scrive la riga TESTO nel file dei comandi del programma: un comando JSON,
+# lo stesso che manderebbe l'app (tasks/vacuum/cloud/commands.h), per esempio --comando 30 '{"type":"pause"}'
+# --attendi (con --comando): la prova non finisce al primo riposo, va avanti fino alla durata
+# Per collegare il programma al backend dell'app sul PC: RTES_SERVER_URL, RTES_SERVER_CA e RTES_TOKEN_FILE nell'ambiente
 COMANDI = []
 while '--comando' in a:
     i = a.index('--comando'); COMANDI.append((float(a[i + 1]), a[i + 2])); del a[i:i + 3]
 COMANDI.sort()
+ATTENDI = '--attendi' in a
+a = [x for x in a if x != '--attendi']
 SPOSTA = None    # --sposta X Y ANGOLO (con --solleva): mentre è in aria il robot viene spostato lì (coordinate della stanza, gradi)
 if '--sposta' in a:
     i = a.index('--sposta'); SPOSTA = a[i + 1:i + 4]; del a[i:i + 4]
@@ -73,12 +79,14 @@ env = dict(os.environ, RTES_GD32='build/sim/gd32', RTES_LIDAR='build/sim/lidar',
 # mappe salvate (docs/formato-mappa.md): sul PC in build/prove-nav/maps, oppure nella cartella di RTES_MAPS. Una prova
 # lascia la mappa nel file, quella dopo con --dalla-base la ricarica: per ripartire da zero si cancella il file
 env.setdefault('RTES_MAPS', os.path.join(D, 'maps'))
-env.setdefault('RTES_COMANDI', os.path.join(D, 'comandi'))   # file speciale dei comandi (lo crea il programma)
+env.setdefault('RTES_COMMANDS', os.path.join(D, 'vacuum-commands'))   # file speciale dei comandi (lo crea il programma)
 os.makedirs(env['RTES_MAPS'], exist_ok=True)
 fout = os.path.join(D, f'prog_{tag}.log')
-prog = subprocess.Popen(['build/host/osserva', '--uscita', 'build/sim/mappa_robot', '--', 'taskset', '-c', '0-3',
-                         os.path.join(D, 'vacdbg')], env=env, stdout=open(fout, 'w'), stderr=subprocess.STDOUT,
-                        start_new_session=True)
+def avvia_programma(modo):
+    return subprocess.Popen(['build/host/osserva', '--uscita', 'build/sim/mappa_robot', '--', 'taskset', '-c', '0-3',
+                             os.path.join(D, 'vacdbg')], env=env, stdout=open(fout, modo), stderr=subprocess.STDOUT,
+                            start_new_session=True)
+prog = avvia_programma('w')
 def comando_sim(testo):
     urllib.request.urlopen(urllib.request.Request('http://127.0.0.1:8080/comando', data=testo.encode(), method='POST'), timeout=2).read()
 fase_batt, righe_a_riposo, fase_solleva, t_tasto = 0, 0, 0, 0
@@ -98,10 +106,14 @@ while time.time() - t0 < durata:
         r = d['robot']
         vero.write(f"{time.monotonic():.3f},{d['t']:.3f},{r['x']:.4f},{r['y']:.4f},{r['dir']:.1f},"
                    f"{int(any(d['bumper']))},{int(bool(d['bloccato']))},{int(bool(d['incastrato']))}\n")
+    # il programma è uscito chiedendo di essere rilanciato (cambio di mappa): riparte, e il registro continua
+    if prog.poll() == RESTART_EXIT_CODE:
+        print(f"programma rilanciato a {time.time() - t0:.1f} s", flush=True)
+        prog = avvia_programma('a')
     nav = righe_nav()
     while COMANDI and time.time() - t0 >= COMANDI[0][0]:
         testo = COMANDI.pop(0)[1]
-        with open(env['RTES_COMANDI'], 'w') as fc:
+        with open(env['RTES_COMMANDS'], 'w') as fc:
             fc.write(testo + '\n')
         print(f"comando \"{testo}\" a {time.time() - t0:.1f} s", flush=True)
     while PREMI and time.time() - t0 >= PREMI[0][0]:
@@ -120,7 +132,7 @@ while time.time() - t0 < durata:
         elif fase_batt == 1 and nav and int(nav[-1][3]) == SLEEP:
             time.sleep(1); comando_sim('batteria 95'); fase_batt = 2; righe_a_riposo = len(nav); print(f"batteria ricaricata a {time.time() - t0:.0f} s", flush=True)
     finita = nav and int(nav[-1][3]) in FINE and (BATTERIA is None or int(nav[-1][3]) == FAILURE or (fase_batt == 2 and len(nav) > righe_a_riposo))
-    if finita and fine is None and not PREMI and time.time() - t_tasto > 3: fine = time.time()   # finché ci sono tasti da premere la prova continua, e lo stato dopo un tasto arriva al job dopo
+    if finita and fine is None and not PREMI and not COMANDI and not ATTENDI and time.time() - t_tasto > 3: fine = time.time()   # finché ci sono tasti da premere la prova continua, e lo stato dopo un tasto arriva al job dopo
     if fine and time.time() - fine > 1.5: break
     time.sleep(0.1)
 for l in subprocess.run(['pgrep', '-f', '^' + os.path.join(D, 'vacdbg')], capture_output=True, text=True).stdout.split():

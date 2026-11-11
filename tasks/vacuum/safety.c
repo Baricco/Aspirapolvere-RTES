@@ -8,6 +8,7 @@
 #include "movement.h"
 #include "lidar.h"
 #include "mapping.h"
+#include "navigation.h"
 
 
 // struttura dati interna che contiene lo stato interno del task
@@ -259,8 +260,14 @@ void job_safety(void *arg) {
     // Leggi la posizione attuale del robot
     movement_position_data_t cur_position = read_movement();
 
+    // in telecomando le zone proibite, base compresa, sono ignorate: il ciclo delle zone si salta e le distanze
+    // restano infinite. Ostacoli, vuoto e paraurti restano
+    if (read_navigation_status().is_remote) {
+
+        // niente da fare
+
     // se la posizione attuale non è valida e ci sono delle zone proibite
-    if (!cur_position.valid && cur_forb_zones.num_zones > 0) {
+    } else if (!cur_position.valid && cur_forb_zones.num_zones > 0) {
 
         // metti le distanze al minimo, per sicurezza
         zone_back_distance = THRESHOLD_DISTANCE;

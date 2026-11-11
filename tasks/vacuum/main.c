@@ -11,7 +11,8 @@
 #include "safety.h"
 #include "mapping.h"
 #include "aperiodic.h"
-#include "commands.h"
+#include "cloud/commands.h"
+#include "cloud/network.h"
 
 #define SLEEP_TIME 1                      // il main contiene un loop infinito che serve solo ad aspettare di ricevere il segnale di arresto, dentro al loop aspetta 1 secondo per non mandare la CPU al 100%
 
@@ -248,8 +249,12 @@ int main(void) {
               return 1;
        }
 
-       // thread dei comandi (zone proibite): se non parte, il programma va avanti senza comandi
+       // thread della FIFO dei comandi (comandi JSON per le prove): se non parte, il programma va avanti senza
        start_commands();
+
+       // collegamento al server dell'app: parte dopo i task, come i comandi. Senza il file del token non parte, e il
+       // robot funziona come prima
+       start_network();
 
        // sveglia il task del moto con l'arrivo del frame dai sensori
        drv_sveglia_ai_sensori(&movement_task);
@@ -272,7 +277,8 @@ int main(void) {
 	// il main aspetta solo il segnale per terminare
 	// e stampa i dati eventualmente
        
-	while (!fine) {
+	// oppure la richiesta di riavvio, dopo un cambio di mappa dall'app
+	while (!fine && !is_restart_requested()) {
               sleep(SLEEP_TIME);
        }
 
@@ -304,7 +310,9 @@ int main(void) {
        rt_stats_stampa(&mapping_task);    // mappatura
        rt_aperiodico_stampa(&aperiodic_task);    // aperiodico
 
-
+       // dopo un cambio di mappa chi ha avviato il programma lo rilancia: la mappa nuova si carica solo
+       // prima che partano i task
+       if (is_restart_requested()) return RESTART_EXIT_CODE;
 
 	return 0;
 }

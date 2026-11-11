@@ -37,6 +37,8 @@ if [ "$SONDA" != 0 ]; then   # SONDA=0: senza registratore
 fi
 # per provare una modifica senza toccare tasks/: MODIFICA=script.py, chiamato con la cartella della copia
 if [ -n "$MODIFICA" ]; then python3 -I "$MODIFICA" $D/vac; fi
-gcc -std=gnu11 -O2 -g -Wall -Wextra -pthread -I. -o $D/vacdbg $D/vac/*.c driver/driver.c driver/scambio.c \
+# la cartella cloud/ (collegamento al server dell'app) vuole cJSON e la libcurl del sistema, e la sua configurazione privata
+[ -f $D/vac/cloud/config.h ] || { echo "manca tasks/vacuum/cloud/config.h: copialo da config.example.h" >&2; exit 1; }
+gcc -std=gnu11 -O2 -g -Wall -Wextra -pthread -I. -o $D/vacdbg $D/vac/*.c $D/vac/cloud/*.c third_party/cjson/cJSON.c driver/driver.c driver/scambio.c \
     driver/batteria.c driver/lidar_giro.c driver/contatti.c driver/aggancio.c spia/registro.c rt/rt.c gd32/gd32.c gd32/sicurezza.c \
-    gd32/descrizione.c lidar/lidar.c -lm
+    gd32/descrizione.c lidar/lidar.c -lm -lcurl

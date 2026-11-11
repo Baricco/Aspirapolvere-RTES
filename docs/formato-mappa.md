@@ -5,11 +5,20 @@ all'avvio, prima che partano i task. Obiettivo: file il più piccolo possibile, 
 
 ## Dove sta
 
-- Sul robot: `/mnt/UDISK/rt/maps/N.rtm`, con N = 0, 1, 2, … (una mappa per file).
-- Il numero della mappa attiva sta in un file di configurazione a parte (lo cambierà l'app).
-- Sul PC (simulatore) il percorso arriva da una variabile d'ambiente, per non toccare i file del robot.
-- Scrittura: file temporaneo nella stessa cartella, poi rinominato sopra il vecchio. Nessuna copia della mappa
-  precedente. Le partizioni sono montate `sync`: finite scrittura e rinomina, i dati sono sulla flash.
+Aggiornato il 2026-11-10 con il progetto dell'app (`docs/app.md`, sezione 7).
+
+- Sul robot c'è **una sola mappa**: `/mnt/UDISK/rt/maps/map.rtm`, quella selezionata. Non ci sono più le mappe numerate
+  né il file con il numero della mappa attiva.
+- Tutte le mappe, compresa una copia di quella selezionata, stanno sul server dell'app nei file `map-<id>.rtm`, con lo
+  stesso formato. Per cambiare mappa il robot scarica quella scelta in `map.rtm.download`, il task aperiodico la
+  rinomina sopra `map.rtm` e il programma si riavvia.
+- Sul PC (simulatore) la cartella arriva dalla variabile d'ambiente `RTES_MAPS`, per non toccare i file del robot.
+- Scrittura: file temporaneo (`map.rtm.tmp`) nella stessa cartella, poi rinominato sopra il vecchio. Nessuna copia
+  della mappa precedente. Le partizioni sono montate `sync`: finite scrittura e rinomina, i dati sono sulla flash.
+- Lo stesso formato serve alla **mappa dal vivo** dell'app: il robot manda al server il rettangolo delle celle
+  cambiate come un piccolo file RTM1 (senza zone), e il server lo passa all'app così com'è.
+- **CRC come impronta**: il CRC-32 in fondo al file, scritto in 8 cifre esadecimali, identifica la mappa fra robot e
+  server (`map.file_crc` nello stato, colonna `crc32` nel database).
 
 ## Contenuto
 
@@ -79,7 +88,7 @@ fissi), cucina e camera 69 × 79 circa 460-500 byte (1.363), corridoio 79 × 119
 
 ## Controlli al caricamento
 
-La mappa si scarta (e il robot riesplora, poi salva con lo stesso numero) se:
+La mappa si scarta (e il robot riesplora, poi salva di nuovo `map.rtm`) se:
 
 - il file non c'è o è più corto della parte fissa;
 - il numero magico non è `RTM1`;
@@ -89,14 +98,17 @@ La mappa si scarta (e il robot riesplora, poi salva con lo stesso numero) se:
 - finite le celle, nel file non restano esattamente 4 byte;
 - il CRC-32 non corrisponde.
 
-## Implementazione (2026-11-07)
+## Implementazione (2026-11-07, aggiornata il 2026-11-10)
 
 - Scrittura: `save_map` in `tasks/vacuum/aperiodic.c` (task aperiodico, richiesta `request_map_save` dalla navigazione a
   fine esplorazione e all'aggancio riuscito). La griglia si copia a categorie con `copy_map_categories`
-  (`tasks/vacuum/mapping.c`, lettura fra un job e l'altro della mappatura), poi le sequenze vanno dirette nel file
-  temporaneo con il CRC calcolato man mano.
+  (`tasks/vacuum/mapping.c`, lettura fra un job e l'altro della mappatura), poi `encode_map_rectangle` scrive le
+  sequenze dirette nel file temporaneo con il CRC calcolato man mano. La stessa `encode_map_rectangle` codifica i
+  rettangoli della mappa dal vivo (`tasks/vacuum/cloud/live_map.c`).
 - Lettura: `load_map_if_on_base` e `read_map_file` in `tasks/vacuum/mapping.c`, chiamate da `init_mapping` prima che
   partano i task, solo se il robot è sulla base. Punteggi di partenza: `LOAD_SCORE_FREE` (−100) e
   `LOAD_SCORE_OCCUPIED` (80); poi contatori e griglia di navigazione ricalcolati sul rettangolo.
+- Altri lettori dello stesso formato: `decode_map_data` in `tasks/vacuum/cloud/live_map.c` (copia privata della mappa
+  dal vivo e controllo della mappa scaricata), `backend/maps.py` (server), `app/lib/map/rtm.dart` (app).
 - Controllo dal PC: `python3 tools/leggi-mappa.py FILE.rtm [disegno.png]`.
 - Costanti comuni (numero magico, categorie, sequenze): `tasks/vacuum/mapping.h`.

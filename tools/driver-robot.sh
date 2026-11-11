@@ -11,7 +11,8 @@
 #        Esempio: tools/driver-robot.sh avvia d1 --senza-motori --task-prova
 #   tools/driver-robot.sh programma PROG NOME [argomenti...]
 #        come avvia, ma con un TUO programma (tasks/PROG.c -> build/arm/PROG): uscita in NOME.out, e quando termina
-#        riparte il custode. Il programma deve fermarsi con SIGTERM (tools/driver-robot.sh ferma lo manda).
+#        riparte il custode. Il programma deve fermarsi con SIGTERM (tools/driver-robot.sh ferma lo manda). Se esce con il
+#        codice 3 (chiede il riavvio: cambio di mappa dall'app, docs/app.md sezione 7.5) viene rilanciato subito.
 #   tools/driver-robot.sh missione NOME [VAR=valore...]
 #        la missione vera: tasks/vacuum come è, con i byte grezzi delle seriali in NOME.reg e, da fuori, stato della
 #        navigazione e mappa in NOME.oss e NOME.map (tools/osserva-robot.c). IL ROBOT PARTE SUBITO: deve stare sulla base.
@@ -50,8 +51,9 @@ avvia() {   # avvia PROGRAMMA NOME argomenti...
       pidof spia >/dev/null && { echo 'il custode non si ferma'; exit 1; }
       cd $D; rm -f $nome.out $nome.csv $nome.reg $nome.oss $nome.map
       start-stop-daemon -S -b -m -p $D/driver.pid -x /bin/sh -- -c '
-        cd $D; ${AMBIENTE:-} ./$prog $* > $nome.out 2>&1
-        echo \"uscita \$?\" >> $nome.out
+        cd $D; codice=3
+        while [ \$codice = 3 ]; do ${AMBIENTE:-} ./$prog $* >> $nome.out 2>&1; codice=\$?; done
+        echo \"uscita \$codice\" >> $nome.out
         $CUSTODE'
       sleep 2; tail -n 8 $nome.out"
 }

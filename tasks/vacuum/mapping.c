@@ -18,7 +18,6 @@
 #define FINE_GRID_MIN_SCORE         (-100)      // minimo punteggio di una cella della griglia fine
 #define LIDAR_HIT_SCORE             30          // punteggio aggiunto ad una cella se il lidar rileva che c'è un'ostacolo
 #define LIDAR_PASS_SCORE            (-10)       // punteggio tolto da una cella se il lidar non vede ostacoli
-#define LIDAR_MAPPING_MAX_RANGE     6           // distanza massima a cui il lidar può misurare un punto, prima che il rumore sia troppo alto, espresso in m
 #define INFLATION_MARGIN_MM         46          // margine usato per calcolare un margine di distanza tra il robot e gli ostacoli nella griglia di navigazione, espresso in mm
 #define FINE_CELL_INFLATION_RADIUS  (int)(ceil(((ROBOT_RADIUS + INFLATION_MARGIN_MM) / 1000) / FINE_MAP_CELL_SIZE)) // indica di quanto vengono ingrossate le celle con ostacoli nella mappa di navigazione, il margine serve per essere certi che il robot non sbatta contro gli ostacoli, considerando anche le dimensioni del robot e un piccolo margine d'errore
 #define FINE_CELL_OCCUPATION_THRESHOLD 50        // soglia sopra al quale una cella è considerata occupata
@@ -2137,7 +2136,13 @@ static inline uint8_t fine_cell_category(int8_t score) {
 // funzione chiamata dal task aperiodico che copia la griglia fine a categorie mentre la
 // mappatura non sta lavorando. Il contatore dei job è dispari durante un job: se è dispari si aspetta, se cambia durante
 // la copia la copia mescola due versioni e si rifà. La mappatura non aspetta mai
-bool copy_map_categories(uint8_t *categories, mapping_forbidden_zone_t *user_zones, int *num_user_zones) {
+bool copy_map_categories(uint8_t *categories, int rect_x, int rect_y, int rect_width, int rect_height,
+                         mapping_forbidden_zone_t *user_zones, int *num_user_zones) {
+
+    // il rettangolo, in byte lungo x (4 celle per byte) e in righe lungo y
+    const uint32_t bytes_per_row = FINE_MAP_CELL_NUMBER / 4;
+    const uint32_t first_byte_x = (uint32_t)rect_x / 4;
+    const uint32_t last_byte_x = (uint32_t)(rect_x + rect_width - 1) / 4;
 
     for (int attempt = 0; attempt < MAP_COPY_MAX_ATTEMPTS; attempt++) {
 
@@ -2150,15 +2155,19 @@ bool copy_map_categories(uint8_t *categories, mapping_forbidden_zone_t *user_zon
         }
 
         // 4 celle per byte, la cella con indice più basso nei bit più bassi
-        for (uint32_t i = 0; i < MAP_CATEGORIES_BYTES; i++) {
-            const int8_t *cell = &map_state.fine_grid[i * 4];
-            categories[i] = (uint8_t)(fine_cell_category(cell[0]) | fine_cell_category(cell[1]) << 2 |
-                                      fine_cell_category(cell[2]) << 4 | fine_cell_category(cell[3]) << 6);
+        for (uint32_t y = (uint32_t)rect_y; y < (uint32_t)(rect_y + rect_height); y++) {
+            for (uint32_t i = y * bytes_per_row + first_byte_x; i <= y * bytes_per_row + last_byte_x; i++) {
+                const int8_t *cell = &map_state.fine_grid[i * 4];
+                categories[i] = (uint8_t)(fine_cell_category(cell[0]) | fine_cell_category(cell[1]) << 2 |
+                                          fine_cell_category(cell[2]) << 4 | fine_cell_category(cell[3]) << 6);
+            }
         }
 
         // le zone dell'utente cambiano nel job della mappatura come la griglia: si copiano nella stessa finestra
-        *num_user_zones = map_state.num_user_zones;
-        for (int i = 0; i < map_state.num_user_zones; i++) user_zones[i] = map_state.user_zones[i];
+        if (user_zones != NULL) {
+            *num_user_zones = map_state.num_user_zones;
+            for (int i = 0; i < map_state.num_user_zones; i++) user_zones[i] = map_state.user_zones[i];
+        }
 
         // i dati letti vanno guardati prima di rileggere il contatore (stesso schema di driver/scambio.c)
         atomic_thread_fence(memory_order_acquire);

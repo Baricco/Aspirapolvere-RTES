@@ -1,0 +1,17 @@
+# Unità systemd del backend di Maurice (esempio: si installa al momento del deploy, docs/app.md sezione 12).
+# I percorsi e l'utente qui sotto sono finti: vanno messi quelli del server.
+[Unit]
+Description=Backend di Maurice (robot aspirapolvere)
+After=network.target
+
+[Service]
+User=maurice
+WorkingDirectory=/percorso/del/progetto/backend
+# valori privati: cartella dei dati, fuori dal progetto (database, mappe, chiave del JWT, ultimo stato, scia)
+Environment=MAURICE_DATA_DIR=/percorso/della/cartella/dei/dati
+ExecStart=/percorso/del/progetto/backend/.venv/bin/gunicorn --config deploy/gunicorn.conf.py "app:create_app()"
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

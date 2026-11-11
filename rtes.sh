@@ -85,8 +85,14 @@ case "${1:-}" in
     core=(); command -v taskset >/dev/null && core=(taskset -c 0-3)
     if [ $# -gt 0 ]; then
       echo "== avvio $* sui core 0-3 (RTES_GD32=$RTES_GD32, RTES_LIDAR=$RTES_LIDAR)"
-      # osserva lancia il programma come suo figlio e ne legge la griglia di navigazione (sim/osserva.c)
-      build/host/osserva --uscita build/sim/mappa_robot -- "${core[@]}" "$@"
+      # osserva lancia il programma come suo figlio e ne legge la griglia di navigazione (sim/osserva.c).
+      # Codice di uscita 3: il programma chiede di essere rilanciato (cambio di mappa dall'app, docs/app.md sezione 7.5)
+      while :; do
+        codice=0
+        build/host/osserva --uscita build/sim/mappa_robot -- "${core[@]}" "$@" || codice=$?
+        [ "$codice" = 3 ] || break
+        echo "== il programma ha chiesto il riavvio: lo rilancio"
+      done
     else
       echo "== rtes-driver: scrivi i comandi (v 0.1 0, stop, lidar 1, spazzole 0 30, led 3, fine...)"
       "${core[@]}" build/host/rtes-driver --senza-rt

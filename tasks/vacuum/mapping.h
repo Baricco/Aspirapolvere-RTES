@@ -28,6 +28,7 @@
 #define NAV_MAP_CELL_SIZE   (FINE_MAP_CELL_SIZE * FINE_CELL_IN_NAV_CELL)    // Dimensione, espressa in metri, di una cella della griglia di navigazione 
 
 #define FINE_MAP_ORIGIN     (FINE_MAP_CELL_NUMBER / 2)             // indice della mappa fine che contiene l'origine (la base di ricarica)
+#define LIDAR_MAPPING_MAX_RANGE     6           // distanza massima a cui il lidar può misurare un punto, prima che il rumore sia troppo alto, espresso in m (serve anche alla mappa dal vivo dell'app: oltre questa distanza dal robot la mappatura non scrive)
 #define NAV_MAP_ORIGIN      (NAV_MAP_CELL_NUMBER / 2)              // indice della mappa di navigazione che contiene l'origine (la base di ricarica)
 
 // Formato del file della mappa: lo scrive il task aperiodico, lo legge la mappatura all'avvio
@@ -213,10 +214,15 @@ extern rt_task_t mapping_task;
 bool is_nav_cell_invisible_obstacle(uint16_t cell);
 
 int init_mapping(void);
-// funzione chiamata dal task aperiodico: copia tutta la griglia fine a categorie (2 bit per cella, 4 celle per byte,
-// cella x della riga y nel byte (y * 1024 + x) / 4, ai bit 2 * (x % 4)) e le zone proibite dell'utente, leggendole fra un
-// job e l'altro della mappatura. Ritorna false se non ci riesce (la mappatura non lascia mai la finestra libera)
-bool copy_map_categories(uint8_t *categories, mapping_forbidden_zone_t *user_zones, int *num_user_zones);
+// funzione chiamata dal task aperiodico e dal thread dello stato dell'app: copia un rettangolo della griglia fine a
+// categorie (2 bit per cella, 4 celle per byte, cella x della riga y nel byte (y * 1024 + x) / 4, ai bit 2 * (x % 4)) e le
+// zone proibite dell'utente, leggendole fra un job e l'altro della mappatura. categories è sempre grande come tutta la
+// griglia (MAP_CATEGORIES_BYTES): si scrivono solo i byte del rettangolo, che parte dalla cella (rect_x, rect_y) ed è
+// largo rect_width e alto rect_height celle fini (i byte ai due lati si copiano interi). Il salvataggio passa tutta la
+// mappa. user_zones può essere NULL se le zone non servono. Ritorna false se non ci riesce (la mappatura non lascia mai
+// la finestra libera)
+bool copy_map_categories(uint8_t *categories, int rect_x, int rect_y, int rect_width, int rect_height,
+                         mapping_forbidden_zone_t *user_zones, int *num_user_zones);
 // funzione chiamata dal task aperiodico: esegue la ricerca della posizione numero request_num (chiesta dalla mappatura con
 // request_position_search) e ne pubblica il risultato. La mappa le è prestata: mentre la posizione è persa la mappatura non la scrive
 void run_position_search(uint32_t request_num);

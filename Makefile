@@ -30,7 +30,7 @@ PROTO_HDR = $(GD32_HDR) $(LIDAR_HDR)
 
 PROGRAMMI = latenza carico
 STRUMENTI = spia rtes-driver
-TEST      = test_rt_tempo test_rt_task test_gd32 test_sicurezza test_lidar test_registro test_driver_logica test_sim test_descrizione
+TEST      = test_rt_tempo test_rt_task test_gd32 test_sicurezza test_lidar test_registro test_driver_logica test_sim test_descrizione test_nav_command test_live_map test_app_commands
 
 SPIA_SRC = spia/spia.c spia/registro.c spia/everest.c
 SPIA_HDR = spia/registro.h spia/everest.h
@@ -84,6 +84,30 @@ build/arm/%: tasks/%/main.c $$(wildcard tasks/$$*/*.c tasks/$$*/*.h) $(TASK_LIB)
 	@mkdir -p $(@D)
 	$(CC_ARM) $(CFLAGS_ARM) -I. -o $@ $(wildcard tasks/$*/*.c) $(TASK_LIB) -lm $(LDFLAGS_ARM)
 
+# Il programma del robot (tasks/vacuum/): oltre ai file dei task ha la cartella cloud/ (collegamento al server dell'app,
+# docs/app.md sezione 9), cJSON e libcurl. Sul PC usa la libcurl del sistema; per il robot quella statica con mbedTLS
+# compilata da tools/build-net-libs.sh in build/arm/netlibs/. Queste due regole vincono su quelle generiche qui sopra.
+VACUUM_SRC = $(wildcard tasks/vacuum/*.c tasks/vacuum/cloud/*.c) third_party/cjson/cJSON.c
+VACUUM_HDR = $(wildcard tasks/vacuum/*.h tasks/vacuum/cloud/*.h) third_party/cjson/cJSON.h
+CLOUD_CONFIG = tasks/vacuum/cloud/config.h
+NETLIBS = build/arm/netlibs
+
+build/host/vacuum: $(VACUUM_SRC) $(VACUUM_HDR) $(TASK_LIB) $(TASK_HDR) | $(CLOUD_CONFIG)
+	@mkdir -p $(@D)
+	$(CC_HOST) $(CFLAGS_HOST) -I. -o $@ $(VACUUM_SRC) $(TASK_LIB) -lm -lcurl
+
+build/arm/vacuum: $(VACUUM_SRC) $(VACUUM_HDR) $(TASK_LIB) $(TASK_HDR) $(NETLIBS)/lib/libcurl.a | $(CLOUD_CONFIG)
+	@mkdir -p $(@D)
+	$(CC_ARM) $(CFLAGS_ARM) -I. -I$(NETLIBS)/include -o $@ $(VACUUM_SRC) $(TASK_LIB) -lm \
+		-L$(NETLIBS)/lib -lcurl -lmbedtls -lmbedx509 -lmbedcrypto $(LDFLAGS_ARM)
+
+# la configurazione privata robot-server non è versionata: va copiata dall'esempio
+$(CLOUD_CONFIG):
+	@echo "manca $(CLOUD_CONFIG): copialo da tasks/vacuum/cloud/config.example.h e metti i valori veri (git lo ignora)" >&2; exit 1
+
+$(NETLIBS)/lib/libcurl.a:
+	@echo "mancano le librerie di rete per il robot: lancia tools/build-net-libs.sh (scarica e compila mbedTLS e libcurl)" >&2; exit 1
+
 # La spia (spia/): intercetta e registra il traffico con GD32 e lidar.
 build/host/spia: $(SPIA_SRC) $(SPIA_HDR) $(RT_SRC) $(RT_HDR) $(PROTO_SRC) $(PROTO_HDR)
 	@mkdir -p $(@D)
@@ -126,6 +150,36 @@ build/host/test_%: test/test_%.c $(TEST_LIB) $(TEST_HDR)
 build/arm/test_%: test/test_%.c $(TEST_LIB) $(TEST_HDR)
 	@mkdir -p $(@D)
 	$(CC_ARM) $(CFLAGS_ARM) -o $@ $< $(TEST_LIB) -lm $(LDFLAGS_ARM)
+
+# Test della parte dell'app (docs/app.md, sezione 11): si collegano ai file veri di tasks/vacuum che provano, con il
+# resto del programma (task, driver, rete) sostituito da funzioni finte dentro il test.
+TEST_APP = test_nav_command test_live_map test_app_commands
+TEST_LIVE_MAP_SRC = tasks/vacuum/cloud/live_map.c tasks/vacuum/aperiodic.c
+TEST_APP_COMMANDS_SRC = tasks/vacuum/cloud/app_commands.c third_party/cjson/cJSON.c
+
+build/host/test_live_map: test/test_live_map.c $(TEST_LIVE_MAP_SRC) $(VACUUM_HDR) $(TEST_LIB) $(TEST_HDR) | $(CLOUD_CONFIG)
+	@mkdir -p $(@D)
+	$(CC_HOST) $(CFLAGS_HOST) -I. -o $@ $< $(TEST_LIVE_MAP_SRC) $(TEST_LIB) -lm
+
+build/arm/test_live_map: test/test_live_map.c $(TEST_LIVE_MAP_SRC) $(VACUUM_HDR) $(TEST_LIB) $(TEST_HDR) | $(CLOUD_CONFIG)
+	@mkdir -p $(@D)
+	$(CC_ARM) $(CFLAGS_ARM) -I. -o $@ $< $(TEST_LIVE_MAP_SRC) $(TEST_LIB) -lm $(LDFLAGS_ARM)
+
+build/host/test_app_commands: test/test_app_commands.c $(TEST_APP_COMMANDS_SRC) $(VACUUM_HDR) $(TEST_LIB) $(TEST_HDR) | $(CLOUD_CONFIG)
+	@mkdir -p $(@D)
+	$(CC_HOST) $(CFLAGS_HOST) -I. -o $@ $< $(TEST_APP_COMMANDS_SRC) $(TEST_LIB) -lm
+
+build/arm/test_app_commands: test/test_app_commands.c $(TEST_APP_COMMANDS_SRC) $(VACUUM_HDR) $(TEST_LIB) $(TEST_HDR) | $(CLOUD_CONFIG)
+	@mkdir -p $(@D)
+	$(CC_ARM) $(CFLAGS_ARM) -I. -o $@ $< $(TEST_APP_COMMANDS_SRC) $(TEST_LIB) -lm $(LDFLAGS_ARM)
+
+build/host/test_nav_command: test/test_nav_command.c tasks/vacuum/navigation.h $(TEST_LIB) $(TEST_HDR)
+	@mkdir -p $(@D)
+	$(CC_HOST) $(CFLAGS_HOST) -I. -o $@ $< $(TEST_LIB) -lm
+
+build/arm/test_nav_command: test/test_nav_command.c tasks/vacuum/navigation.h $(TEST_LIB) $(TEST_HDR)
+	@mkdir -p $(@D)
+	$(CC_ARM) $(CFLAGS_ARM) -I. -o $@ $< $(TEST_LIB) -lm $(LDFLAGS_ARM)
 
 # Esegue tutti i test sul PC.
 # Poi le prove complete della spia con periferiche e socket finti (tools/prova-spia*.py, ~3 s),

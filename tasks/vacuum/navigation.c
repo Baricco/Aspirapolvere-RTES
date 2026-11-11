@@ -1,6 +1,7 @@
 #include "driver/driver.h"
 #include "driver/scambio.h"
 #include <math.h>
+#include <stdatomic.h>
 #include <string.h>
 #include <stdlib.h>
 
@@ -140,6 +141,14 @@ static scambio_t double_buffer_2;
 // i due buffer
 static navigation_closed_cells_t buffer3, buffer4;  
 
+// Terzo doppio buffer: lo stato della navigazione, per la sicurezza e i thread dell'app
+static scambio_t double_buffer_status;
+// i due buffer
+static navigation_status_t buffer5, buffer6;
+
+// Comando dell'app: una sola variabile atomica da 64 bit, scritta dall'interprete dei comandi e letta a ogni job
+static _Atomic uint64_t app_command;
+
 // caratteristiche del task
 rt_task_t navigation_task;
 
@@ -166,25 +175,7 @@ typedef enum {
 } clean_dir_t;
 
 
-// Enum degli stati del task di navigazione
-// Il task di navigazione è una macchina a stati 
-typedef enum {
-    NAV_STATE_WAIT,             // attendi che la mappa si riempia
-    NAV_STATE_EXPLORE,          // cerca la frontiera più vicina
-    NAV_STATE_CLEAN,            // prepara il prossimo tratto da pulire
-    NAV_STATE_FOLLOW_BORDERS,   // gira lungo i bordi della stanza (muri, attorno agli ostacoli)
-    NAV_STATE_RETURN_HOME,      // cerca il percorso per la base di ricarica
-    NAV_STATE_HOOK_UP,          // passa il controllo al driver per agganciare il robot alla base
-    NAV_STATE_FOLLOW_PATH,      // segui il percorso calcolato, un punto di svolta alla volta
-    NAV_STATE_UNLOCK,           // dopo un allarme, ferma il robot, indietreggia leggermente e riparti
-    NAV_STATE_SLEEP,            // robot fermo, missione completata
-    NAV_STATE_ALIGN,            // robot in allineamento, dopo un arresto, porta il robot al centro della cella di navigazione
-    NAV_STATE_FAILURE,          // robot fermo, qualcosa è andato storto
-    NAV_STATE_BORDER_LAP,       // il robot segue un ostacolo tenendolo a destra, fino alla fine del giro
-    NAV_STATE_LEAVE_BASE,       // il robot esce dalla base di ricarica
-    NAV_STATE_CROSS,            // il robot incastrato su un tappeto o un cavo avanza piano ruotando a turno a sinistra e a destra
-    NAV_STATE_PAUSE,            // pulizia in pausa (tasto di accensione): robot fermo, riprende alla prossima pressione
-} nav_state_t;
+// Gli stati del task di navigazione (nav_state_t) sono in navigation.h: li leggono anche i thread dell'app
 
 // definizione dello stato interno del task di navigazione
 typedef struct {
@@ -248,6 +239,18 @@ typedef struct {
 
     int64_t brush_unlock_start;             // istante di inizio dell'ultimo sblocco della spazzola centrale, 0 se non ce n'è mai stato uno
     uint8_t brush_unlock_attempt;           // numero di sblocchi della spazzola centrale fatti di fila
+
+    bool is_mission_active;                 // true da quando parte una missione a quando il robot torna in riposo: dice se dopo un guasto o il telecomando si va in pausa o in riposo
+    int64_t mission_start;                  // istante di inizio della missione in corso
+
+    uint16_t last_command_num;              // numero dell'ultimo comando dell'app eseguito
+    nav_command_result_t last_command_result;   // esito dell'ultimo comando dell'app eseguito
+
+    bool is_remote;                         // true se il telecomando è attivo: resta true anche durante un guasto, così dopo l'azzeramento si torna in telecomando
+    double remote_v, remote_omega;          // telecomando: ultime velocità chieste dall'app
+    bool remote_brushes, remote_suction;    // telecomando: spazzole e aspirazione chieste dall'app
+    int64_t remote_last_move;               // telecomando: istante dell'ultimo comando di movimento
+    int64_t remote_last_command;            // telecomando: istante dell'ultimo comando del telecomando (anche il segno di vita)
 
 } navigation_state_t;
 
@@ -407,7 +410,8 @@ static inline bool is_active_cleaning(void) {
             nav_state.state != NAV_STATE_WAIT &&
             nav_state.state != NAV_STATE_SLEEP &&
             nav_state.state != NAV_STATE_LEAVE_BASE &&
-            nav_state.state != NAV_STATE_PAUSE
+            nav_state.state != NAV_STATE_PAUSE &&
+            nav_state.state != NAV_STATE_REMOTE
         )
     );
 }
@@ -568,6 +572,8 @@ static void set_state(nav_state_t next_state) {
         next_state == NAV_STATE_RETURN_HOME
     ) nav_state.mission = next_state;    // se è uno stato di pianificazione, aggiorna la fase della missione
 
+    if (next_state == NAV_STATE_SLEEP) nav_state.is_mission_active = false;    // in riposo non c'è più una missione in corso
+
     nav_state.state = next_state;       // imposta il prossimo stato
      
     nav_state.state_start = rt_adesso();    // imposta l'istante di inizio ad ora
@@ -594,7 +600,7 @@ static bool is_battery_dead() {
     return (
         nav_state.battery_low_since != 0 && rt_adesso() - nav_state.battery_low_since >= BATTERY_LOW_CONFIRM_TIME &&
         (nav_state.mission == NAV_STATE_EXPLORE || nav_state.mission == NAV_STATE_FOLLOW_BORDERS || nav_state.mission == NAV_STATE_CLEAN) &&
-        (nav_state.state != NAV_STATE_UNLOCK && nav_state.state != NAV_STATE_WAIT && nav_state.state != NAV_STATE_FAILURE && nav_state.state != NAV_STATE_SLEEP && nav_state.state != NAV_STATE_LEAVE_BASE && nav_state.state != NAV_STATE_HOOK_UP && nav_state.state != NAV_STATE_PAUSE)
+        (nav_state.state != NAV_STATE_UNLOCK && nav_state.state != NAV_STATE_WAIT && nav_state.state != NAV_STATE_FAILURE && nav_state.state != NAV_STATE_SLEEP && nav_state.state != NAV_STATE_LEAVE_BASE && nav_state.state != NAV_STATE_HOOK_UP && nav_state.state != NAV_STATE_PAUSE && nav_state.state != NAV_STATE_REMOTE)
     );
 }
 
@@ -1446,6 +1452,25 @@ static uint16_t next_turning_point(void) {
 }
 
 
+// funzione helper che pubblica lo stato della navigazione: si chiama alla fine di ogni job
+static void publish_status(void) {
+
+    const navigation_status_t status = {
+        .state = nav_state.state,
+        .mission = nav_state.is_mission_active ? nav_state.mission : NAV_STATE_SLEEP,
+        .interrupted_mission = nav_state.interrupted_mission,
+        .mission_number = nav_state.closed_cells.mission_num,
+        .mission_start_t = nav_state.mission_start,
+        .is_remote = nav_state.is_remote,
+        .remote_brushes = nav_state.remote_brushes,
+        .remote_suction = nav_state.remote_suction,
+        .last_command_num = nav_state.last_command_num,
+        .last_command_result = nav_state.last_command_result,
+    };
+
+    scambio_scrivi(&double_buffer_status, &status);
+}
+
 // funzione di inizializzazione del task
 void init_navigation(void) {
 
@@ -1468,6 +1493,16 @@ void init_navigation(void) {
     );
 
 
+    // inizializza il terzo doppio buffer (lo stato della navigazione) e pubblica subito lo stato di partenza
+    scambio_init(
+        &double_buffer_status,
+        &buffer5,
+        &buffer6,
+        sizeof(navigation_status_t)
+    );
+
+    atomic_store(&app_command, 0);
+
     nav_state.state_start = rt_adesso();
 
     // si parte in riposo: il robot aspetta un comando (tasto di accensione o l'app)
@@ -1477,6 +1512,8 @@ void init_navigation(void) {
     nav_state.is_axis = false;
 
     nav_state.is_clean_started = false;
+
+    publish_status();
 
 }
 
@@ -1508,6 +1545,24 @@ navigation_closed_cells_t read_closed_cells(void) {
 }
 
 
+
+// funzione di lettura dello stato della navigazione (la chiameranno il task di sicurezza e i thread dell'app)
+navigation_status_t read_navigation_status(void) {
+
+    // Crea e Inizializza a 0 la struttura dati navigation_status
+    navigation_status_t navigation_status = {0};
+
+    // Copia il buffer pubblicato in navigation_status
+    scambio_leggi(&double_buffer_status, &navigation_status);
+
+    // ritorna navigation_status
+    return navigation_status;
+}
+
+// funzione che manda un comando alla navigazione (la chiama l'interprete dei comandi dell'app): una scrittura atomica
+void send_navigation_command(const navigation_command_t *command) {
+    atomic_store(&app_command, pack_navigation_command(command));
+}
 
 // funzione di scrittura dei dati del task (l'obiettivo)
 void write_objective(const navigation_objective_t *next_objective) {
@@ -2147,15 +2202,32 @@ static bool find_clean_start_cell(const uint16_t robot_cell, const movement_posi
 // funzione helper che restitusice true se bisogna attivare spazzole e aspirazione, false altrimenti
 // l'aspirazione si attiva se stiamo pulendo (bordi o interno della stanza) e non siamo in stato di 
 // guasto, sblocco, attesa o riposo
-// funzione helper che legge i comandi arrivati dall'ultimo job: per ora le pressioni dei tasti contate dal driver,
-// più avanti anche i comandi dell'app
-static void read_commands(const drv_stato_t *cur_drv_state, bool *power_pressed, bool *home_pressed) {
+// funzione helper che legge i tasti premuti dall'ultimo job (le pressioni contate dal driver) e li trasforma in un comando,
+// lo stesso che manderebbe l'app: il tasto di accensione diventa start, pause o resume secondo lo stato, il tasto casa
+// diventa home. Ritorna NAV_COMMAND_NONE se non è stato premuto nessun tasto
+static nav_command_type_t read_commands(const drv_stato_t *cur_drv_state) {
 
-    *power_pressed = cur_drv_state->pressioni_accensione != nav_state.last_power_presses;
-    *home_pressed = cur_drv_state->pressioni_casa != nav_state.last_home_presses;
+    bool power_pressed = cur_drv_state->pressioni_accensione != nav_state.last_power_presses;
+    bool home_pressed = cur_drv_state->pressioni_casa != nav_state.last_home_presses;
 
     nav_state.last_power_presses = cur_drv_state->pressioni_accensione;
     nav_state.last_home_presses = cur_drv_state->pressioni_casa;
+
+    if (power_pressed) {
+
+        // posizione persa: qualsiasi tasto porta il robot alla base alla cieca, come il comando home
+        if (read_mapping_correction().state == MAP_LOST) return NAV_COMMAND_HOME;
+
+        // in riposo fa partire la pulizia, in pausa la riprende, in tutti gli altri stati mette in pausa
+        // (in telecomando la pausa vale come rilascio)
+        if (nav_state.state == NAV_STATE_SLEEP) return NAV_COMMAND_START;
+        if (nav_state.state == NAV_STATE_PAUSE) return NAV_COMMAND_RESUME;
+        return NAV_COMMAND_PAUSE;
+    }
+
+    if (home_pressed) return NAV_COMMAND_HOME;
+
+    return NAV_COMMAND_NONE;
 }
 
 // funzione helper che fa partire una nuova pulizia: azzera quello che riguarda la pulizia di prima e chiede alla mappatura
@@ -2170,6 +2242,10 @@ static void start_new_mission(void) {
     nav_state.unlock_attempt = 0;
     nav_state.trail.len = 0;
     nav_state.has_left_base = false;
+
+    // da qui c'è una missione in corso, fino al prossimo riposo
+    nav_state.is_mission_active = true;
+    nav_state.mission_start = rt_adesso();
 
     // celle chiuse: la lista ricomincia, e il numero di pulizia nuovo dice alla mappatura di azzerare le sue
     nav_state.closed_cells.num = 0;
@@ -2217,6 +2293,10 @@ static void go_home_now(void) {
     drv_esci_dalla_base(0);
     nav_state.interrupted_mission = 0;
 
+    // il rientro chiesto da fermo (in riposo fuori dalla base) è una missione a sé
+    if (!nav_state.is_mission_active) nav_state.mission_start = rt_adesso();
+    nav_state.is_mission_active = true;
+
     drv_led(DRV_LED_AZZURRO);
 
     set_state(NAV_STATE_RETURN_HOME);
@@ -2232,6 +2312,9 @@ static void start_blind_hook_up(void) {
     drv_esci_dalla_base(0);
     nav_state.interrupted_mission = 0;
 
+    if (!nav_state.is_mission_active) nav_state.mission_start = rt_adesso();
+    nav_state.is_mission_active = true;
+
     drv_led(DRV_LED_AZZURRO);
 
     // la mappatura annulla la ricerca (se gira) e aspetta che il robot sia sulla base
@@ -2245,60 +2328,198 @@ static void start_blind_hook_up(void) {
     nav_state.mission = NAV_STATE_RETURN_HOME;
 }
 
-// funzione che applica i comandi (tasto di accensione e tasto casa) in base allo stato. Il guasto lo azzera già il driver
-// alla pressione: qui, se il guasto non c'è più, si passa al riposo e il tasto fa quello che farebbe in riposo
-static void apply_commands(const drv_stato_t *cur_drv_state, bool power_pressed, bool home_pressed) {
+// funzione helper per quando il guasto è stato azzerato (da un tasto, dall'app o perché il robot è stato rimesso sulla base):
+// se il telecomando era attivo si torna in telecomando, se c'era una missione si va in pausa (così con la ripresa la
+// pulizia continua tenendo le celle già pulite), altrimenti in riposo
+static void leave_failure(void) {
 
-    // guasto azzerato (da un tasto o perché il robot è stato rimesso sulla base): riposo
-    if (nav_state.state == NAV_STATE_FAILURE) {
-        if (cur_drv_state->fase == DRV_GUASTO) return;
+    if (nav_state.is_remote) {
+        drv_esci_dalla_base(1);
+        drv_led(DRV_LED_AZZURRO);
+        set_state(NAV_STATE_REMOTE);
+    } else if (nav_state.is_mission_active) {
+        // non deve muoversi con i contatti chiusi finché non arriva la ripresa
+        drv_esci_dalla_base(0);
+        drv_led(DRV_LED_AZZURRO_RESPIRA);
+        set_state(NAV_STATE_PAUSE);
+    } else {
         drv_led(DRV_LED_AZZURRO);
         set_state(NAV_STATE_SLEEP);
     }
+}
 
-    // posizione persa: qualsiasi tasto annulla la ricerca e porta il robot alla base alla cieca
-    // Se l'aggancio alla cieca è già partito, i tasti non fanno niente
-    if ((power_pressed || home_pressed) && read_mapping_correction().state == MAP_LOST &&
-        !(nav_state.state == NAV_STATE_HOOK_UP && nav_state.hook_has_started)) {
-        start_blind_hook_up();
-        return;
+// funzione helper che fa partire il telecomando: la missione in corso resta in sospeso e l'aggancio si annulla.
+// Con un guasto in corso il telecomando si prende lo stesso, ma il robot resta in guasto finché non viene azzerato
+static void start_remote(void) {
+
+    nav_state.is_remote = true;
+    nav_state.remote_v = 0;
+    nav_state.remote_omega = 0;
+    nav_state.remote_brushes = false;
+    nav_state.remote_suction = false;
+    nav_state.remote_last_move = 0;
+
+    if (nav_state.state == NAV_STATE_FAILURE) return;
+
+    send_objective(OBJ_STOP, 0, 0, 0, 0, 0);
+
+    // se il driver stava facendo l'aggancio la manovra si annulla
+    if (nav_state.state == NAV_STATE_HOOK_UP && nav_state.hook_has_started) drv_aggancia(0);
+    nav_state.hook_has_started = false;
+
+    // sulla base il robot può uscire piano in avanti
+    drv_esci_dalla_base(1);
+
+    drv_led(DRV_LED_AZZURRO);
+
+    set_state(NAV_STATE_REMOTE);
+}
+
+// funzione helper che rilascia il telecomando: pausa se c'era una missione, altrimenti riposo.
+// In guasto il robot resta in guasto
+static void end_remote(void) {
+
+    nav_state.is_remote = false;
+    nav_state.remote_v = 0;
+    nav_state.remote_omega = 0;
+    nav_state.remote_brushes = false;
+    nav_state.remote_suction = false;
+
+    if (nav_state.state != NAV_STATE_REMOTE) return;
+
+    send_objective(OBJ_STOP, 0, 0, 0, 0, 0);
+
+    drv_esci_dalla_base(0);
+
+    if (nav_state.is_mission_active) {
+        drv_led(DRV_LED_AZZURRO_RESPIRA);
+        set_state(NAV_STATE_PAUSE);
+    } else {
+        set_state(NAV_STATE_SLEEP);
     }
+}
 
-    switch (nav_state.state) {
+// funzione che applica un comando (di un tasto o dell'app) in base allo stato, e ne ritorna l'esito.
+// È l'unico punto in cui i comandi cambiano lo stato della navigazione
+static nav_command_result_t apply_command(const navigation_command_t *command, const drv_stato_t *cur_drv_state) {
 
-        case NAV_STATE_SLEEP:
-            // accensione: nuova pulizia. casa: sulla base niente, fuori rientra
-            if (power_pressed) start_new_mission();
-            else if (home_pressed && !cur_drv_state->sulla_base) go_home_now();
-            break;
+    bool is_position_lost = read_mapping_correction().state == MAP_LOST;
 
-        case NAV_STATE_PAUSE:
-            // accensione: riprende passando dall'attesa, che torna alla missione (o all'uscita dalla base). casa: rientra
-            if (power_pressed) {
-                drv_led(DRV_LED_AZZURRO);
-                set_state(NAV_STATE_WAIT);
-            } else if (home_pressed) go_home_now();
-            break;
+    // comandi del telecomando: tutti tranne il rilascio lo prendono, se non è già attivo, e ne rinnovano il tempo
+    switch (command->type) {
 
-        case NAV_STATE_RETURN_HOME:
-        case NAV_STATE_HOOK_UP:
-            // sta già tornando alla base: casa non fa niente, accensione mette in pausa
-            if (power_pressed) start_pause();
-            break;
+        case NAV_COMMAND_REMOTE_RELEASE:
+            end_remote();
+            return NAV_RESULT_OK;
+
+        case NAV_COMMAND_REMOTE_TAKE:
+        case NAV_COMMAND_REMOTE_KEEPALIVE:
+        case NAV_COMMAND_REMOTE_MOVE:
+        case NAV_COMMAND_REMOTE_CLEANING:
+
+            if (!nav_state.is_remote) start_remote();
+            nav_state.remote_last_command = rt_adesso();
+
+            if (command->type == NAV_COMMAND_REMOTE_MOVE) {
+
+                // con la posizione persa muovere il robot rovinerebbe la ricerca della posizione
+                if (is_position_lost) {
+                    nav_state.remote_v = 0;
+                    nav_state.remote_omega = 0;
+                    return NAV_RESULT_POSITION_LOST;
+                }
+
+                nav_state.remote_v = command->v;
+                nav_state.remote_omega = command->omega;
+                nav_state.remote_last_move = rt_adesso();
+            }
+
+            if (command->type == NAV_COMMAND_REMOTE_CLEANING) {
+                nav_state.remote_brushes = command->brushes;
+                nav_state.remote_suction = command->suction;
+            }
+
+            return NAV_RESULT_OK;
 
         default:
-            // in missione: accensione mette in pausa, casa rientra. Se il robot non è ancora uscito dalla base, casa lo
-            // lascia lì in riposo
-            if (power_pressed) start_pause();
-            else if (home_pressed) {
-                if (cur_drv_state->sulla_base) {
-                    send_objective(OBJ_STOP, 0, 0, 0, 0, 0);
-                    drv_esci_dalla_base(0);
-                    set_state(NAV_STATE_SLEEP);
-                } else go_home_now();
-            }
             break;
     }
+
+    // start, pause, resume e home con il telecomando attivo valgono come rilascio seguito dal comando
+    bool was_remote = nav_state.is_remote;
+    if (was_remote) end_remote();
+
+    // il driver è ancora in guasto (la causa c'è ancora): i comandi non fanno niente
+    if (nav_state.state == NAV_STATE_FAILURE) return command->type == NAV_COMMAND_PAUSE ? NAV_RESULT_NOT_RUNNING : NAV_RESULT_IN_FAULT;
+
+    // posizione persa: solo home fa qualcosa, annulla la ricerca e porta il robot alla base alla cieca.
+    // Se l'aggancio alla cieca è già partito non fa niente
+    if (is_position_lost) {
+        if (command->type != NAV_COMMAND_HOME) return NAV_RESULT_POSITION_LOST;
+        if (!(nav_state.state == NAV_STATE_HOOK_UP && nav_state.hook_has_started)) start_blind_hook_up();
+        return NAV_RESULT_OK;
+    }
+
+    switch (command->type) {
+
+        case NAV_COMMAND_START:
+            // nuova pulizia, solo da riposo
+            if (nav_state.state != NAV_STATE_SLEEP) return NAV_RESULT_BUSY;
+            start_new_mission();
+            return NAV_RESULT_OK;
+
+        case NAV_COMMAND_PAUSE:
+            if (nav_state.state == NAV_STATE_SLEEP) return NAV_RESULT_NOT_RUNNING;
+            // già in pausa: va bene solo se ci è arrivato adesso, rilasciando il telecomando
+            if (nav_state.state == NAV_STATE_PAUSE) return was_remote ? NAV_RESULT_OK : NAV_RESULT_NOT_RUNNING;
+            start_pause();
+            return NAV_RESULT_OK;
+
+        case NAV_COMMAND_RESUME:
+            // riprende passando dall'attesa, che torna alla missione (o all'uscita dalla base)
+            if (nav_state.state != NAV_STATE_PAUSE) return NAV_RESULT_NOT_PAUSED;
+            drv_led(DRV_LED_AZZURRO);
+            set_state(NAV_STATE_WAIT);
+            return NAV_RESULT_OK;
+
+        case NAV_COMMAND_HOME:
+
+            switch (nav_state.state) {
+
+                case NAV_STATE_SLEEP:
+                    // sulla base niente, fuori rientra
+                    if (cur_drv_state->sulla_base) return NAV_RESULT_ALREADY_HOME;
+                    go_home_now();
+                    return NAV_RESULT_OK;
+
+                case NAV_STATE_PAUSE:
+                    go_home_now();
+                    return NAV_RESULT_OK;
+
+                case NAV_STATE_RETURN_HOME:
+                case NAV_STATE_HOOK_UP:
+                    // sta già tornando alla base
+                    return NAV_RESULT_OK;
+
+                default:
+                    // in missione rientra. Se il robot non è ancora uscito dalla base, resta lì in riposo
+                    if (cur_drv_state->sulla_base) {
+                        send_objective(OBJ_STOP, 0, 0, 0, 0, 0);
+                        drv_esci_dalla_base(0);
+                        set_state(NAV_STATE_SLEEP);
+                    } else go_home_now();
+                    return NAV_RESULT_OK;
+            }
+
+        default:
+            return NAV_RESULT_OK;
+    }
+}
+
+// funzione helper del telecomando, chiamata a ogni job quando è attivo: dopo REMOTE_IDLE_TIMEOUT senza comandi
+// del telecomando lo rilascia
+static void check_remote_timeout(void) {
+    if (elapsed_time(nav_state.remote_last_command) >= REMOTE_IDLE_TIMEOUT) end_remote();
 }
 
 static bool should_activate_brushes() {
@@ -2348,8 +2569,8 @@ static void check_brush_unlock(const safety_alarm_t cur_alarm) {
 
 }
 
-// job del task
-void job_navigation(void *arg) {
+// lavoro di un job del task (lo chiama job_navigation, che alla fine pubblica lo stato)
+static void job_navigation_body(void *arg) {
     
     (void)arg;
 
@@ -2378,28 +2599,50 @@ void job_navigation(void *arg) {
         set_state(NAV_STATE_FAILURE);
     }
 
-    // leggi e applica i comandi: si fa prima di tutto il resto, anche con la posizione non valida
-    bool power_pressed, home_pressed;
-    read_commands(&cur_drv_state, &power_pressed, &home_pressed);
-    if (power_pressed || home_pressed || nav_state.state == NAV_STATE_FAILURE) apply_commands(&cur_drv_state, power_pressed, home_pressed);
+    // guasto azzerato (da un tasto, dall'app o perché il robot è stato rimesso sulla base): pausa, riposo o telecomando
+    if (nav_state.state == NAV_STATE_FAILURE && cur_drv_state.fase != DRV_GUASTO) leave_failure();
+
+    // leggi e applica i comandi: si fa prima di tutto il resto, anche con la posizione non valida.
+    // Prima i tasti, che diventano comandi (il guasto lo azzera già il driver alla pressione)
+    navigation_command_t key_command = { .type = read_commands(&cur_drv_state) };
+    if (key_command.type != NAV_COMMAND_NONE) apply_command(&key_command, &cur_drv_state);
+
+    // poi il comando dell'app: un numero diverso dall'ultimo vuol dire comando nuovo, e l'esito si pubblica con lo stato
+    navigation_command_t new_command = unpack_navigation_command(atomic_load(&app_command));
+    if (new_command.num != nav_state.last_command_num) {
+        nav_state.last_command_result = apply_command(&new_command, &cur_drv_state);
+        nav_state.last_command_num = new_command.num;
+    }
+
+    // telecomando attivo: senza comandi da troppo tempo si rilascia
+    if (nav_state.is_remote) check_remote_timeout();
 
     // leggi gli allarmi mandati dal task safety, servono per lo sblocco della spazzola e per la velocità massima degli obiettivi
     safety_alarm_t cur_alarm = read_safety();
 
-    // se la spazzola centrale è bloccata avvia il suo sblocco, o manda il robot in guasto
-    if (should_activate_brushes()) check_brush_unlock(cur_alarm);
-
-    // se bisogna attivare spazzole e aspirazione attivali, altrimenti disattivali
-    if (should_activate_brushes()) {
-        drv_aspirazione(SUCTION_POWER_NORMAL);
-
-        // durante lo sblocco la spazzola centrale gira al contrario, la laterale continua normalmente
-        if (is_brush_unlocking()) drv_spazzole(BRUSH_SPEED_NORMAL, BRUSH_SPEED_UNLOCK);
-        else drv_spazzole(BRUSH_SPEED_NORMAL, BRUSH_SPEED_NORMAL);
-    } else {
-        drv_aspirazione(SUCTION_POWER_OFF);
-        drv_spazzole(BRUSH_SPEED_OFF, BRUSH_SPEED_OFF);
+    // spazzole e aspirazione: accese insieme quando la missione pulisce; in telecomando le decide l'app, una per una
+    bool is_brushes_on = should_activate_brushes();
+    bool is_suction_on = is_brushes_on;
+    if (nav_state.state == NAV_STATE_REMOTE) {
+        is_brushes_on = nav_state.remote_brushes;
+        is_suction_on = nav_state.remote_suction;
     }
+
+    // se la spazzola centrale è bloccata avvia il suo sblocco, o manda il robot in guasto
+    if (is_brushes_on) check_brush_unlock(cur_alarm);
+
+    // lo sblocco può aver mandato il robot in guasto: in guasto è tutto spento
+    if (nav_state.state == NAV_STATE_FAILURE) {
+        is_brushes_on = false;
+        is_suction_on = false;
+    }
+
+    drv_aspirazione(is_suction_on ? SUCTION_POWER_NORMAL : SUCTION_POWER_OFF);
+
+    // durante lo sblocco la spazzola centrale gira al contrario, la laterale continua normalmente
+    if (!is_brushes_on) drv_spazzole(BRUSH_SPEED_OFF, BRUSH_SPEED_OFF);
+    else if (is_brush_unlocking()) drv_spazzole(BRUSH_SPEED_NORMAL, BRUSH_SPEED_UNLOCK);
+    else drv_spazzole(BRUSH_SPEED_NORMAL, BRUSH_SPEED_NORMAL);
 
     // se la posizione corrente non è valida
     if (!cur_pos.valid) {
@@ -2421,9 +2664,9 @@ void job_navigation(void *arg) {
             nav_state.has_left_base = true;
         }
         
-        // metti il robot in attesa, a meno che non stia già aspettando un comando (riposo, pausa, guasto):
+        // metti il robot in attesa, a meno che non stia già aspettando un comando (riposo, pausa, guasto, telecomando):
         // riappoggiato, deve restare lì e non ripartire da solo
-        if (nav_state.state != NAV_STATE_SLEEP && nav_state.state != NAV_STATE_PAUSE && nav_state.state != NAV_STATE_FAILURE) set_state(NAV_STATE_WAIT);
+        if (nav_state.state != NAV_STATE_SLEEP && nav_state.state != NAV_STATE_PAUSE && nav_state.state != NAV_STATE_FAILURE && nav_state.state != NAV_STATE_REMOTE) set_state(NAV_STATE_WAIT);
 
         // azzera la scia delle posizioni
         nav_state.trail.len = 0;
@@ -2463,7 +2706,8 @@ void job_navigation(void *arg) {
         nav_state.state != NAV_STATE_HOOK_UP &&
         nav_state.state != NAV_STATE_LEAVE_BASE &&
         nav_state.state != NAV_STATE_CROSS &&
-        nav_state.state != NAV_STATE_PAUSE) {
+        nav_state.state != NAV_STATE_PAUSE &&
+        nav_state.state != NAV_STATE_REMOTE) {
 
         start_unlock_after_alarm(cur_alarm, cur_pos);
 
@@ -3035,6 +3279,9 @@ void job_navigation(void *arg) {
 
                 nav_state.has_left_base = false;
 
+                // la missione interrotta dalla batteria riprende
+                nav_state.is_mission_active = true;
+
                 start_leaving_base();
 
             }
@@ -3126,8 +3373,31 @@ void job_navigation(void *arg) {
             break;
         }
         case NAV_STATE_PAUSE: {
-            // fermo finché non arriva un comando (apply_commands)
+            // fermo finché non arriva un comando (apply_command)
             if (nav_state.cur_obj.obj_type != OBJ_STOP) send_objective(OBJ_STOP, 0, 0, 0, 0, 0);
+            break;
+        }
+        case NAV_STATE_REMOTE: {
+
+            // fuori dalla base l'uscita è già fatta: una missione ripresa dopo il telecomando non deve rifarla
+            if (!cur_drv_state.sulla_base) nav_state.has_left_base = true;
+
+            // un comando di movimento vale per REMOTE_MOVE_TIMEOUT, poi il robot si ferma
+            double remote_v = nav_state.remote_v;
+            double remote_omega = nav_state.remote_omega;
+            if (elapsed_time(nav_state.remote_last_move) >= REMOTE_MOVE_TIMEOUT) {
+                remote_v = 0;
+                remote_omega = 0;
+            }
+
+            // limita prima ai massimi del telecomando, poi a quelli decisi dalla sicurezza (ostacoli del lidar).
+            // Vuoto e paraurti li blocca il driver
+            remote_v = MAX(MIN(remote_v, REMOTE_MAX_V), -REMOTE_MAX_V_BACK);
+            remote_omega = MAX(MIN(remote_omega, REMOTE_MAX_OMEGA), -REMOTE_MAX_OMEGA);
+            remote_v = MAX(MIN(remote_v, cur_alarm.max_v_forw), -cur_alarm.max_v_backw);
+
+            send_objective(OBJ_CONST_SPEED, remote_omega, 0, remote_v, 0, 0);
+
             break;
         }
         default:   {         // se entra qui dentro siamo in uno stato inconsistente
@@ -3138,4 +3408,13 @@ void job_navigation(void *arg) {
         }
     }
 
-}  
+}
+
+// job del task: il lavoro vero sta in job_navigation_body, poi si pubblica lo stato della navigazione. Chiamarlo da una
+// funzione a parte fa sì che nessun return anticipato del job possa saltare la pubblicazione
+void job_navigation(void *arg) {
+
+    job_navigation_body(arg);
+
+    publish_status();
+}

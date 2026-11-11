@@ -21,3 +21,15 @@ toolchain/
 
 # Cache di Python
 __pycache__/
+
+# App: configurazione privata e dati, mai in repository (docs/app.md). Si versionano solo gli esempi
+tasks/vacuum/cloud/config.h
+robot-token
+app/config.json
+backend/.env
+backend/.venv/
+backend/data/
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+jwt-key
