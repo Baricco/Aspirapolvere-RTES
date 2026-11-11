@@ -11,8 +11,7 @@
 //   {"type":"zones","zones":[{"x":1.0,"y":1.0,"w":0.5,"h":0.5}]}     la lista intera delle zone: angolo con x e y minime, larghezza e altezza, in metri sulla mappa
 //   {"type":"map_reset"}
 
-// crea il file speciale (se manca) e avvia il thread. Ritorna 0, oppure -1 se non ci riesce (il programma va avanti
-// senza la FIFO)
+// crea il file speciale (se manca) e avvia il thread. Ritorna 0, oppure -1 se non ci riesce (il programma va avanti senza la FIFO)
 int start_commands(void);
 
 #endif

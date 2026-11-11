@@ -1474,8 +1474,7 @@ static void publish_status(void) {
 // funzione di inizializzazione del task
 void init_navigation(void) {
 
-    // inizializza il primo doppio buffer passando i due buffer da usare
-    // e la loro dimensione 
+    // inizializza il primo doppio buffer passando i due buffer da usare e la loro dimensione 
     scambio_init(
         &double_buffer,
         &buffer1,
@@ -1483,8 +1482,7 @@ void init_navigation(void) {
         sizeof(navigation_objective_t)
     );
 
-    // inizializza il secondo doppio buffer passando i due buffer da usare
-    // e la loro dimensione 
+    // inizializza il secondo doppio buffer passando i due buffer da usare e la loro dimensione 
     scambio_init(
         &double_buffer_2,
         &buffer3,
@@ -1501,6 +1499,7 @@ void init_navigation(void) {
         sizeof(navigation_status_t)
     );
 
+    // inizializza a 0 il comando dell'app
     atomic_store(&app_command, 0);
 
     nav_state.state_start = rt_adesso();
@@ -2199,9 +2198,7 @@ static bool find_clean_start_cell(const uint16_t robot_cell, const movement_posi
 }
 
 
-// funzione helper che restitusice true se bisogna attivare spazzole e aspirazione, false altrimenti
-// l'aspirazione si attiva se stiamo pulendo (bordi o interno della stanza) e non siamo in stato di 
-// guasto, sblocco, attesa o riposo
+
 // funzione helper che legge i tasti premuti dall'ultimo job (le pressioni contate dal driver) e li trasforma in un comando,
 // lo stesso che manderebbe l'app: il tasto di accensione diventa start, pause o resume secondo lo stato, il tasto casa
 // diventa home. Ritorna NAV_COMMAND_NONE se non è stato premuto nessun tasto
@@ -2516,12 +2513,14 @@ static nav_command_result_t apply_command(const navigation_command_t *command, c
     }
 }
 
-// funzione helper del telecomando, chiamata a ogni job quando è attivo: dopo REMOTE_IDLE_TIMEOUT senza comandi
-// del telecomando lo rilascia
+// funzione helper del telecomando, chiamata a ogni job quando è attivo: dopo REMOTE_IDLE_TIMEOUT senza comandi del telecomando lo rilascia
 static void check_remote_timeout(void) {
     if (elapsed_time(nav_state.remote_last_command) >= REMOTE_IDLE_TIMEOUT) end_remote();
 }
 
+
+// funzione helper che restitusice true se bisogna attivare spazzole e aspirazione, false altrimenti
+// l'aspirazione si attiva se stiamo pulendo (bordi o interno della stanza) e non siamo in stato di guasto, sblocco, attesa o riposo
 static bool should_activate_brushes() {
     return (
         (nav_state.mission == NAV_STATE_CLEAN || nav_state.mission == NAV_STATE_FOLLOW_BORDERS) &&
@@ -3369,17 +3368,17 @@ static void job_navigation_body(void *arg) {
         }
 
         case NAV_STATE_FAILURE: {
-            /* code */
+            // Se il robot è in guasto non c'è niente da fare
             break;
         }
         case NAV_STATE_PAUSE: {
-            // fermo finché non arriva un comando (apply_command)
+            // fermo finché non arriva un comando
             if (nav_state.cur_obj.obj_type != OBJ_STOP) send_objective(OBJ_STOP, 0, 0, 0, 0, 0);
             break;
         }
         case NAV_STATE_REMOTE: {
 
-            // fuori dalla base l'uscita è già fatta: una missione ripresa dopo il telecomando non deve rifarla
+            // fuori dalla base l'uscita è già fatta
             if (!cur_drv_state.sulla_base) nav_state.has_left_base = true;
 
             // un comando di movimento vale per REMOTE_MOVE_TIMEOUT, poi il robot si ferma
@@ -3390,8 +3389,7 @@ static void job_navigation_body(void *arg) {
                 remote_omega = 0;
             }
 
-            // limita prima ai massimi del telecomando, poi a quelli decisi dalla sicurezza (ostacoli del lidar).
-            // Vuoto e paraurti li blocca il driver
+            // limita prima ai massimi del telecomando, poi a quelli decisi dalla sicurezza
             remote_v = MAX(MIN(remote_v, REMOTE_MAX_V), -REMOTE_MAX_V_BACK);
             remote_omega = MAX(MIN(remote_omega, REMOTE_MAX_OMEGA), -REMOTE_MAX_OMEGA);
             remote_v = MAX(MIN(remote_v, cur_alarm.max_v_forw), -cur_alarm.max_v_backw);

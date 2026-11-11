@@ -43,7 +43,7 @@ static const int RECONNECT_DELAYS[] = RECONNECT_DELAYS_S;
 // indirizzo del server, token e certificato: letti una volta all'avvio, poi solo letti dai due thread
 static char server_url[URL_MAX];
 static char auth_header[AUTH_HEADER_MAX];
-static const char *server_ca_file;      // sul PC: il certificato autofirmato del server di prova. NULL = le radici del programma
+static const char *server_ca_file;
 
 static pthread_t commands_thread, state_thread;
 
@@ -51,7 +51,7 @@ static pthread_t commands_thread, state_thread;
 static http_connection_t *commands_connection;
 
 // true quando un cambio di mappa chiede il riavvio del programma
-static atomic_bool restart_requested;
+static _Atomic bool restart_requested;
 
 void request_restart(void) {
     atomic_store(&restart_requested, true);
@@ -170,8 +170,8 @@ long send_http_request(http_connection_t *connection, const char *method, const 
     return code;
 }
 
-// funzione helper che mette il thread corrente sul core del task aperiodico, con nice più alto: il task aperiodico
-// (anche lui con lo scheduling normale sullo stesso core) ha la precedenza quando cerca la posizione
+// funzione helper che mette il thread corrente sul core del task aperiodico, con nice più alto, in modo che il task aperiodico
+// (anche lui con lo scheduling normale sullo stesso core) abbia la precedenza quando cerca la posizione
 static void setup_network_thread(void) {
 
     cpu_set_t set;

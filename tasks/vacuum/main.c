@@ -2,7 +2,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
-#include <math.h>
 
 #include "driver/driver.h"
 #include "lidar.h"
@@ -249,7 +248,7 @@ int main(void) {
               return 1;
        }
 
-       // thread della FIFO dei comandi (comandi JSON per le prove): se non parte, il programma va avanti senza
+       // thread della coda dei comandi (comandi JSON per le prove): se non parte, il programma va avanti senza
        start_commands();
 
        // collegamento al server dell'app: parte dopo i task, come i comandi. Senza il file del token non parte, e il
@@ -272,11 +271,9 @@ int main(void) {
        drv_sorveglia(&mapping_task, 1, 0);
 
 
-	// ciclo di esecuzione main loop
+	// ciclo di esecuzione main loop:
 	// dopo aver avviato i task nei loro thread
 	// il main aspetta solo il segnale per terminare
-	// e stampa i dati eventualmente
-       
 	// oppure la richiesta di riavvio, dopo un cambio di mappa dall'app
 	while (!fine && !is_restart_requested()) {
               sleep(SLEEP_TIME);

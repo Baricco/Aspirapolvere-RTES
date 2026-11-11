@@ -16,8 +16,7 @@
 static char commands_path[256];
 static pthread_t commands_thread;
 
-// il corpo del thread: apre il file speciale (resta fermo finché qualcuno ci scrive), legge le righe, e quando chi
-// scrive lo chiude lo riapre
+// il corpo del thread: apre il file speciale (resta fermo finché qualcuno ci scrive), legge le righe, e quando chi scrive lo chiude lo riapre
 static void *commands_loop(void *arg) {
 
     (void)arg;

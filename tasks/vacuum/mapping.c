@@ -2169,7 +2169,7 @@ bool copy_map_categories(uint8_t *categories, int rect_x, int rect_y, int rect_w
             for (int i = 0; i < map_state.num_user_zones; i++) user_zones[i] = map_state.user_zones[i];
         }
 
-        // i dati letti vanno guardati prima di rileggere il contatore (stesso schema di driver/scambio.c)
+        // i dati letti vanno guardati prima di rileggere il contatore
         atomic_thread_fence(memory_order_acquire);
         if (atomic_load(&map_job_counter) == before) return true;
     }

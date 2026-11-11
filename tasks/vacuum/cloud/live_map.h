@@ -7,7 +7,7 @@
 
 #include "network.h"
 
-// Mappa dal vivo per l'app (docs/app.md, sezione 7.3), nel thread dello stato. Il thread tiene una copia privata della
+// Mappa dal vivo per l'app, nel thread dello stato. Il thread tiene una copia privata della
 // griglia fine a categorie: l'ultima confermata dal server. Ogni LIVE_MAP_SEND_INTERVAL legge dalla mappatura solo il
 // rettangolo attorno alle posizioni non ancora mandate (copy_map_categories: la mappatura non aspetta mai), lo
 // confronta con la copia privata e manda in RTM1 il rettangolo delle celle cambiate. A programma avviato non si legge

@@ -62,13 +62,13 @@ typedef enum {
     NAV_STATE_LEAVE_BASE,       // il robot esce dalla base di ricarica
     NAV_STATE_CROSS,            // il robot incastrato su un tappeto o un cavo avanza piano ruotando a turno a sinistra e a destra
     NAV_STATE_PAUSE,            // pulizia in pausa (tasto di accensione): robot fermo, riprende alla prossima pressione
-    NAV_STATE_REMOTE,           // telecomando: il robot va alla velocità chiesta dall'app (docs/app.md, sezione 6)
+    NAV_STATE_REMOTE,           // modalità telecomando: il robot va alla velocità chiesta dall'app
 } nav_state_t;
 
 // Costanti del telecomando: gli stessi valori di crociera dei task, ma definiti a parte
-#define REMOTE_MAX_V            0.35            // velocità massima in avanti in telecomando (come CRUISING_SPEED), espressa in m/s
+#define REMOTE_MAX_V            0.35            // velocità massima in avanti in telecomando, espressa in m/s
 #define REMOTE_MAX_V_BACK       0.35            // velocità massima all'indietro in telecomando, espressa in m/s
-#define REMOTE_MAX_OMEGA        1.2             // velocità massima di rotazione in telecomando (come MAX_ROTATION_SPEED, sotto 1,5 oltre cui la mappatura scarta la scansione), espressa in rad/s
+#define REMOTE_MAX_OMEGA        1.2             // velocità massima di rotazione in telecomando, espressa in rad/s
 #define REMOTE_MOVE_TIMEOUT     RT_MS(500)      // un comando di movimento del telecomando vale per questo tempo, poi il robot si ferma
 #define REMOTE_IDLE_TIMEOUT     RT_S(30)        // tempo senza comandi del telecomando dopo cui il telecomando viene rilasciato
 
@@ -108,7 +108,7 @@ typedef struct {
     bool suction;                   // solo NAV_COMMAND_REMOTE_CLEANING: aspirazione accesa
 } navigation_command_t;
 
-// Il comando viaggia in una sola variabile atomica da 64 bit (docs/app.md, sezione 9.4), senza doppio buffer:
+// Il comando viaggia in una sola variabile atomica da 64 bit, senza doppio buffer:
 // bit 0-15 numero, 16-19 tipo, 20-35 v in mm/s, 36-51 omega in mrad/s (con il segno), 52 spazzole, 53 aspirazione
 #define NAV_COMMAND_NUM_SHIFT       0
 #define NAV_COMMAND_TYPE_SHIFT      16
@@ -167,7 +167,7 @@ typedef struct {
     nav_command_result_t last_command_result;   // e il suo esito
 } navigation_status_t;
 
-// caratteristiche del task navigation, definita in navigation.c
+// caratteristiche del task navigation
 extern rt_task_t navigation_task;
 
 void init_navigation(void);

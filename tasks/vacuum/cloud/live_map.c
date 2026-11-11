@@ -51,7 +51,7 @@ static inline void set_map_category(uint8_t *categories, int x, int y, uint8_t c
 
 bool decode_map_data(const uint8_t *data, size_t size, uint8_t *categories) {
 
-    // header: numero magico, rettangolo dentro la griglia, numero di zone
+    // header: magic number, rettangolo dentro la griglia, numero di zone
     const size_t header_len = MAP_FILE_HEADER_LEN - MAP_FILE_CRC_LEN;
     if (size < MAP_FILE_HEADER_LEN || memcmp(data, MAP_FILE_MAGIC, MAP_FILE_MAGIC_LEN) != 0) return false;
 

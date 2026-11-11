@@ -260,7 +260,7 @@ void job_safety(void *arg) {
     // Leggi la posizione attuale del robot
     movement_position_data_t cur_position = read_movement();
 
-    // in telecomando le zone proibite, base compresa, sono ignorate: il ciclo delle zone si salta e le distanze
+    // in modalità telecomando le zone proibite, base compresa, sono ignorate: il ciclo delle zone si salta e le distanze
     // restano infinite. Ostacoli, vuoto e paraurti restano
     if (read_navigation_status().is_remote) {
 

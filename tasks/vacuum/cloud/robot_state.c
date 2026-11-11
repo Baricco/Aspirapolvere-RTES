@@ -21,7 +21,7 @@
 #define STATE_FORMAT            1           // versione del formato dello stato
 #define MOVING_SPEED_MIN        0.001       // sotto questa velocità misurata (m/s e rad/s) il robot conta come fermo
 #define RAD_TO_DEG              (180.0 / M_PI)
-#define FAULT_TEXT_MAX          96          // lunghezza del testo del guasto del driver
+#define FAULT_TEXT_MAX          96          // lunghezza massima del testo del guasto del driver
 
 // nomi degli stati della navigazione, nello stesso ordine di nav_state_t
 static const char *const NAV_STATE_NAMES[] = {
@@ -74,7 +74,7 @@ static const task_name_t TASK_NAMES[] = {
 
 #define ARRAY_SIZE(a) ((int)(sizeof(a) / sizeof((a)[0])))
 
-// le cose importanti: quando una cambia lo stato parte subito
+// le cose importanti: quando una cambia, lo stato parte subito
 typedef struct {
     nav_state_t state, mission, interrupted_mission;
     uint32_t mission_number;
@@ -190,7 +190,7 @@ static double round_to(double value, double decimals) {
     return round(value * scale) / scale;
 }
 
-// funzione helper che costruisce il JSON dello stato (docs/app.md, sezione 4.1)
+// funzione helper che costruisce il JSON dello stato
 static char *build_json(const state_readings_t *readings) {
 
     const drv_stato_t *driver = &readings->driver;

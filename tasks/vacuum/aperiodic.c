@@ -59,8 +59,7 @@ static scambio_t zones_request_buffer;
 static aperiodic_zones_request_t zones_buffer1, zones_buffer2;
 static uint32_t zones_request_num;
 
-// richiesta sul file della mappa: sostituirlo con quello scaricato dal server, oppure cancellarlo. La scrive solo
-// l'interprete dei comandi dell'app
+// richiesta sul file della mappa: sostituirlo con quello scaricato dal server, oppure cancellarlo. La scrive solo l'interprete dei comandi dell'app
 typedef struct {
     uint32_t num;           // numero progressivo della richiesta, 0 = nessuna richiesta
     bool is_delete;         // true = cancella map.rtm, false = rinomina il file scaricato sopra map.rtm
@@ -177,7 +176,7 @@ static inline int zone_size_to_cells(double size) {
     return (int)floor(size / FINE_MAP_CELL_SIZE + 0.5);
 }
 
-// stato della codifica: i byte pronti si accumulano in un pezzo, che passa a chi scrive quando è pieno
+// stato della codifica: i byte pronti si accumulano in un chunk, che passa a chi scrive quando è pieno
 typedef struct {
     map_write_function_t write;
     void *context;
@@ -187,7 +186,7 @@ typedef struct {
     bool ok;
 } map_encoder_t;
 
-// funzione helper che passa a chi scrive il pezzo accumulato
+// funzione helper che passa a chi scrive il chunk accumulato
 static void encoder_flush(map_encoder_t *encoder) {
     if (encoder->ok && encoder->chunk_size > 0) encoder->ok = encoder->write(encoder->context, encoder->chunk, encoder->chunk_size);
     encoder->chunk_size = 0;
@@ -211,7 +210,7 @@ bool encode_map_rectangle(const uint8_t *categories, int x, int y, int width, in
 
     map_encoder_t encoder = { .write = write, .context = context, .ok = true };
 
-    // numero magico, rettangolo e numero di zone
+    // magic number, rettangolo e numero di zone
     for (int i = 0; i < MAP_FILE_MAGIC_LEN; i++) encoder_put(&encoder, (uint8_t)MAP_FILE_MAGIC[i]);
     encoder_put_u16(&encoder, (uint16_t)x);
     encoder_put_u16(&encoder, (uint16_t)y);
@@ -243,7 +242,7 @@ bool encode_map_rectangle(const uint8_t *categories, int x, int y, int width, in
     }
     encoder_put(&encoder, (uint8_t)(run_category << MAP_RUN_CATEGORY_SHIFT | run_count));
 
-    // CRC di tutto quello che precede, little endian (non entra nel CRC)
+    // CRC di tutto quello che precede, little endian
     uint32_t crc = encoder.crc;
     for (int i = 0; i < MAP_FILE_CRC_LEN; i++) encoder_put(&encoder, (uint8_t)(crc >> (8 * i)));
 
@@ -335,16 +334,15 @@ static void save_map_and_publish(void) {
     if (ok) atomic_fetch_add(&save_count, 1);
 }
 
-// funzione helper che esegue una richiesta sul file della mappa: la rinomina del file scaricato sopra map.rtm (la
-// rinomina sostituisce in un colpo solo: dopo un'interruzione di corrente c'è o la mappa vecchia intera o la nuova
-// intera) oppure la cancellazione. La fa il task aperiodico perché è lui che salva: un salvataggio non può incrociarsi
+// funzione helper che esegue una richiesta sul file della mappa: la rinomina del file scaricato sopra map.rtm 
+// oppure la cancellazione. La fa il task aperiodico perché è lui che salva: un salvataggio non può incrociarsi
 static void apply_map_file_request(const aperiodic_file_request_t *request) {
 
     char path[256], download_path[256];
     bool ok = map_file_path(path, sizeof path, "") == 0 && map_file_path(download_path, sizeof download_path, MAP_DOWNLOAD_EXT) == 0;
 
     if (ok && request->is_delete) {
-        // se il file non c'è non c'è niente da cancellare: va bene lo stesso
+        // se il file non c'è, non c'è niente da cancellare
         ok = remove(path) == 0 || errno == ENOENT;
     } else if (ok) {
         ok = rename(download_path, path) == 0;

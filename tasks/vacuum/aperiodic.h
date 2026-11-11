@@ -38,8 +38,7 @@ uint32_t request_user_zones(const mapping_forbidden_zone_t *zones, int num_zones
 uint32_t request_map_replace(void);
 uint32_t request_map_delete(void);
 
-// esito di una richiesta sul file della mappa: ritorna false finché il task aperiodico non l'ha eseguita, poi true con
-// l'esito in ok
+// esito di una richiesta sul file della mappa: ritorna false finché il task aperiodico non l'ha eseguita, poi true con l'esito in ok
 bool read_map_file_request_result(uint32_t request_num, bool *ok);
 
 // true se l'ultimo salvataggio della mappa è fallito (lo legge l'app per avvisare l'utente)
@@ -54,8 +53,7 @@ uint32_t read_map_save_count(void);
 // file temporaneo, "" per quello vero). Ritorna 0, oppure -1 se il percorso è troppo lungo
 int map_file_path(char *path, size_t size, const char *suffix);
 
-// funzione helper che restituisce la categoria della cella fine (x, y) da una griglia a categorie a 2 bit per cella
-// (quella di copy_map_categories)
+// funzione helper che restituisce la categoria della cella fine (x, y) da una griglia a categorie a 2 bit per cella (quella di copy_map_categories)
 static inline uint8_t get_map_category(const uint8_t *categories, int x, int y) {
     uint32_t index = (uint32_t)y * FINE_MAP_CELL_NUMBER + (uint32_t)x;
     return (categories[index >> 2] >> (2 * (index & 3))) & 3;
