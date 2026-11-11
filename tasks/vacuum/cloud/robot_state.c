@@ -5,7 +5,7 @@
 #include <time.h>
 
 #include "driver/driver.h"
-#include "gd32/sicurezza.h"
+#include "gd32/interlock.h"
 #include "third_party/cjson/cJSON.h"
 
 #include "config_check.h"
@@ -38,11 +38,11 @@ static const char *const MAP_STATE_NAMES[] = { "normal", "lost", "unconfirmed", 
 // nomi degli allarmi della sicurezza, nello stesso ordine dei bit di error_mask
 static const char *const SAFETY_ERROR_NAMES[] = { "stuck", "slip", "motor_overload", "obstacle", "forbidden_zone", "contact", "brush" };
 
-// nomi dei livelli della batteria (BAT_OK, BAT_BASSA, BAT_CRITICA) e delle fasi del driver (DRV_AVVIO...)
+// nomi dei livelli della batteria (BAT_OK, BAT_LOW, BAT_CRITICAL) e delle fasi del driver (DRV_STARTING...)
 static const char *const BATTERY_LEVEL_NAMES[] = { "ok", "low", "critical" };
 static const char *const DRIVER_PHASE_NAMES[] = { "startup", "ready", "fault", "stopped" };
 
-// nomi dell'esito dell'aggancio (AGG_FERMO...) e delle sue fasi (AGG_F_NIENTE...)
+// nomi dell'esito dell'aggancio (DOCK_IDLE...) e delle sue fasi (DOCK_P_NONE...)
 static const char *const DOCKING_RESULT_NAMES[] = { "idle", "in_progress", "done", "failed" };
 static const char *const DOCKING_PHASE_NAMES[] = {
     "none", "search", "center", "approach", "refine", "detach", "back", "turn", "last_stretch", "contact", "retreat", "press",
@@ -55,10 +55,10 @@ typedef struct {
 } limit_name_t;
 
 static const limit_name_t LIMIT_NAMES[] = {
-    { SIC_LIM_SOLLEVATO, "lifted" }, { SIC_LIM_BASE, "on_base" }, { SIC_LIM_SENSORI, "sensors_off" },
-    { SIC_LIM_BUMPER, "bumper" }, { SIC_LIM_CLIFF, "cliff" }, { DRV_LIM_DISABILITATI, "motors_disabled" },
-    { DRV_LIM_NON_PRONTO, "not_ready" }, { DRV_LIM_GUASTO, "fault" }, { DRV_LIM_SENSORI_VECCHI, "stale_sensors" },
-    { DRV_LIM_BATTERIA, "battery" }, { DRV_LIM_BANCO, "test_bench" },
+    { INTERLOCK_LIM_LIFTED, "lifted" }, { INTERLOCK_LIM_BASE, "on_base" }, { INTERLOCK_LIM_SENSORS, "sensors_off" },
+    { INTERLOCK_LIM_BUMPER, "bumper" }, { INTERLOCK_LIM_CLIFF, "cliff" }, { DRV_LIM_DISABLED, "motors_disabled" },
+    { DRV_LIM_NOT_READY, "not_ready" }, { DRV_LIM_FAULT, "fault" }, { DRV_LIM_OLD_SENSORS, "stale_sensors" },
+    { DRV_LIM_BATTERY, "battery" }, { DRV_LIM_BENCH, "test_bench" },
 };
 
 // un task real-time e il nome con cui compare nello stato
@@ -103,8 +103,8 @@ typedef struct {
     mapping_forbidden_zone_list_t zones;
     safety_alarm_t alarm;
     lidar_scan_data_t scan;
-    drv_stato_t driver;
-    drv_sensori_t sensors;
+    drv_status_t driver;
+    drv_sensors_t sensors;
 } state_readings_t;
 
 // stato interno: lo usa solo il thread dello stato
@@ -119,13 +119,13 @@ static struct {
 
 void init_robot_state(void) {
     memset(&robot_state, 0, sizeof robot_state);
-    robot_state.start_t = rt_adesso();
+    robot_state.start_t = rt_now();
 }
 
 void mark_robot_state_sent(void) {
     robot_state.sent = robot_state.built;
     robot_state.is_first_sent = true;
-    robot_state.last_sent_t = rt_adesso();
+    robot_state.last_sent_t = rt_now();
 }
 
 // funzione helper che legge tutto dai doppi buffer dei task e del driver
@@ -139,8 +139,8 @@ static void read_everything(state_readings_t *readings) {
     readings->scan = read_lidar();
     memset(&readings->driver, 0, sizeof readings->driver);
     memset(&readings->sensors, 0, sizeof readings->sensors);
-    drv_stato(&readings->driver);
-    drv_sensori(&readings->sensors);
+    drv_status(&readings->driver);
+    drv_sensors(&readings->sensors);
 }
 
 // funzione helper che raccoglie le cose importanti. La struttura parte azzerata: si confronta con memcmp
@@ -157,17 +157,17 @@ static void fill_important_state(const state_readings_t *readings, important_sta
     important->remote_suction = readings->navigation.remote_suction;
     important->last_command_num = readings->navigation.last_command_num;
     important->last_command_result = readings->navigation.last_command_result;
-    important->driver_phase = readings->driver.fase;
+    important->driver_phase = readings->driver.phase;
     important->task_fault = readings->driver.task_fault;
-    snprintf(important->fault_text, sizeof important->fault_text, "%s", readings->driver.guasto);
-    important->docking_result = readings->driver.aggancio;
-    important->charging = readings->driver.in_carica;
-    important->charge_complete = readings->driver.carica_completa;
-    important->on_base = readings->driver.sulla_base;
-    important->lifted = readings->driver.sollevato;
-    important->battery_level = readings->driver.batteria;
-    important->is_brushes_on = readings->driver.spazzola_laterale != 0 || readings->driver.spazzola_centrale != 0;
-    important->is_suction_on = readings->driver.aspirazione_giri != 0;
+    snprintf(important->fault_text, sizeof important->fault_text, "%s", readings->driver.fault);
+    important->docking_result = readings->driver.docking;
+    important->charging = readings->driver.charging;
+    important->charge_complete = readings->driver.charge_complete;
+    important->on_base = readings->driver.on_base;
+    important->lifted = readings->driver.lifted;
+    important->battery_level = readings->driver.battery;
+    important->is_brushes_on = readings->driver.side_brush != 0 || readings->driver.main_brush != 0;
+    important->is_suction_on = readings->driver.suction_rpm != 0;
     important->map_state = readings->correction.state;
     important->save_failed = read_map_save_failed();
     important->started_on_base = read_started_on_base();
@@ -193,9 +193,9 @@ static double round_to(double value, double decimals) {
 // funzione helper che costruisce il JSON dello stato
 static char *build_json(const state_readings_t *readings) {
 
-    const drv_stato_t *driver = &readings->driver;
-    const gd32_sensori_t *sensors = &readings->sensors.s;
-    int64_t now = rt_adesso();
+    const drv_status_t *driver = &readings->driver;
+    const gd32_sensors_t *sensors = &readings->sensors.s;
+    int64_t now = rt_now();
 
     cJSON *root = cJSON_CreateObject();
     cJSON_AddNumberToObject(root, "format", STATE_FORMAT);
@@ -265,62 +265,62 @@ static char *build_json(const state_readings_t *readings) {
 
     // batteria
     cJSON *battery = cJSON_AddObjectToObject(root, "battery");
-    cJSON_AddNumberToObject(battery, "voltage", round_to(driver->volt, 2));
-    cJSON_AddNumberToObject(battery, "percent", driver->percentuale);
-    cJSON_AddStringToObject(battery, "level", name_of(BATTERY_LEVEL_NAMES, ARRAY_SIZE(BATTERY_LEVEL_NAMES), driver->batteria));
-    cJSON_AddBoolToObject(battery, "charging", driver->in_carica);
-    cJSON_AddBoolToObject(battery, "charge_complete", driver->carica_completa);
-    cJSON_AddNumberToObject(battery, "temperature_c", driver->temperatura_c);
+    cJSON_AddNumberToObject(battery, "voltage", round_to(driver->volts, 2));
+    cJSON_AddNumberToObject(battery, "percent", driver->percentage);
+    cJSON_AddStringToObject(battery, "level", name_of(BATTERY_LEVEL_NAMES, ARRAY_SIZE(BATTERY_LEVEL_NAMES), driver->battery));
+    cJSON_AddBoolToObject(battery, "charging", driver->charging);
+    cJSON_AddBoolToObject(battery, "charge_complete", driver->charge_complete);
+    cJSON_AddNumberToObject(battery, "temperature_c", driver->temperature_c);
 
     // motori della pulizia: quello che il driver sta mandando davvero
     cJSON *motors = cJSON_AddObjectToObject(root, "motors");
-    cJSON_AddNumberToObject(motors, "side_brush", driver->spazzola_laterale);
-    cJSON_AddNumberToObject(motors, "main_brush", driver->spazzola_centrale);
-    cJSON_AddNumberToObject(motors, "suction_rpm", driver->aspirazione_giri);
+    cJSON_AddNumberToObject(motors, "side_brush", driver->side_brush);
+    cJSON_AddNumberToObject(motors, "main_brush", driver->main_brush);
+    cJSON_AddNumberToObject(motors, "suction_rpm", driver->suction_rpm);
 
     // driver
     cJSON *driver_json = cJSON_AddObjectToObject(root, "driver");
-    cJSON_AddStringToObject(driver_json, "phase", name_of(DRIVER_PHASE_NAMES, ARRAY_SIZE(DRIVER_PHASE_NAMES), driver->fase));
-    if (driver->fase == DRV_GUASTO) {
+    cJSON_AddStringToObject(driver_json, "phase", name_of(DRIVER_PHASE_NAMES, ARRAY_SIZE(DRIVER_PHASE_NAMES), driver->phase));
+    if (driver->phase == DRV_FAULT) {
         cJSON *fault = cJSON_AddObjectToObject(driver_json, "fault");
         cJSON_AddNumberToObject(fault, "code", driver->task_fault);
-        cJSON_AddStringToObject(fault, "text", driver->guasto);
+        cJSON_AddStringToObject(fault, "text", driver->fault);
     } else cJSON_AddNullToObject(driver_json, "fault");
     cJSON *limits = cJSON_AddArrayToObject(driver_json, "limits");
     for (int i = 0; i < ARRAY_SIZE(LIMIT_NAMES); i++) {
-        if (driver->limiti & LIMIT_NAMES[i].bit) cJSON_AddItemToArray(limits, cJSON_CreateString(LIMIT_NAMES[i].name));
+        if (driver->limits & LIMIT_NAMES[i].bit) cJSON_AddItemToArray(limits, cJSON_CreateString(LIMIT_NAMES[i].name));
     }
-    cJSON_AddBoolToObject(driver_json, "on_base", driver->sulla_base);
-    cJSON_AddBoolToObject(driver_json, "lifted", driver->sollevato);
+    cJSON_AddBoolToObject(driver_json, "on_base", driver->on_base);
+    cJSON_AddBoolToObject(driver_json, "lifted", driver->lifted);
     cJSON *docking = cJSON_AddObjectToObject(driver_json, "docking");
-    cJSON_AddStringToObject(docking, "result", name_of(DOCKING_RESULT_NAMES, ARRAY_SIZE(DOCKING_RESULT_NAMES), driver->aggancio));
-    cJSON_AddStringToObject(docking, "phase", name_of(DOCKING_PHASE_NAMES, ARRAY_SIZE(DOCKING_PHASE_NAMES), driver->aggancio_fase));
-    cJSON_AddNumberToObject(docking, "attempt", driver->aggancio_tentativo);
+    cJSON_AddStringToObject(docking, "result", name_of(DOCKING_RESULT_NAMES, ARRAY_SIZE(DOCKING_RESULT_NAMES), driver->docking));
+    cJSON_AddStringToObject(docking, "phase", name_of(DOCKING_PHASE_NAMES, ARRAY_SIZE(DOCKING_PHASE_NAMES), driver->docking_phase));
+    cJSON_AddNumberToObject(docking, "attempt", driver->docking_attempt);
     cJSON *driver_lidar = cJSON_AddObjectToObject(driver_json, "lidar");
     cJSON_AddBoolToObject(driver_lidar, "ok", driver->lidar_ok);
-    cJSON_AddNumberToObject(driver_lidar, "rotation_hz", round_to(driver->lidar_giri_s, 1));
+    cJSON_AddNumberToObject(driver_lidar, "rotation_hz", round_to(driver->lidar_rev_s, 1));
 
     // sensori: solo i campi del GD32 verificati
     cJSON *sensors_json = cJSON_AddObjectToObject(root, "sensors");
-    cJSON_AddBoolToObject(sensors_json, "bumper_left", sensors->bumper_sx);
-    cJSON_AddBoolToObject(sensors_json, "bumper_right", sensors->bumper_dx);
+    cJSON_AddBoolToObject(sensors_json, "bumper_left", sensors->bumper_left);
+    cJSON_AddBoolToObject(sensors_json, "bumper_right", sensors->bumper_right);
     cJSON *cliff = cJSON_AddArrayToObject(sensors_json, "cliff");
     for (int i = 0; i < 4; i++) cJSON_AddItemToArray(cliff, cJSON_CreateBool(sensors->cliff[i]));
-    cJSON_AddBoolToObject(sensors_json, "dustbin", sensors->cassetto);
+    cJSON_AddBoolToObject(sensors_json, "dustbin", sensors->dustbin);
     cJSON *currents = cJSON_AddObjectToObject(sensors_json, "currents_ma");
-    cJSON_AddNumberToObject(currents, "wheel_left", sensors->correnti[0]);
-    cJSON_AddNumberToObject(currents, "wheel_right", sensors->correnti[1]);
-    cJSON_AddNumberToObject(currents, "side_brush", sensors->correnti[2]);
-    cJSON_AddNumberToObject(currents, "main_brush", sensors->correnti[3]);
-    cJSON_AddNumberToObject(currents, "suction", sensors->correnti[4]);
+    cJSON_AddNumberToObject(currents, "wheel_left", sensors->currents[0]);
+    cJSON_AddNumberToObject(currents, "wheel_right", sensors->currents[1]);
+    cJSON_AddNumberToObject(currents, "side_brush", sensors->currents[2]);
+    cJSON_AddNumberToObject(currents, "main_brush", sensors->currents[3]);
+    cJSON_AddNumberToObject(currents, "suction", sensors->currents[4]);
 
     // task real-time: i due contatori sono atomici, si leggono anche mentre i task girano (i tempi massimi no)
     cJSON *tasks = cJSON_AddArrayToObject(root, "tasks");
     for (int i = 0; i < ARRAY_SIZE(TASK_NAMES); i++) {
         cJSON *task = cJSON_CreateObject();
         cJSON_AddStringToObject(task, "name", TASK_NAMES[i].name);
-        cJSON_AddNumberToObject(task, "deadline_misses", (double)atomic_load(&TASK_NAMES[i].task->mancate_totali));
-        cJSON_AddNumberToObject(task, "missed_activations", (double)atomic_load(&TASK_NAMES[i].task->attivazioni_perse));
+        cJSON_AddNumberToObject(task, "deadline_misses", (double)atomic_load(&TASK_NAMES[i].task->total_misses));
+        cJSON_AddNumberToObject(task, "missed_activations", (double)atomic_load(&TASK_NAMES[i].task->lost_activations));
         cJSON_AddItemToArray(tasks, task);
     }
 
@@ -345,7 +345,7 @@ char *build_robot_state_if_due(void) {
     important.is_moving = is_moving;
 
     bool is_changed = !robot_state.is_first_sent || memcmp(&important, &robot_state.sent, sizeof important) != 0;
-    bool is_idle_due = rt_adesso() - robot_state.last_sent_t >= STATE_IDLE_INTERVAL;
+    bool is_idle_due = rt_now() - robot_state.last_sent_t >= STATE_IDLE_INTERVAL;
 
     if (!is_moving && !is_changed && !is_idle_due) return NULL;
 

@@ -1,5 +1,5 @@
 /*
- * lidar_giro.h - Dal flusso di pacchetti del lidar a giri completi, e regolazione della velocità del motore.
+ * lidar_scan.h - Dal flusso di pacchetti del lidar a giri completi, e regolazione della velocità del motore.
  *
  * Il lidar manda un pacchetto 0xAD per ogni settore di 22,5° (16 per giro, docs/fase2.md C1 e D4):
  *     param[0]      u8   velocità x 0,05 giri/s
@@ -11,9 +11,9 @@
  * robot). Corretto il 5/10: fino ad allora si pensava antiorario, e il driver scambiava destra e sinistra (prova con
  * la rotazione: l'IMU segna +40,7°, la stanza vista dal lidar ruota di +42° invece che di -42°; conferma da
  * kaiaai/VacuumTiger, proscenic-m6pro.toml: scale = -1, offset = pi).
- * Lo 0 del lidar è spostato di LIDAR_SCARTO_CDEG (letto = vero + scarto): il driver lo toglie con
- * drv_config_t.scarto_lidar_cdeg. Il lidar è un triangolatore: il punto misurato non sta sul raggio dal centro di
- * rotazione ma LIDAR_OTTICO più in là, a destra del raggio (drv_punto_xy).
+ * Lo 0 del lidar è spostato di LIDAR_OFFSET_CDEG (letto = vero + scarto): il driver lo toglie con
+ * drv_config_t.lidar_offset_cdeg. Il lidar è un triangolatore: il punto misurato non sta sul raggio dal centro di
+ * rotazione ma LIDAR_OTTICO più in là, a destra del raggio (drv_point_xy).
  * Sotto ~4 giri/s il lidar manda solo pacchetti di velocità 0xAE (param[0] u8 x 0,05 giri/s).
  *
  * L'assemblatore raccoglie i settori; quando l'angolo di inizio torna indietro (nuovo giro) consegna il giro appena
@@ -23,14 +23,14 @@
  *     potenza = 60 + I + 10 e + 10 (e - e_prec),   e = obiettivo - velocità (giri/s),   I = somma degli e, in +-20
  * Logica pura, senza Linux.
  */
-#ifndef LIDAR_GIRO_H
-#define LIDAR_GIRO_H
+#ifndef LIDAR_SCAN_H
+#define LIDAR_SCAN_H
 
 #include <stdint.h>
 
 #include "../lidar/lidar.h"
 
-#define LIDAR_GIRO_MAX_PUNTI 800       /* 2050 misure/s a 4 giri/s = 513; abbondante */
+#define LIDAR_SCAN_MAX_POINTS 800       /* 2050 misure/s a 4 giri/s = 513; abbondante */
 
 /* Montaggio del lidar sul robot [misura del 5/10, docs/fase3.md; seconda fonte: kaiaai/VacuumTiger]:
  *   centro di rotazione 11,2 cm DIETRO il centro del robot (bumper contro un muro piatto: muro a 289 mm dal lidar e a
@@ -40,54 +40,54 @@
  *   scostamento ottico 2,5 cm (kaiaai: optical_offset; il segno dalle tre misure). */
 #define LIDAR_X_M          (-0.112)
 #define LIDAR_Y_M          0.0
-#define LIDAR_SCARTO_CDEG  1450
-#define LIDAR_OTTICO_M     0.025
+#define LIDAR_OFFSET_CDEG  1450
+#define LIDAR_OPTICAL_M     0.025
 
 typedef struct {
-	uint16_t angolo_cdeg;    /* angolo del lidar corretto dello scarto, in centesimi di grado (0..35999) */
-	uint16_t distanza_mm;    /* 0 = nessuna eco */
-	uint8_t intensita;
-} lidar_punto_t;
+	uint16_t angle_cdeg;    /* angolo del lidar corretto dello scarto, in centesimi di grado (0..35999) */
+	uint16_t distance_mm;    /* 0 = nessuna eco */
+	uint8_t intensity;
+} lidar_point_t;
 
-/* Punto nel sistema del robot: origine al CENTRO del robot, x in avanti, y a sinistra, in metri (è drv_punto_xy). */
-void lidar_punto_xy(const lidar_punto_t *p, double *x, double *y);
+/* Punto nel sistema del robot: origine al CENTRO del robot, x in avanti, y a sinistra, in metri (è drv_point_xy). */
+void lidar_point_xy(const lidar_point_t *p, double *x, double *y);
 
 typedef struct {
-	uint32_t numero;         /* progressivo dei giri consegnati */
-	int64_t t_inizio_ns, t_fine_ns;   /* arrivo del primo e dell'ultimo pacchetto del giro */
-	double giri_s;           /* velocità media riportata dal lidar */
-	uint16_t settori;        /* settori ricevuti (16 se il giro è completo) */
+	uint32_t number;         /* progressivo dei giri consegnati */
+	int64_t t_start_ns, t_end_ns;   /* arrivo del primo e dell'ultimo pacchetto del giro */
+	double rev_s;           /* velocità media riportata dal lidar */
+	uint16_t sectors;        /* settori ricevuti (16 se il giro è completo) */
 	uint16_t n;              /* punti */
-	lidar_punto_t p[LIDAR_GIRO_MAX_PUNTI];
-} lidar_giro_t;
+	lidar_point_t p[LIDAR_SCAN_MAX_POINTS];
+} lidar_scan_t;
 
 typedef struct {
-	lidar_giro_t corrente;
-	int ultimo_inizio;       /* angolo di inizio dell'ultimo settore, -1 = nessuno */
-	double somma_vel;
-	int scarto_cdeg;
-	double giri_s;           /* ultima velocità letta (da 0xAD o 0xAE) */
-	int64_t t_velocita;      /* quando è stata letta */
-	uint32_t giri, giri_scartati, settori;
-} lidar_assemblatore_t;
+	lidar_scan_t current;
+	int last_start;       /* angolo di inizio dell'ultimo settore, -1 = nessuno */
+	double speed_sum;
+	int offset_cdeg;
+	double rev_s;           /* ultima velocità letta (da 0xAD o 0xAE) */
+	int64_t t_speed;      /* quando è stata letta */
+	uint32_t revolutions, discarded_scans, sectors;
+} lidar_assembler_t;
 
-void lidar_assemblatore_init(lidar_assemblatore_t *a, int scarto_cdeg);
+void lidar_assembler_init(lidar_assembler_t *a, int offset_cdeg);
 
 /*
  * Un pacchetto del lidar arrivato all'istante t. Ritorna 1 se ha completato un giro, che copia in *giro.
- * Aggiorna sempre a->giri_s con la velocità del pacchetto (0xAD o 0xAE).
+ * Aggiorna sempre a->rev_s con la velocità del pacchetto (0xAD o 0xAE).
  */
-int lidar_assembla(lidar_assemblatore_t *a, const lidar_pacchetto_t *p, int64_t t, lidar_giro_t *giro);
+int lidar_assemble(lidar_assembler_t *a, const lidar_packet_t *p, int64_t t, lidar_scan_t *scan);
 
 typedef struct {
-	double obiettivo;        /* giri/s */
-	double integrale, errore_prec;
-	int potenza;             /* ultima potenza calcolata, 0..100 */
-} lidar_regolatore_t;
+	double target;        /* giri/s */
+	double integral, prev_error;
+	int power;             /* ultima potenza calcolata, 0..100 */
+} lidar_regulator_t;
 
-void lidar_regolatore_init(lidar_regolatore_t *r, double obiettivo);
+void lidar_regulator_init(lidar_regulator_t *r, double target);
 
 /* Un passo del regolatore (ogni 20 ms) con la velocità misurata. Ritorna la potenza da mandare con 0x71. */
-int lidar_regola(lidar_regolatore_t *r, double misurata);
+int lidar_regulate(lidar_regulator_t *r, double measured);
 
-#endif /* LIDAR_GIRO_H */
+#endif /* LIDAR_SCAN_H */

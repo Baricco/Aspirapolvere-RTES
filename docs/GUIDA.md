@@ -28,7 +28,7 @@ all'esecuzione sul robot. Va letta prima di scrivere un task.
 
 | Percorso | Contenuto |
 |---|---|
-| `rt/rt_tempo.h` | tempo in nanosecondi (`int64_t`), conversioni, `rt_adesso()`, `rt_dormi_fino_a()` |
+| `rt/rt_time.h` | tempo in nanosecondi (`int64_t`), conversioni, `rt_now()`, `rt_sleep_until()` |
 | `rt/rt.h`, `rt/rt.c` | task periodici SCHED_FIFO: creazione, ciclo periodico, statistiche, mutex con priority inheritance |
 | `bench/` | programmi di misura: `latenza.c` (latenza e jitter), `carico.c` (carico CPU sui core scelti) |
 | `gd32/gd32.h`, `gd32/gd32.c` | protocollo seriale con il GD32 (motori, sensori, carica): checksum, costruzione dei frame, deframer che si risincronizza, codici dei comandi. Senza Linux e senza allocazioni |
@@ -79,13 +79,13 @@ Tu scrivi solo la funzione `job`, cioè il lavoro di un periodo. Il ciclo lo ges
 
 ```
 ripeti:
-    dormi fino al rilascio            (clock_nanosleep con istante ASSOLUTO)
+    dormi fino al release            (clock_nanosleep con istante ASSOLUTO)
     inizio = adesso
     job(arg)                          ← il tuo codice
     fine = adesso
     aggiorna statistiche: latenza = inizio - rilascio
                           esecuzione = fine - inizio
-                          risposta = fine - rilascio  (> D ⇒ deadline mancata)
+                          risposta = fine - release  (> D ⇒ deadline mancata)
     rilascio += T                     (mai "adesso + T": niente deriva)
 ```
 
@@ -93,11 +93,11 @@ Corrispondenze con FreeRTOS:
 
 | FreeRTOS | Qui |
 |---|---|
-| `xTaskCreate(f, nome, stack, arg, prio, &h)` | `rt_task_avvia(&t, &cfg, istante_zero)` con `cfg.stack_byte`, `cfg.priorita` |
+| `xTaskCreate(f, nome, stack, arg, prio, &h)` | `rt_task_start(&t, &cfg, istante_zero)` con `cfg.stack_bytes`, `cfg.priority` |
 | il ciclo `for(;;){ ...; vTaskDelayUntil(&w, T); }` | lo fa `rt.c`; tu scrivi solo il corpo, cioè `job` |
 | priorità più alta = numero più alto | uguale: 1..99, con 99 la più alta |
 | `xSemaphoreCreateMutex()` (con priority inheritance) | `rt_mutex_init(&m)` |
-| `vTaskDelete` | `rt_task_ferma(&t)` |
+| `vTaskDelete` | `rt_task_stop(&t)` |
 
 ### Esempio completo
 
@@ -115,21 +115,21 @@ int main(void)
     rt_init();                                     /* 1. blocca la memoria in RAM */
     stato_t stato = {0};
     rt_task_cfg_t cfg = {
-        .nome = "controllo",
-        .priorita = 80,                            /* rate-monotonic: periodo breve, priorità alta */
+        .name = "controllo",
+        .priority = 80,                            /* rate-monotonic: periodo breve, priorità alta */
         .cpu = 2,                                  /* scheduling partizionato */
-        .periodo_ns = RT_MS(20),
+        .period_ns = RT_MS(20),
         .deadline_ns = 0,                          /* 0 = uguale al periodo */
         .job = controllo_job,
         .arg = &stato,
     };
     rt_task_t controllo;
-    int64_t t0 = rt_adesso() + RT_MS(100);         /* 2. istante zero comune a tutti i task */
-    if (rt_task_avvia(&controllo, &cfg, t0) != 0)  /* 3. avvio */
+    int64_t t0 = rt_now() + RT_MS(100);         /* 2. istante zero comune a tutti i task */
+    if (rt_task_start(&controllo, &cfg, t0) != 0)  /* 3. avvio */
         return 1;
     /* ... */
-    rt_task_ferma(&controllo);                     /* 4. arresto e statistiche */
-    rt_stats_stampa(&controllo);
+    rt_task_stop(&controllo);                     /* 4. arresto e statistiche */
+    rt_stats_print(&controllo);
 }
 ```
 
@@ -144,7 +144,7 @@ int main(void)
 4. **Il job deve finire.** Un ciclo infinito a priorità alta blocca il suo core. Di default Linux concede ai task RT
    al massimo il 95% di ogni secondo (`/proc/sys/kernel/sched_rt_runtime_us` = 950000; `bench/latenza` stampa il
    valore effettivo), così il sistema resta recuperabile, ma il task salterebbe comunque tutte le sue deadline.
-5. **Il tempo** si misura sempre con `rt_adesso()`, in ns su `CLOCK_MONOTONIC`, mai con `CLOCK_REALTIME` o `time()`.
+5. **Il tempo** si misura sempre con `rt_now()`, in ns su `CLOCK_MONOTONIC`, mai con `CLOCK_REALTIME` o `time()`.
 
 ## 5. Perché `rt_init()` e lo stack esplicito
 
@@ -190,7 +190,7 @@ int main(void)
 Serve a vedere **tutto** quello che i programmi originali si scambiano con l'hardware, per ricavarne i protocolli.
 
 ```
-AuxCtrl ⇄ /dev/ttyS3 = pty (bind mount) ⇄ spia ⇄ /dev/spia-gd32-vero (mknod, stessa UART) ⇄ GD32
+AuxCtrl ⇄ /dev/ttyS3 = pty (bind mount) ⇄ spia ⇄ /dev/spia-gd32-real_path (mknod, stessa UART) ⇄ GD32
 AuxCtrl ⇄ /dev/ttyS1 = pty (bind mount) ⇄ spia ⇄ /dev/spia-lidar-vero                      ⇄ lidar
 ```
 
@@ -222,17 +222,17 @@ quindi si può rianalizzare quando i decodificatori migliorano. Formato: `spia/r
 
 `spia guida` prende il posto dello stack originale e parla direttamente con il GD32: manda keepalive `0x0d`
 (3 s) e heartbeat `0x06` (200 ms), i comandi che gli chiedi, e registra tutto. Ogni comando passa dal **blocco di
-sicurezza** (`gd32/sicurezza.h`): ruote, spazzole e aspirazione diverse da zero partono solo con `--sollevato` e
+sicurezza** (`gd32/interlock.h`): ruote, spazzole e aspirazione diverse da zero partono solo con `--sollevato` e
 con il frame dei sensori che dice "sollevato" (anti-caduta `0f`, sensori alimentati, fuori dalla base); se smette
 di essere vero, o i sensori tacciono 100 ms, ferma tutti i motori fino alla fine. All'uscita ferma sempre i motori.
 
 | Comando (dal PC) | Cosa fa |
 |---|---|
-| `tools/banco-robot.sh avvia NOME [opzioni]` | ferma lo stack e avvia `spia guida -o NOME.reg --csv NOME.csv [opzioni]` sul robot; **quando finisce, per qualsiasi motivo, lo stack riparte da solo** |
+| `tools/banco-robot.sh avvia NOME [opzioni]` | ferma lo stack e avvia `spia guida -o NOME.regulator --csv NOME.csv [opzioni]` sul robot; **quando finisce, per qualsiasi motivo, lo stack riparte da solo** |
 | `tools/banco-robot.sh lidar NOME [opzioni]` | come `avvia`, registrando anche la seriale del lidar (attenzione: ~45 MB/h in RAM) |
 | `tools/banco-robot.sh stato` / `segui` / `ferma` / `scarica NOME` | ultime righe / in diretta / termina (motori a zero) / copia i file in `build/robot/fase2/NOME/` |
 | `tools/finestra.py NOME [N] [campi]` | media, minimo e massimo degli ultimi N frame del CSV sul robot |
-| `tools/analizza-lidar.py NOME-lidar.reg [NOME.reg]` | velocità per potenza, settori e punti per giro, distanze |
+| `tools/analizza-lidar.py NOME-lidar.regulator [NOME.regulator]` | velocità per potenza, settori e punti per giro, distanze |
 
 Opzioni di `spia guida`:
 
@@ -242,9 +242,9 @@ Opzioni di `spia guida`:
 | `--invia CMD[:DATI]@MS` | comando periodico |
 | `--sequenza FILE` | comandi a tempi stabiliti: righe `T cmd`, `T ogni MS cmd`, `T basta CMD`, `T fine` (esempi in `tools/sequenze/`) |
 | `--comandi FIFO` | comandi dal vivo, uno per riga: sul robot `echo 0x8d:08 > /tmp/rtes/comandi` |
-| `--sollevato` | ammette i motori (sempre sotto il blocco di sicurezza) |
-| `--tensione-minima DV` | esce (codice 3) se la tensione media scende sotto DV decimi di volt |
-| `--csv FILE [--csv-ogni MS]` | tutti i campi decodificati dei sensori (`gd32_sensori_t`) |
+| `--sollevato` | ammette i motors (sempre sotto il blocco di sicurezza) |
+| `--tensione-minima DV` | leaving (codice 3) se la tensione media scende sotto DV decimi di volt |
+| `--csv FILE [--csv-ogni MS]` | tutti i campi decodificati dei sensors_on (`gd32_sensors_t`) |
 | `--durata S`, `--senza-keepalive`, `--senza-heartbeat` | durata; prove sul watchdog del GD32 |
 
 Esempio: `tools/banco-robot.sh avvia prova --sollevato --sequenza tools/sequenze/c2-ruote.seq --tensione-minima 140`.
@@ -265,10 +265,10 @@ questo kernel, a volte si sveglia con millisecondi di ritardo, mentre uno che do
                        ┌──────────── driver (CPU0: tempo a priorità 99, ricezione a 98) ───────┐
  /dev/ttyS3 (GD32) ◀──▶│ avvio, keepalive 0x0d 3 s, heartbeat 0x06 200 ms, 0x66 ogni 20 ms     │
  /dev/ttyS1 (lidar) ──▶│ sensori 0x15 (50 Hz) · giri del lidar + regolazione · batteria · 0x9d │
-                       │ limiti di sicurezza · watchdog dei task · stato di guasto (LED 8)     │
+                       │ limiti di sicurezza · watchdog dei task · stato di fault (LED 8)     │
                        └───────┬──────────────────────────────────────────────▲───────────────┘
-            pubblica (senza mutex: driver/scambio.h)              comandi (atomici, non bloccano)
-      drv_sensori() drv_giro() drv_stato() drv_contatti()   drv_velocita() drv_spazzole() drv_led() ...
+            pubblica (senza mutex: driver/exchange.h)              comandi (atomici, non bloccano)
+      drv_sensors() drv_scan() drv_status() drv_contacts()   drv_velocity() drv_brushes() drv_led() ...
                        ▼                                                       │
         task sporadici a 20 ms (sveglia a ogni frame)    task periodici (100, 200, 500 ms...)
 ```
@@ -276,41 +276,41 @@ questo kernel, a volte si sveglia con millisecondi di ritardo, mentre uno che do
 | File | Contenuto |
 |---|---|
 | `driver/driver.h`, `driver.c` | l'interfaccia per i task e il thread del driver |
-| `driver/scambio.h`, `.c` | doppio buffer con numero di versione: il driver scrive senza mai aspettare, i lettori ottengono sempre una copia coerente |
-| `driver/batteria.h`, `.c` | percentuale calcolata come il software originale (`hardware.md`, "Batteria"); livelli con isteresi sulla media di 1 s: bassa < 14,2 V (LED 6), critica < 13,8 V (motori fermi) |
-| `driver/lidar_giro.h`, `.c` | settori `0xAD` → giri completi; regolatore di AuxCtrl (`60 + I + 10 e + 10 Δe`) |
-| `driver/contatti.h`, `.c` | registro degli scatti di anti-caduta (dopo 3 frame di fila), bumper e incastri (da `drv_incastro`), per i task lenti come la mappatura: `drv_contatti()` |
-| `gd32/sicurezza.h` | `sic_terra_limita`: i limiti del moto "a terra"; `sic_permesso`: il blocco del banco di prova |
+| `driver/exchange.h`, `.c` | doppio buffer con numero di versione: il driver scrive senza mai aspettare, i lettori ottengono sempre una copia coerente |
+| `driver/battery.h`, `.c` | percentuale calcolata come il software originale (`hardware.md`, "Batteria"); livelli con isteresi sulla media di 1 s: bassa < 14,2 V (LED 6), critica < 13,8 V (motori fermi) |
+| `driver/lidar_scan.h`, `.c` | settori `0xAD` → giri completi; regolatore di AuxCtrl (`60 + I + 10 e + 10 Δe`) |
+| `driver/contacts.h`, `.c` | registro degli scatti di anti-caduta (dopo 3 frame di fila), bumper e incastri (da `drv_stuck`), per i task lenti come la mappatura: `drv_contacts()` |
+| `gd32/interlock.h` | `interlock_ground_limit`: i limiti del moto "a terra"; `interlock_permit`: il blocco del banco di prova |
 | `driver/rtes-driver.c` | il programma `rtes-driver`: il driver da solo, comandato a mano |
 
 **Cosa fa il driver da solo** (senza che i task debbano pensarci):
 - **all'avvio** manda subito i frame di arresto di tutti i motori, poi la sequenza di avvio di everest
   (`0x0c 01`, `0x07`, `0x17`, `0x18`, `0x71 0`, `0x65 00`, `0x19 01`, `0x7c 00 ff ff`, `0x78 01`, `0x08`, `0x65 02`),
-  un frame ogni 20 ms. È "pronto" quando sono arrivati i sensori (~0,25 s);
+  un frame ogni 20 ms. È "pronto" quando sono arrivati i sensors_on (~0,25 s);
 - **keepalive** `0x0d` ogni 3 s e **heartbeat** `0x06` ogni 200 ms; **velocità** `0x66` ogni 20 ms (anche zero);
 - **sensori**: a ogni frame `0x15` li decodifica, li pubblica e **sveglia i task iscritti**;
 - **lidar**: lo accende/spegne (`0x97`), regola la velocità ogni 20 ms (`0x71`) e pubblica ogni giro completo;
 - **contatti**: annota ogni scatto di un anti-caduta (vuoto per 3 frame di fila), di un bumper o di un incastro in
-  avanti (segnalato dal task di sicurezza con `drv_incastro(si)`: è un contatto senza sensore), con numero
-  progressivo e istante, negli ultimi 32 eventi di `drv_contatti()`: un task che legge ogni 200 ms non ne perde
-  nessuno (niente eventi con i sensori spenti, sulla base o con il robot sollevato). Ogni evento porta anche la
-  posizione del robot che il moto gli dà a ogni frame con `drv_posa(x, y, theta)` (quella del primo frame attivo);
+  avanti (segnalato dal task di sicurezza con `drv_stuck(si)`: è un contatto senza sensore), con numero
+  progressivo e istante, negli ultimi 32 eventi di `drv_contacts()`: un task che legge ogni 200 ms non ne perde
+  none (niente eventi con i sensori spenti, sulla base o con il robot sollevato). Ogni evento porta anche la
+  posizione del robot che il moto gli dà a ogni frame con `drv_pose(x, y, theta)` (quella del primo frame attivo);
 - **batteria e base**: sensori spenti sulla base e accesi fuori (`0x9d`, come everest), LED 4 in carica, LED 6
   con la batteria bassa;
-- **limiti**: ogni comando di velocità passa da `sic_terra_limita` (vedi sotto), le spazzole si fermano con il
+- **limiti**: ogni comando di velocità passa da `interlock_ground_limit` (vedi sotto), le spazzole si fermano con il
   robot sollevato o sulla base, l'aspirazione è vietata se non la si abilita;
 - **watchdog dei task** e **stato di guasto**: se un task critico si blocca o manca 3 scadenze di fila, se i
   sensori tacciono per 1 s o se la seriale si chiude, il driver ferma tutti i motori, accende il LED 8 (rosso,
   lampeggio veloce), suona `sound_erro_harefault` e da lì rifiuta i comandi ai motori finché qualcuno non chiama
-  `drv_azzera_guasto()` (che riesce solo se la causa è sparita).
+  `drv_clear_fault()` (che riesce solo se la causa è sparita).
 
-**Limiti del moto "a terra"** (`sic_terra_limita`, il robot appoggiato sul pavimento):
+**Limiti del moto "a terra"** (`interlock_ground_limit`, il robot appoggiato sul pavimento):
 
 | Situazione (dall'ultimo frame dei sensori) | Cosa passa |
 |---|---|
 | bumper premuto, oppure un anti-caduta nel vuoto | tutto tranne il moto **in avanti** (indietro e rotazione sì, per allontanarsi) |
 | tutti e 4 gli anti-caduta nel vuoto, fuori dalla base | niente: il robot è stato **sollevato** |
-| sulla base | niente, salvo `drv_esci_dalla_base(1)`: piano (≤ 0,1 m/s, ≤ 0,5 rad/s) |
+| sulla base | niente, salvo `drv_leave_base(1)`: piano (≤ 0,1 m/s, ≤ 0,5 rad/s) |
 | sensori spenti fuori dalla base | niente moto in avanti |
 | sensori vecchi (> 100 ms), batteria critica, avvio, guasto | niente |
 
@@ -333,7 +333,7 @@ heartbeat, che riparte da solo quando il driver termina):
 |---|---|
 | `tools/driver-robot.sh avvia NOME [opzioni di rtes-driver]` | ferma il custode e avvia `rtes-driver` in background (`/tmp/rtes/NOME.out`, `NOME.csv`) |
 | `tools/driver-robot.sh comando "lidar 1"` | manda un comando al driver che gira |
-| `tools/driver-robot.sh stato` / `segui` / `ferma` / `scarica NOME` | ultime righe / in diretta / termina / copia in `build/robot/fase3/NOME/` (anche `NOME.reg`, se c'è) |
+| `tools/driver-robot.sh stato` / `segui` / `ferma` / `scarica NOME` | ultime righe / in diretta / termina / copia in `build/robot/fase3/NOME/` (anche `NOME.regulator`, se c'è) |
 | `tools/driver-robot.sh custode` | fa partire il custode se nessuno sorveglia il GD32 |
 | `tools/driver-robot.sh prepara` | all'inizio di una sessione, dopo un'accensione: ferma lo stack originale e avvia il custode in un solo comando |
 
@@ -346,7 +346,7 @@ robot e confrontato con esse automaticamente. Le prove di sicurezza sul robot si
 ```
  ./rtes.sh sim                                         il tuo programma (o rtes-driver)
  ┌──────────── build/host/sim ────────────────┐       ┌──────────────────────────────┐
- │ stanza a oggetti · fisica ogni 2 ms         │ gd32  │ driver (drv_avvia) + task    │
+ │ stanza a oggetti · fisica ogni 2 ms         │ gd32  │ driver (drv_start) + task    │
  │ GD32 simulato  ── pseudo-seriale ───────────┼──────▶│ come /dev/ttyS3              │
  │ lidar simulato ── pseudo-seriale ───────────┼──────▶│ come /dev/ttyS1              │
  │ storia di tutti i messaggi                  │ lidar └──────────────────────────────┘
@@ -371,13 +371,13 @@ robot e confrontato con esse automaticamente. Le prove di sicurezza sul robot si
 | rampe da sollevato | v ~16 600 tick/s²; ω ~2 200 tick/s² (in rotazione il GD32 è lento) | c2, c2b |
 | scale di `0x66` | ~4580 tick per metro, 553 unità per rad/s (`gd32/gd32.h`) | lidar e IMU, fase 3 |
 | lidar sul robot | angoli orari, scarto 14,5°, 11,2 cm dietro il centro, scostamento ottico 2,5 cm | fase 3, kaiaai |
-| velocità misurata (byte 32/36) | sugli encoder in 70 ms (passi di ~7 unità) | c2 |
+| velocità measured (byte 32/36) | sugli encoder in 70 ms (passi di ~7 unità) | c2 |
 | senza heartbeat | potenza tolta dopo 2,04 s, poi le ruote si fermano per inerzia (~1 880 tick/s²) | c2b |
 | IMU | deriva dell'imbardata −0,3°/h; beccheggio −0,55°, rollio +0,38° a riposo | c8scarica (5 h) |
 | lidar | giri/s = 0,0856 × potenza + 0,17; salita 0,18 s; ~2040 misure/s; rumore 7 mm fino a 3 m, 37 mm oltre 6 m | c1 |
 | spazzole e aspirazione | correnti, echi, 219 giri/min per punto di PWM, corrente ∝ giri^2,27 | c3, c3b |
 | batteria | curva di scarica; ~2,45 Ah utili fra 16,3 e 13,8 V | c8scarica |
-| byte non calcolati | presi da un frame vero a riposo (es. byte 88 = 6403) | d |
+| byte non calcolati | presi da un frame vero a rest_level (es. byte 88 = 6403) | d |
 
 **Validazione.** `./rtes.sh valida-sim c2 c2b c3 c1 val1` rimanda al simulatore, con i tempi originali, i comandi
 registrati sul robot e confronta le uscite. Risultati al 5/10 (val1 è a terra, registrata dal driver con `--registra`):
@@ -439,8 +439,8 @@ Le stanze del vecchio formato a griglia si convertono con `tools/converti-stanza
 - **Robot**: solleva / posa, cassetto, tasti, batteria; stato di robot, GD32 e lidar.
 - **Messaggi** (ispettore):
   - griglia dei **96 byte** del frame dei sensori, colorata per campo, con i byte cambiati riquadrati. Al passaggio del
-    mouse: nome, valore grezzo e decodificato con l'unità, affidabilità e spiegazione (la descrizione unica è in
-    `gd32/descrizione.c`);
+    mouse: nome, valore grezzo e decodificato con l'unità, affidabilità e explanation (la descrizione unica è in
+    `gd32/description.c`);
   - bit allargati dei byte a bit e tutti i valori decodificati;
   - ultimo comando di ogni tipo, decodificato;
   - ultimo pacchetto del lidar, punto per punto;
@@ -466,7 +466,7 @@ L'indirizzo può aprire direttamente una scheda o una selezione: `#messaggi`, `#
 
 **Fantasma.** Con lo stesso comando la pagina disegna anche il robot semitrasparente dove il programma **crede** di
 essere (casella "Fantasma"), e sotto la griglia scrive quanto dista dal robot vero. `sim/osserva.c` legge ogni 20 ms
-l'ultima posizione data dal moto con `drv_posa()` (simboli `sc_posa` e `buf_posa` di `driver/driver.c`), e il
+l'ultima posizione data dal moto con `drv_pose()` (simboli `pose_exchange` e `pose_buffers` di `driver/driver.c`), e il
 simulatore la riporta in `/stato` nel campo `creduta`. In movimento 1-2 cm di differenza sono normali: i due dati
 arrivano con qualche decina di millisecondi di scarto.
 
@@ -495,23 +495,23 @@ Un programma con i tuoi task ha questa forma (i nomi sono esempi):
 
 static rt_task_t moto, mappa;
 
-static void job_moto(void *arg)            /* sporadico: gira a ogni frame dei sensori (50 Hz) */
+static void job_moto(void *arg)            /* sporadico: gira a ogni frame dei sensors_on (50 Hz) */
 {
-    drv_sensori_t s;
-    drv_sensori(&s);                       /* copia coerente dell'ultimo frame, senza mutex */
+    drv_sensors_t s;
+    drv_sensors(&s);                       /* copia coerente dell'ultimo frame, senza mutex */
     double v = 0.15, w = 0.0;
-    /* ... odometria con s.s.encoder_sx / encoder_dx e s.s.angolo[0], controllo ... */
-    drv_velocita(v, w);                    /* il driver applica i limiti di sicurezza */
+    /* ... odometria con s.s.encoder_left / encoder_right e s.s.angle[0], controllo ... */
+    drv_velocity(v, w);                    /* il driver applica i limiti di sicurezza */
 }
 
 static void job_mappa(void *arg)           /* periodico: 200 ms */
 {
-    static lidar_giro_t g;                 /* ~4 KB: static, non sullo stack */
-    if (drv_giro(&g))
+    static lidar_scan_t g;                 /* ~4 KB: static, non sullo stack */
+    if (drv_scan(&g))
         for (int i = 0; i < g.n; i++) {
             double x, y;
-            if (g.p[i].distanza_mm == 0) continue;     /* nessuna eco */
-            drv_punto_xy(&g.p[i], &x, &y);             /* metri, x avanti, y a sinistra */
+            if (g.p[i].distance_mm == 0) continue;     /* nessuna eco */
+            drv_point_xy(&g.p[i], &x, &y);             /* metri, x avanti, y a sinistra */
             /* ... */
         }
 }
@@ -520,48 +520,48 @@ int main(void)
 {
     drv_config_t c;
     drv_config_default(&c);                /* robot, oppure simulatore con ./rtes.sh sim */
-    if (drv_avvia(&c)) return 1;
+    if (drv_start(&c)) return 1;
     drv_lidar(1, 6.0);
 
-    rt_task_cfg_t a = { .nome = "moto", .cpu = 1, .sporadico = 1, .periodo_ns = RT_MS(20), .job = job_moto };
-    rt_task_cfg_t b = { .nome = "mappa", .cpu = 2, .periodo_ns = RT_MS(200), .job = job_mappa };
+    rt_task_cfg_t a = { .name = "moto", .cpu = 1, .sporadic = 1, .period_ns = RT_MS(20), .job = job_moto };
+    rt_task_cfg_t b = { .name = "mappa", .cpu = 2, .period_ns = RT_MS(200), .job = job_mappa };
     rt_task_cfg_t *tutti[] = { &a, &b };
-    rt_priorita_rm(tutti, 2, RT_PRIO_TASK_MAX);       /* Rate Monotonic: periodo più corto = priorità più alta */
+    rt_priority_rm(tutti, 2, RT_PRIO_TASK_MAX);       /* Rate Monotonic: periodo più corto = priorità più alta */
 
-    int64_t t0 = rt_adesso() + RT_MS(100);
-    rt_task_avvia(&moto, &a, t0);
-    rt_task_avvia(&mappa, &b, t0);
-    drv_sveglia_ai_sensori(&moto);                    /* sveglia a ogni frame */
-    drv_sorveglia(&moto, 1, RT_MS(60));               /* critico: se si blocca, guasto */
-    drv_sorveglia(&mappa, 0, 0);                      /* non critico: solo un avviso */
+    int64_t t0 = rt_now() + RT_MS(100);
+    rt_task_start(&moto, &a, t0);
+    rt_task_start(&mappa, &b, t0);
+    drv_wake_on_sensors(&moto);                    /* sveglia a ogni frame */
+    drv_watch(&moto, 1, RT_MS(60));               /* critico: se si blocca, guasto */
+    drv_watch(&mappa, 0, 0);                      /* non critico: solo un avviso */
 
     /* ... aspetta (segnale, durata, comandi) ... */
 
-    drv_dimentica(&moto); drv_dimentica(&mappa);       /* prima di fermarli */
-    rt_task_ferma(&moto); rt_task_ferma(&mappa);
-    drv_ferma();
-    rt_stats_stampa(&moto); rt_stats_stampa(&mappa);
+    drv_forget(&moto); drv_forget(&mappa);       /* prima di fermarli */
+    rt_task_stop(&moto); rt_task_stop(&mappa);
+    drv_stop();
+    rt_stats_print(&moto); rt_stats_print(&mappa);
 }
 ```
 
 Cose da sapere:
-- **Task sporadico** (`.sporadico = 1`): il job parte a ogni `rt_task_sveglia()`, che il driver chiama a ogni frame
-  dei sensori. `periodo_ns` è l'intervallo **minimo** fra due attivazioni: il T dell'analisi. Attenzione: il GD32
+- **Task sporadico** (`.sporadic = 1`): il job parte a ogni `rt_task_wake()`, che il driver chiama a ogni frame
+  dei sensori. `period_ns` è l'intervallo **minimo** fra due attivazioni: il T dell'analisi. Attenzione: il GD32
   manda ogni 20,0 ms, ma i frame arrivano con qualche ms di variazione (il kernel), quindi l'intervallo minimo vero è
-  un po' sotto 20 ms: il driver lo misura (`drv_stato().intervallo_sensori_min_ns`, colonna del CSV di `rtes-driver`). Il rilascio di
+  un po' sotto 20 ms: il driver lo misura (`drv_status().sensors_interval_min_ns`, colonna del CSV di `rtes-driver`). Il rilascio di
   ogni job è l'istante in cui è arrivato il frame, e latenza, risposta e scadenze si misurano da lì. Se un frame arriva
-  mentre il job precedente non è ancora partito, l'attivazione si perde e si conta in `attivazioni_perse`.
-- **Priorità**: `rt_priorita_rm` le assegna con Rate Monotonic sotto `RT_PRIO_TASK_MAX` (90); il driver sta a 99 su
+  mentre il job precedente non è ancora partito, l'attivazione si perde e si conta in `lost_activations`.
+- **Priorità**: `rt_priority_rm` le assegna con Rate Monotonic sotto `RT_PRIO_TASK_MAX` (90); il driver sta a 99 su
   CPU0. L'**analisi di schedulabilità** (utilizzazione per core, test di Liu e Layland, tempi di risposta) è tua: per i
-  WCET usa `rt_stats_t` (`esec_max_ns`) o i campioni (`cfg.campioni`) misurati **sul robot**.
+  WCET usa `rt_stats_t` (`exec_max_ns`) o i samples (`cfg.samples`) misurati **sul robot**.
 - **Core**: CPU0 ha il driver e l'interrupt del Wi-Fi; i task vanno su CPU1–3 (partizionati: ogni task su un core).
 - **Dati condivisi fra task**: mutex con priority inheritance (`rt_mutex_init`). Fra task e driver niente mutex:
   `drv_*()` non si bloccano mai.
 - **Mai** dentro un job: `printf`, `malloc`, file, `sleep`. Per i log usa un buffer e un thread non RT.
-- **Comandi**: `drv_velocita(v, w)` (m/s, rad/s), `drv_spazzole(lat, cen)`, `drv_aspirazione(giri)` (permessa con
-  `drv_config_default`, vietata con `drv_config_prova`), `drv_led(modo)`, `drv_lidar(acceso, giri_s)`, `drv_esci_dalla_base(1)`, `drv_suono(nome)`.
-  Il driver applica sempre i limiti: guarda `drv_stato().limiti` per sapere perché un comando non passa.
-- **Unità dei sensori** (`gd32_sensori_t` in `gd32/gd32.h`): encoder in tick (~4580 per metro, `GD32_SCALA_V`),
+- **Comandi**: `drv_velocity(v, w)` (m/s, rad/s), `drv_brushes(lat, cen)`, `drv_suction(giri)` (permessa con
+  `drv_config_default`, vietata con `drv_config_test`), `drv_led(modo)`, `drv_lidar(acceso, rev_s)`, `drv_leave_base(1)`, `drv_sound(nome)`.
+  Il driver applica sempre i limiti: guarda `drv_status().limits` per sapere perché un comando non passa.
+- **Unità dei sensori** (`gd32_sensors_t` in `gd32/gd32.h`): encoder in tick (~4580 per metro, `GD32_SCALE_V`),
   imbardata in 0,01° (positiva in senso antiorario, deriva), velocità angolare in 0,01 °/s, tensione in decimi di volt.
 
 ## 14. L'app (backend, parte di rete del robot, app Flutter)
@@ -598,7 +598,7 @@ programma con i permessi `0600`; qualsiasi altra cosa si cancella e si ricrea.
 
 | Comando | Cosa fa |
 |---|---|
-| `tools/build-net-libs.sh` | scarica (con controllo dello SHA-256) e compila mbedTLS e libcurl per il robot in `build/arm/netlibs/` |
+| `tools/build-net-libs.sh` | discharge (con controllo dello SHA-256) e compila mbedTLS e libcurl per il robot in `build/arm/netlibs/` |
 | `make build/host/vacuum build/arm/vacuum` | il programma per il PC (libcurl del sistema) e per il robot (statico) |
 | `backend/.venv/bin/python tools/prove-app/scenari.py [nomi]` | prove complete nel simulatore con backend e programma vero: comandi, telecomando, guasto, zone, mappe, rete |
 | `backend/.venv/bin/python tools/prove-app/missione.py` | la missione di confronto dei task con il backend collegato |

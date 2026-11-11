@@ -189,8 +189,8 @@ const char *read_live_map_file_crc(void) {
 void init_live_map(void) {
 
     // il controllo della partenza dalla base dura circa un secondo dopo che il driver è pronto
-    int64_t limit = rt_adesso() + STARTUP_BASE_WAIT;
-    while (!read_started_on_base() && rt_adesso() < limit) rt_dormi_fino_a(rt_adesso() + STATE_CYCLE);
+    int64_t limit = rt_now() + STARTUP_BASE_WAIT;
+    while (!read_started_on_base() && rt_now() < limit) rt_sleep_until(rt_now() + STATE_CYCLE);
 
     memset(confirmed_categories, 0, sizeof confirmed_categories);
 

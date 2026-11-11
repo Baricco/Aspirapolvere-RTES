@@ -35,8 +35,8 @@ static void job_osserva(void *arg)
 static void job_lento(void *arg)
 {
 	(void)arg;
-	int64_t fine = rt_adesso() + RT_MS(3);
-	while (rt_adesso() < fine)
+	int64_t fine = rt_now() + RT_MS(3);
+	while (rt_now() < fine)
 		;
 }
 
@@ -45,37 +45,37 @@ static int permessi_rt;
 static void config_non_valide(void)
 {
 	rt_task_t t;
-	rt_task_cfg_t base = { .priorita = 50, .cpu = RT_CPU_QUALSIASI, .periodo_ns = RT_MS(1), .job = job_conta };
+	rt_task_cfg_t base = { .priority = 50, .cpu = RT_CPU_ANY, .period_ns = RT_MS(1), .job = job_conta };
 	rt_task_cfg_t c;
 
-	c = base; c.job = NULL;          CONTROLLA(rt_task_avvia(&t, &c, rt_adesso()) == EINVAL);
-	c = base; c.periodo_ns = 0;      CONTROLLA(rt_task_avvia(&t, &c, rt_adesso()) == EINVAL);
-	c = base; c.priorita = 0;        CONTROLLA(rt_task_avvia(&t, &c, rt_adesso()) == EINVAL);
-	c = base; c.priorita = 100;      CONTROLLA(rt_task_avvia(&t, &c, rt_adesso()) == EINVAL);
-	c = base; c.cpu = -5;            CONTROLLA(rt_task_avvia(&t, &c, rt_adesso()) == EINVAL);
+	c = base; c.job = NULL;          CONTROLLA(rt_task_start(&t, &c, rt_now()) == EINVAL);
+	c = base; c.period_ns = 0;      CONTROLLA(rt_task_start(&t, &c, rt_now()) == EINVAL);
+	c = base; c.priority = 0;        CONTROLLA(rt_task_start(&t, &c, rt_now()) == EINVAL);
+	c = base; c.priority = 100;      CONTROLLA(rt_task_start(&t, &c, rt_now()) == EINVAL);
+	c = base; c.cpu = -5;            CONTROLLA(rt_task_start(&t, &c, rt_now()) == EINVAL);
 }
 
 static void esegue_il_numero_giusto_di_job(void)
 {
 	contatore = 0;
-	rt_task_cfg_t c = { .nome = "conta", .priorita = 50, .cpu = RT_CPU_QUALSIASI,
-			    .periodo_ns = RT_MS(2), .job = job_conta, .max_job = 20 };
+	rt_task_cfg_t c = { .name = "conta", .priority = 50, .cpu = RT_CPU_ANY,
+			    .period_ns = RT_MS(2), .job = job_conta, .max_job = 20 };
 	rt_task_t t;
-	CONTROLLA(rt_task_avvia(&t, &c, rt_adesso()) == 0);
-	rt_task_attendi(&t);
+	CONTROLLA(rt_task_start(&t, &c, rt_now()) == 0);
+	rt_task_join(&t);
 	CONTROLLA(contatore == 20);
 	CONTROLLA(t.stats.job == 20);
-	CONTROLLA(t.stats.deadline_mancate == 0);
+	CONTROLLA(t.stats.missed_deadlines == 0);
 	CONTROLLA(t.cfg.deadline_ns == RT_MS(2));   /* deadline 0 => uguale al periodo */
 }
 
 static void politica_priorita_e_core(void)
 {
-	rt_task_cfg_t c = { .nome = "osserva", .priorita = 42, .cpu = 0,
-			    .periodo_ns = RT_MS(1), .job = job_osserva, .max_job = 3 };
+	rt_task_cfg_t c = { .name = "osserva", .priority = 42, .cpu = 0,
+			    .period_ns = RT_MS(1), .job = job_osserva, .max_job = 3 };
 	rt_task_t t;
-	CONTROLLA(rt_task_avvia(&t, &c, rt_adesso()) == 0);
-	rt_task_attendi(&t);
+	CONTROLLA(rt_task_start(&t, &c, rt_now()) == 0);
+	rt_task_join(&t);
 	CONTROLLA(politica_vista == SCHED_FIFO);
 	CONTROLLA(priorita_vista == 42);
 	CONTROLLA(cpu_vista == 0);
@@ -85,13 +85,13 @@ static void periodo_rispettato_senza_deriva(void)
 {
 	/* 50 job da 2 ms: l'ultimo deve partire ~98 ms dopo il primo,
 	 * qualunque sia il ritardo dei singoli risvegli. */
-	rt_task_cfg_t c = { .nome = "deriva", .priorita = 50, .cpu = RT_CPU_QUALSIASI,
-			    .periodo_ns = RT_MS(2), .job = job_conta, .max_job = 50 };
+	rt_task_cfg_t c = { .name = "deriva", .priority = 50, .cpu = RT_CPU_ANY,
+			    .period_ns = RT_MS(2), .job = job_conta, .max_job = 50 };
 	rt_task_t t;
-	int64_t t0 = rt_adesso() + RT_MS(10);
-	CONTROLLA(rt_task_avvia(&t, &c, t0) == 0);
-	rt_task_attendi(&t);
-	int64_t durata = rt_adesso() - t0;
+	int64_t t0 = rt_now() + RT_MS(10);
+	CONTROLLA(rt_task_start(&t, &c, t0) == 0);
+	rt_task_join(&t);
+	int64_t durata = rt_now() - t0;
 	CONTROLLA(durata >= RT_MS(98));
 	CONTROLLA(durata < RT_MS(98) + RT_MS(5));
 }
@@ -99,36 +99,36 @@ static void periodo_rispettato_senza_deriva(void)
 static void conta_le_deadline_mancate(void)
 {
 	/* job da 3 ms con deadline 1 ms: ogni job manca la deadline */
-	rt_task_cfg_t c = { .nome = "lento", .priorita = 50, .cpu = RT_CPU_QUALSIASI,
-			    .periodo_ns = RT_MS(10), .deadline_ns = RT_MS(1), .job = job_lento, .max_job = 5 };
+	rt_task_cfg_t c = { .name = "lento", .priority = 50, .cpu = RT_CPU_ANY,
+			    .period_ns = RT_MS(10), .deadline_ns = RT_MS(1), .job = job_lento, .max_job = 5 };
 	rt_task_t t;
-	CONTROLLA(rt_task_avvia(&t, &c, rt_adesso()) == 0);
-	rt_task_attendi(&t);
-	CONTROLLA(t.stats.deadline_mancate == 5);
-	CONTROLLA(t.stats.esec_min_ns >= RT_MS(3));
+	CONTROLLA(rt_task_start(&t, &c, rt_now()) == 0);
+	rt_task_join(&t);
+	CONTROLLA(t.stats.missed_deadlines == 5);
+	CONTROLLA(t.stats.exec_min_ns >= RT_MS(3));
 }
 
 static void salva_i_campioni(void)
 {
-	rt_campione_t buf[4];
-	rt_task_cfg_t c = { .nome = "campioni", .priorita = 50, .cpu = RT_CPU_QUALSIASI,
-			    .periodo_ns = RT_MS(1), .job = job_conta, .max_job = 10,
-			    .campioni = buf, .max_campioni = 4 };
+	rt_sample_t buf[4];
+	rt_task_cfg_t c = { .name = "campioni", .priority = 50, .cpu = RT_CPU_ANY,
+			    .period_ns = RT_MS(1), .job = job_conta, .max_job = 10,
+			    .samples = buf, .max_samples = 4 };
 	rt_task_t t;
-	CONTROLLA(rt_task_avvia(&t, &c, rt_adesso()) == 0);
-	rt_task_attendi(&t);
-	CONTROLLA(t.stats.n_campioni == 4);   /* non sfora il buffer */
-	CONTROLLA(buf[0].latenza_ns >= 0);
+	CONTROLLA(rt_task_start(&t, &c, rt_now()) == 0);
+	rt_task_join(&t);
+	CONTROLLA(t.stats.n_samples == 4);   /* non sfora il buffer */
+	CONTROLLA(buf[0].latency_ns >= 0);
 }
 
 static void ferma_un_task_infinito(void)
 {
-	rt_task_cfg_t c = { .nome = "infinito", .priorita = 50, .cpu = RT_CPU_QUALSIASI,
-			    .periodo_ns = RT_MS(1), .job = job_conta };
+	rt_task_cfg_t c = { .name = "infinito", .priority = 50, .cpu = RT_CPU_ANY,
+			    .period_ns = RT_MS(1), .job = job_conta };
 	rt_task_t t;
-	CONTROLLA(rt_task_avvia(&t, &c, rt_adesso()) == 0);
-	rt_dormi_fino_a(rt_adesso() + RT_MS(20));
-	rt_task_ferma(&t);
+	CONTROLLA(rt_task_start(&t, &c, rt_now()) == 0);
+	rt_sleep_until(rt_now() + RT_MS(20));
+	rt_task_stop(&t);
 	CONTROLLA(t.stats.job > 0);
 }
 
@@ -150,74 +150,74 @@ static void job_sporadico(void *arg)
 	(void)arg;
 	contatore++;
 	while (atomic_load(&blocca_sporadico))
-		rt_dormi_fino_a(rt_adesso() + RT_MS(1));
+		rt_sleep_until(rt_now() + RT_MS(1));
 }
 
 static void task_sporadici(void)
 {
 	contatore = 0;
 	atomic_store(&blocca_sporadico, 0);
-	rt_task_cfg_t c = { .nome = "sporadico", .priorita = 50, .cpu = RT_CPU_QUALSIASI, .sporadico = 1,
-	                    .periodo_ns = RT_MS(20), .job = job_sporadico };
+	rt_task_cfg_t c = { .name = "sporadico", .priority = 50, .cpu = RT_CPU_ANY, .sporadic = 1,
+	                    .period_ns = RT_MS(20), .job = job_sporadico };
 	rt_task_t t;
-	CONTROLLA(rt_task_avvia(&t, &c, rt_adesso()) == 0);
-	rt_dormi_fino_a(rt_adesso() + RT_MS(20));
+	CONTROLLA(rt_task_start(&t, &c, rt_now()) == 0);
+	rt_sleep_until(rt_now() + RT_MS(20));
 	CONTROLLA(contatore == 0);                         /* senza sveglie non gira */
 	for (int i = 0; i < 5; i++) {
-		CONTROLLA(rt_task_sveglia(&t, rt_adesso()) == 1);
-		rt_dormi_fino_a(rt_adesso() + RT_MS(5));
+		CONTROLLA(rt_task_wake(&t, rt_now()) == 1);
+		rt_sleep_until(rt_now() + RT_MS(5));
 	}
 	CONTROLLA(contatore == 5);
-	CONTROLLA(t.stats.job == 5 && t.stats.latenza_max_ns < RT_MS(5));
-	CONTROLLA(!rt_task_bloccato(&t, rt_adesso(), RT_MS(10)));
+	CONTROLLA(t.stats.job == 5 && t.stats.latency_max_ns < RT_MS(5));
+	CONTROLLA(!rt_task_is_stuck(&t, rt_now(), RT_MS(10)));
 
 	/* il job si blocca: la prima sveglia durante il job si accoda, la seconda si perde */
 	atomic_store(&blocca_sporadico, 1);
-	rt_task_sveglia(&t, rt_adesso());
-	rt_dormi_fino_a(rt_adesso() + RT_MS(5));         /* il job è partito ed è bloccato */
-	CONTROLLA(rt_task_sveglia(&t, rt_adesso()) == 1);
-	CONTROLLA(rt_task_sveglia(&t, rt_adesso()) == 0);
-	CONTROLLA(atomic_load(&t.attivazioni_perse) == 1);
-	rt_dormi_fino_a(rt_adesso() + RT_MS(30));
-	CONTROLLA(rt_task_bloccato(&t, rt_adesso(), RT_MS(20)));        /* il watchdog lo vede */
+	rt_task_wake(&t, rt_now());
+	rt_sleep_until(rt_now() + RT_MS(5));         /* il job è partito ed è bloccato */
+	CONTROLLA(rt_task_wake(&t, rt_now()) == 1);
+	CONTROLLA(rt_task_wake(&t, rt_now()) == 0);
+	CONTROLLA(atomic_load(&t.lost_activations) == 1);
+	rt_sleep_until(rt_now() + RT_MS(30));
+	CONTROLLA(rt_task_is_stuck(&t, rt_now(), RT_MS(20)));        /* il watchdog lo vede */
 	atomic_store(&blocca_sporadico, 0);
-	rt_dormi_fino_a(rt_adesso() + RT_MS(10));
+	rt_sleep_until(rt_now() + RT_MS(10));
 	CONTROLLA(contatore == 7);                         /* il job bloccato e quello accodato */
-	CONTROLLA(atomic_load(&t.mancate_totali) >= 1);    /* il job bloccato ha sforato i 20 ms */
-	CONTROLLA(!rt_task_bloccato(&t, rt_adesso(), RT_MS(20)));
-	rt_task_ferma(&t);                                 /* deve svegliarlo anche mentre aspetta */
-	CONTROLLA(!t.attivo);
+	CONTROLLA(atomic_load(&t.total_misses) >= 1);    /* il job bloccato ha sforato i 20 ms */
+	CONTROLLA(!rt_task_is_stuck(&t, rt_now(), RT_MS(20)));
+	rt_task_stop(&t);                                 /* deve svegliarlo anche mentre aspetta */
+	CONTROLLA(!t.active);
 }
 
 static void bloccato_periodico(void)
 {
 	atomic_store(&blocca_sporadico, 0);
-	rt_task_cfg_t c = { .nome = "periodico", .priorita = 50, .cpu = RT_CPU_QUALSIASI, .periodo_ns = RT_MS(10),
+	rt_task_cfg_t c = { .name = "periodico", .priority = 50, .cpu = RT_CPU_ANY, .period_ns = RT_MS(10),
 	                    .job = job_sporadico };
 	rt_task_t t;
-	CONTROLLA(rt_task_avvia(&t, &c, rt_adesso()) == 0);
-	rt_dormi_fino_a(rt_adesso() + RT_MS(35));
-	CONTROLLA(!rt_task_bloccato(&t, rt_adesso(), RT_MS(15)));
+	CONTROLLA(rt_task_start(&t, &c, rt_now()) == 0);
+	rt_sleep_until(rt_now() + RT_MS(35));
+	CONTROLLA(!rt_task_is_stuck(&t, rt_now(), RT_MS(15)));
 	atomic_store(&blocca_sporadico, 1);
-	rt_dormi_fino_a(rt_adesso() + RT_MS(50));
-	CONTROLLA(rt_task_bloccato(&t, rt_adesso(), RT_MS(15)));
-	CONTROLLA(atomic_load(&t.mancate_di_fila) == 0);  /* il job bloccato non è ancora finito: non è ancora contato */
+	rt_sleep_until(rt_now() + RT_MS(50));
+	CONTROLLA(rt_task_is_stuck(&t, rt_now(), RT_MS(15)));
+	CONTROLLA(atomic_load(&t.consecutive_misses) == 0);  /* il job bloccato non è ancora finito: non è ancora contato */
 	atomic_store(&blocca_sporadico, 0);
-	rt_dormi_fino_a(rt_adesso() + RT_MS(30));
-	CONTROLLA(!rt_task_bloccato(&t, rt_adesso(), RT_MS(15)));
-	rt_task_ferma(&t);
+	rt_sleep_until(rt_now() + RT_MS(30));
+	CONTROLLA(!rt_task_is_stuck(&t, rt_now(), RT_MS(15)));
+	rt_task_stop(&t);
 }
 
 static void priorita_rate_monotonic(void)
 {
-	rt_task_cfg_t a = { .periodo_ns = RT_MS(20) }, b = { .periodo_ns = RT_MS(200) }, c = { .periodo_ns = RT_MS(20) },
-	              d = { .periodo_ns = RT_MS(500) }, e = { .periodo_ns = RT_MS(100) };
+	rt_task_cfg_t a = { .period_ns = RT_MS(20) }, b = { .period_ns = RT_MS(200) }, c = { .period_ns = RT_MS(20) },
+	              d = { .period_ns = RT_MS(500) }, e = { .period_ns = RT_MS(100) };
 	rt_task_cfg_t *v[] = { &b, &a, &d, &c, &e };
-	CONTROLLA(rt_priorita_rm(v, 5, RT_PRIO_TASK_MAX) == 0);
-	CONTROLLA(a.priorita == 90 && c.priorita == 90);   /* periodi uguali: stessa priorità */
-	CONTROLLA(e.priorita == 89 && b.priorita == 88 && d.priorita == 87);
-	CONTROLLA(rt_priorita_rm(v, 5, 3) == EINVAL);      /* 4 periodi diversi non stanno in 3..1 */
-	CONTROLLA(rt_priorita_rm(v, 0, 90) == 0);
+	CONTROLLA(rt_priority_rm(v, 5, RT_PRIO_TASK_MAX) == 0);
+	CONTROLLA(a.priority == 90 && c.priority == 90);   /* periodi uguali: stessa priorità */
+	CONTROLLA(e.priority == 89 && b.priority == 88 && d.priority == 87);
+	CONTROLLA(rt_priority_rm(v, 5, 3) == EINVAL);      /* 4 periodi diversi non stanno in 3..1 */
+	CONTROLLA(rt_priority_rm(v, 0, 90) == 0);
 }
 
 /* ------------------------------------------------------------------------------------------ task aperiodico --- */
@@ -233,8 +233,8 @@ static void job_aperiodico(void *arg)
 	priorita_vista = p.sched_priority;
 	cpu_vista = sched_getcpu();
 	if (atomic_load(&aper_lento)) {
-		int64_t fine = rt_adesso() + RT_MS(50);
-		while (rt_adesso() < fine)
+		int64_t fine = rt_now() + RT_MS(50);
+		while (rt_now() < fine)
 			;
 	}
 	atomic_fetch_add(&aper_job, 1);
@@ -243,71 +243,71 @@ static void job_aperiodico(void *arg)
 /* aspetta (al massimo 1 s) che i job eseguiti arrivino a n */
 static void aspetta_job_aperiodici(int n)
 {
-	int64_t limite = rt_adesso() + RT_S(1);
-	while (atomic_load(&aper_job) < n && rt_adesso() < limite)
-		rt_dormi_fino_a(rt_adesso() + RT_MS(1));
+	int64_t limite = rt_now() + RT_S(1);
+	while (atomic_load(&aper_job) < n && rt_now() < limite)
+		rt_sleep_until(rt_now() + RT_MS(1));
 }
 
 static void aperiodico_config_non_valide(void)
 {
-	rt_aperiodico_t a;
-	rt_aperiodico_cfg_t c = { .cpu = RT_CPU_QUALSIASI, .job = NULL };
-	CONTROLLA(rt_aperiodico_avvia(&a, &c) == EINVAL);
+	rt_aperiodic_t a;
+	rt_aperiodic_cfg_t c = { .cpu = RT_CPU_ANY, .job = NULL };
+	CONTROLLA(rt_aperiodic_start(&a, &c) == EINVAL);
 	c.job = job_aperiodico;
 	c.cpu = -5;
-	CONTROLLA(rt_aperiodico_avvia(&a, &c) == EINVAL);
+	CONTROLLA(rt_aperiodic_start(&a, &c) == EINVAL);
 }
 
 static void aperiodico_un_job_per_sveglia(void)
 {
-	rt_aperiodico_t a;
-	rt_aperiodico_cfg_t c = { .nome = "prova", .cpu = 0, .job = job_aperiodico };
+	rt_aperiodic_t a;
+	rt_aperiodic_cfg_t c = { .name = "prova", .cpu = 0, .job = job_aperiodico };
 	atomic_store(&aper_job, 0);
 	atomic_store(&aper_lento, 0);
-	CONTROLLA(rt_aperiodico_avvia(&a, &c) == 0);
+	CONTROLLA(rt_aperiodic_start(&a, &c) == 0);
 	/* senza sveglie non parte niente */
-	rt_dormi_fino_a(rt_adesso() + RT_MS(20));
+	rt_sleep_until(rt_now() + RT_MS(20));
 	CONTROLLA(atomic_load(&aper_job) == 0);
 	for (int i = 1; i <= 3; i++) {
-		rt_aperiodico_sveglia(&a);
+		rt_aperiodic_wake(&a);
 		aspetta_job_aperiodici(i);
 	}
-	rt_aperiodico_ferma(&a);
+	rt_aperiodic_stop(&a);
 	CONTROLLA(atomic_load(&aper_job) == 3);
 	CONTROLLA(a.stats.job == 3);
-	CONTROLLA(a.stats.sveglie == 3);
+	CONTROLLA(a.stats.wakeups == 3);
 	CONTROLLA(politica_vista == SCHED_OTHER);    /* scheduling normale, nessuna priorità real-time */
 	CONTROLLA(cpu_vista == 0);
-	CONTROLLA(a.stats.risposta_max_ns >= a.stats.esec_max_ns);
+	CONTROLLA(a.stats.response_max_ns >= a.stats.exec_max_ns);
 }
 
 static void aperiodico_sveglie_durante_un_job(void)
 {
-	rt_aperiodico_t a;
-	rt_aperiodico_cfg_t c = { .nome = "prova", .cpu = RT_CPU_QUALSIASI, .job = job_aperiodico };
+	rt_aperiodic_t a;
+	rt_aperiodic_cfg_t c = { .name = "prova", .cpu = RT_CPU_ANY, .job = job_aperiodico };
 	atomic_store(&aper_job, 0);
 	atomic_store(&aper_lento, 1);
-	CONTROLLA(rt_aperiodico_avvia(&a, &c) == 0);
-	rt_aperiodico_sveglia(&a);
-	rt_dormi_fino_a(rt_adesso() + RT_MS(10));    /* il primo job è partito e dura 50 ms */
+	CONTROLLA(rt_aperiodic_start(&a, &c) == 0);
+	rt_aperiodic_wake(&a);
+	rt_sleep_until(rt_now() + RT_MS(10));    /* il primo job è partito e dura 50 ms */
 	for (int i = 0; i < 5; i++)                  /* 5 sveglie mentre lavora: valgono come una */
-		rt_aperiodico_sveglia(&a);
+		rt_aperiodic_wake(&a);
 	aspetta_job_aperiodici(2);
-	rt_dormi_fino_a(rt_adesso() + RT_MS(80));    /* nessun terzo job */
-	rt_aperiodico_ferma(&a);
+	rt_sleep_until(rt_now() + RT_MS(80));    /* nessun terzo job */
+	rt_aperiodic_stop(&a);
 	CONTROLLA(atomic_load(&aper_job) == 2);
-	CONTROLLA(a.stats.sveglie == 6);
-	CONTROLLA(a.stats.esec_max_ns >= RT_MS(50));
+	CONTROLLA(a.stats.wakeups == 6);
+	CONTROLLA(a.stats.exec_max_ns >= RT_MS(50));
 	atomic_store(&aper_lento, 0);
 }
 
 static void aperiodico_ferma_senza_sveglie(void)
 {
-	rt_aperiodico_t a;
-	rt_aperiodico_cfg_t c = { .cpu = RT_CPU_QUALSIASI, .job = job_aperiodico };
+	rt_aperiodic_t a;
+	rt_aperiodic_cfg_t c = { .cpu = RT_CPU_ANY, .job = job_aperiodico };
 	atomic_store(&aper_job, 0);
-	CONTROLLA(rt_aperiodico_avvia(&a, &c) == 0);
-	rt_aperiodico_ferma(&a);
+	CONTROLLA(rt_aperiodic_start(&a, &c) == 0);
+	rt_aperiodic_stop(&a);
 	CONTROLLA(atomic_load(&aper_job) == 0);
 	CONTROLLA(a.stats.job == 0);
 }
@@ -330,13 +330,13 @@ int main(void)
 	ESEGUI(aperiodico_ferma_senza_sveglie);
 
 	/* Prova a creare un task: se manca il permesso, salta il resto. */
-	rt_task_cfg_t prova = { .priorita = 1, .cpu = RT_CPU_QUALSIASI, .periodo_ns = RT_MS(1),
+	rt_task_cfg_t prova = { .priority = 1, .cpu = RT_CPU_ANY, .period_ns = RT_MS(1),
 				.job = job_conta, .max_job = 1 };
 	rt_task_t t;
-	int r = rt_task_avvia(&t, &prova, rt_adesso());
+	int r = rt_task_start(&t, &prova, rt_now());
 	permessi_rt = (r == 0);
 	if (permessi_rt) {
-		rt_task_attendi(&t);
+		rt_task_join(&t);
 		ESEGUI(esegue_il_numero_giusto_di_job);
 		ESEGUI(politica_priorita_e_core);
 		ESEGUI(periodo_rispettato_senza_deriva);

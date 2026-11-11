@@ -1,7 +1,7 @@
 // ispettore.js - Ispettore dei messaggi: griglia dei 96 byte del frame dei sensori con le spiegazioni, bit allargati,
 // valori decodificati, ultimo comando di ogni tipo, ultimo pacchetto del lidar, lista dei messaggi con i filtri, e
 // pausa per scorrere i messaggi uno per uno. I dati vengono da GET /storia (tutti i messaggi registrati dal simulatore)
-// e la descrizione dei campi da GET /campi (gd32/descrizione.c).
+// e la descrizione dei campi da GET /campi (gd32/description.c).
 "use strict";
 const Ispettore = (() => {
   const MAX = 30000;

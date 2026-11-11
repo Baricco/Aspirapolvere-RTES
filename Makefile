@@ -19,9 +19,9 @@ CFLAGS_ARM    = $(CFLAGS_COMUNI) -mcpu=cortex-a7 -mfpu=neon-vfpv4 -mfloat-abi=ha
 LDFLAGS_ARM   = -static
 
 RT_SRC  = rt/rt.c
-RT_HDR  = rt/rt.h rt/rt_tempo.h
-GD32_SRC = gd32/gd32.c gd32/sicurezza.c gd32/descrizione.c
-GD32_HDR = gd32/gd32.h gd32/sicurezza.h gd32/descrizione.h
+RT_HDR  = rt/rt.h rt/rt_time.h
+GD32_SRC = gd32/gd32.c gd32/interlock.c gd32/description.c
+GD32_HDR = gd32/gd32.h gd32/interlock.h gd32/description.h
 LIDAR_SRC = lidar/lidar.c
 LIDAR_HDR = lidar/lidar.h
 # Librerie dei protocolli: ogni test e ogni strumento le compila tutte (sono piccole).
@@ -36,8 +36,8 @@ SPIA_SRC = spia/spia.c spia/registro.c spia/everest.c
 SPIA_HDR = spia/registro.h spia/everest.h
 
 # Driver (driver/): il nostro sostituto di AuxCtrl. rtes-driver è il programma per provarlo da solo.
-DRIVER_SRC = driver/driver.c driver/scambio.c driver/batteria.c driver/lidar_giro.c driver/contatti.c driver/aggancio.c spia/registro.c
-DRIVER_HDR = driver/driver.h driver/scambio.h driver/batteria.h driver/lidar_giro.h driver/contatti.h driver/aggancio.h spia/registro.h
+DRIVER_SRC = driver/driver.c driver/exchange.c driver/battery.c driver/lidar_scan.c driver/contacts.c driver/docking.c spia/registro.c
+DRIVER_HDR = driver/driver.h driver/exchange.h driver/battery.h driver/lidar_scan.h driver/contacts.h driver/docking.h spia/registro.h
 
 # Simulatore (sim/): GD32 e lidar finti su pseudo-seriali, pagina web con la stanza. Solo per il PC.
 SIM_LIB = sim/mondo.c sim/gd32sim.c sim/lidarsim.c sim/parametri.c
@@ -140,7 +140,7 @@ build/host/osserva: sim/osserva.c
 	$(CC_HOST) $(CFLAGS_HOST) -o $@ sim/osserva.c
 
 # Ogni test si collega a tutte le librerie (sono piccole): protocolli, rt, driver (senza il thread) e simulatore.
-TEST_LIB = $(RT_SRC) $(PROTO_SRC) spia/registro.c driver/scambio.c driver/batteria.c driver/lidar_giro.c driver/contatti.c driver/aggancio.c $(SIM_LIB)
+TEST_LIB = $(RT_SRC) $(PROTO_SRC) spia/registro.c driver/exchange.c driver/battery.c driver/lidar_scan.c driver/contacts.c driver/docking.c $(SIM_LIB)
 TEST_HDR = $(RT_HDR) $(PROTO_HDR) $(SPIA_HDR) $(DRIVER_HDR) $(SIM_HDR) test/test.h
 
 build/host/test_%: test/test_%.c $(TEST_LIB) $(TEST_HDR)

@@ -4,7 +4,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "driver/scambio.h"
+#include "driver/exchange.h"
 
 #include "aperiodic.h"
 #include "mapping.h"
@@ -35,7 +35,7 @@ typedef struct {
 static aperiodic_state_t aper_state;
 
 // doppio buffer della richiesta di salvataggio e numero dell'ultima richiesta scritta (solo la navigazione lo usa)
-static scambio_t save_request_buffer;
+static exchange_t save_request_buffer;
 static aperiodic_save_request_t save_buffer1, save_buffer2;
 static uint32_t save_request_num;
 
@@ -44,7 +44,7 @@ typedef struct {
     uint32_t num;           // numero progressivo della richiesta, 0 = nessuna richiesta
 } aperiodic_search_request_t;
 
-static scambio_t search_request_buffer;
+static exchange_t search_request_buffer;
 static aperiodic_search_request_t search_buffer1, search_buffer2;
 static uint32_t search_request_num;
 
@@ -55,7 +55,7 @@ typedef struct {
     mapping_forbidden_zone_t zones[MAX_FORBIDDEN_ZONES - 1];
 } aperiodic_zones_request_t;
 
-static scambio_t zones_request_buffer;
+static exchange_t zones_request_buffer;
 static aperiodic_zones_request_t zones_buffer1, zones_buffer2;
 static uint32_t zones_request_num;
 
@@ -65,7 +65,7 @@ typedef struct {
     bool is_delete;         // true = cancella map.rtm, false = rinomina il file scaricato sopra map.rtm
 } aperiodic_file_request_t;
 
-static scambio_t file_request_buffer;
+static exchange_t file_request_buffer;
 static aperiodic_file_request_t file_buffer1, file_buffer2;
 static uint32_t file_request_num;
 
@@ -80,13 +80,13 @@ static _Atomic bool save_failed;
 static _Atomic uint32_t save_count;
 
 // caratteristiche del task
-rt_aperiodico_t aperiodic_task;
+rt_aperiodic_t aperiodic_task;
 
 void init_aperiodic(void) {
-    scambio_init(&save_request_buffer, &save_buffer1, &save_buffer2, sizeof(aperiodic_save_request_t));
-    scambio_init(&search_request_buffer, &search_buffer1, &search_buffer2, sizeof(aperiodic_search_request_t));
-    scambio_init(&zones_request_buffer, &zones_buffer1, &zones_buffer2, sizeof(aperiodic_zones_request_t));
-    scambio_init(&file_request_buffer, &file_buffer1, &file_buffer2, sizeof(aperiodic_file_request_t));
+    exchange_init(&save_request_buffer, &save_buffer1, &save_buffer2, sizeof(aperiodic_save_request_t));
+    exchange_init(&search_request_buffer, &search_buffer1, &search_buffer2, sizeof(aperiodic_search_request_t));
+    exchange_init(&zones_request_buffer, &zones_buffer1, &zones_buffer2, sizeof(aperiodic_zones_request_t));
+    exchange_init(&file_request_buffer, &file_buffer1, &file_buffer2, sizeof(aperiodic_file_request_t));
     atomic_store(&save_failed, false);
 }
 
@@ -94,16 +94,16 @@ void request_map_save(void) {
 
     // scrivi la richiesta con un numero nuovo, poi sveglia il task
     aperiodic_save_request_t request = { .num = ++save_request_num };
-    scambio_scrivi(&save_request_buffer, &request);
-    rt_aperiodico_sveglia(&aperiodic_task);
+    exchange_write(&save_request_buffer, &request);
+    rt_aperiodic_wake(&aperiodic_task);
 }
 
 uint32_t request_position_search(void) {
 
     // scrivi la richiesta con un numero nuovo, poi sveglia il task
     aperiodic_search_request_t request = { .num = ++search_request_num };
-    scambio_scrivi(&search_request_buffer, &request);
-    rt_aperiodico_sveglia(&aperiodic_task);
+    exchange_write(&search_request_buffer, &request);
+    rt_aperiodic_wake(&aperiodic_task);
     return request.num;
 }
 
@@ -112,8 +112,8 @@ uint32_t request_user_zones(const mapping_forbidden_zone_t *zones, int num_zones
     // scrivi la richiesta con un numero nuovo, poi sveglia il task
     aperiodic_zones_request_t request = { .num = ++zones_request_num, .num_zones = num_zones };
     for (int i = 0; i < num_zones && i < MAX_FORBIDDEN_ZONES - 1; i++) request.zones[i] = zones[i];
-    scambio_scrivi(&zones_request_buffer, &request);
-    rt_aperiodico_sveglia(&aperiodic_task);
+    exchange_write(&zones_request_buffer, &request);
+    rt_aperiodic_wake(&aperiodic_task);
     return request.num;
 }
 
@@ -122,8 +122,8 @@ static uint32_t request_map_file_change(bool is_delete) {
 
     // scrivi la richiesta con un numero nuovo, poi sveglia il task
     aperiodic_file_request_t request = { .num = ++file_request_num, .is_delete = is_delete };
-    scambio_scrivi(&file_request_buffer, &request);
-    rt_aperiodico_sveglia(&aperiodic_task);
+    exchange_write(&file_request_buffer, &request);
+    rt_aperiodic_wake(&aperiodic_task);
     return request.num;
 }
 
@@ -381,13 +381,13 @@ static void apply_user_zones_request(const aperiodic_zones_request_t *request) {
     write_user_zones(&user_zones);
 
     // aspetta che la mappatura le applichi (con la posizione persa non le applica: si salveranno più avanti)
-    int64_t limit = rt_adesso() + ZONES_APPLY_TIMEOUT;
+    int64_t limit = rt_now() + ZONES_APPLY_TIMEOUT;
     while (read_applied_user_zones_version() != request->num) {
-        if (rt_adesso() > limit) {
+        if (rt_now() > limit) {
             fprintf(stderr, "aperiodico: zone non ancora applicate dalla mappatura, si salveranno con la mappa\n");
             return;
         }
-        rt_dormi_fino_a(rt_adesso() + ZONES_APPLY_WAIT);
+        rt_sleep_until(rt_now() + ZONES_APPLY_WAIT);
     }
     fprintf(stderr, "aperiodico: %d zone proibite applicate\n", request->num_zones);
 
@@ -407,7 +407,7 @@ void job_aperiodic(void *arg) {
 
     // Richiesta: Ricerca della posizione
     aperiodic_search_request_t search_request = {0};
-    scambio_leggi(&search_request_buffer, &search_request);
+    exchange_read(&search_request_buffer, &search_request);
 
     if (search_request.num != aper_state.last_search_num) {
         aper_state.last_search_num = search_request.num;
@@ -416,7 +416,7 @@ void job_aperiodic(void *arg) {
 
     // Richiesta: Salvataggio della Mappa
     aperiodic_save_request_t save_request = {0};
-    scambio_leggi(&save_request_buffer, &save_request);
+    exchange_read(&save_request_buffer, &save_request);
 
     if (save_request.num != aper_state.last_save_num) {
         aper_state.last_save_num = save_request.num;
@@ -425,7 +425,7 @@ void job_aperiodic(void *arg) {
 
     // Richiesta: Scrittura delle Zone Proibite
     aperiodic_zones_request_t zones_request = {0};
-    scambio_leggi(&zones_request_buffer, &zones_request);
+    exchange_read(&zones_request_buffer, &zones_request);
 
     if (zones_request.num != aper_state.last_zones_num) {
         aper_state.last_zones_num = zones_request.num;
@@ -434,7 +434,7 @@ void job_aperiodic(void *arg) {
 
     // Richiesta: Sostituzione o Cancellazione del file della mappa (dall'app)
     aperiodic_file_request_t file_request = {0};
-    scambio_leggi(&file_request_buffer, &file_request);
+    exchange_read(&file_request_buffer, &file_request);
 
     if (file_request.num != aper_state.last_file_num) {
         aper_state.last_file_num = file_request.num;

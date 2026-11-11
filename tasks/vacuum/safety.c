@@ -1,6 +1,6 @@
 #include "driver/driver.h"
-#include "driver/scambio.h"
-#include "gd32/sicurezza.h"
+#include "driver/exchange.h"
+#include "gd32/interlock.h"
 #include <math.h>
 
 
@@ -28,7 +28,7 @@ typedef struct {
 static safety_state_t safe_state;
 
 // canale di scambio del doppio buffer
-static scambio_t double_buffer;
+static exchange_t double_buffer;
 
 // i due buffer
 static safety_alarm_t buffer1, buffer2;
@@ -41,7 +41,7 @@ void init_safety(void) {
 
     // inizializza il doppio buffer passando i due buffer da usare
     // e la loro dimensione 
-    scambio_init(
+    exchange_init(
         &double_buffer,
         &buffer1,
         &buffer2, 
@@ -57,7 +57,7 @@ safety_alarm_t read_safety(void) {
     safety_alarm_t safety_alarm = {0};
 
     // Copia il buffer pubblicato in safety_alarm
-    scambio_leggi(&double_buffer, &safety_alarm);
+    exchange_read(&double_buffer, &safety_alarm);
 
     // ritorna safety_alarm
     return safety_alarm;
@@ -85,26 +85,26 @@ void job_safety(void *arg) {
     (void)arg;
 
     // Leggi il frame dei sensori
-    drv_sensori_t cur_frame = {0};
-    drv_sensori(&cur_frame);
+    drv_sensors_t cur_frame = {0};
+    drv_sensors(&cur_frame);
 
     // Se il frame dei sensori è lo stesso dello stato, o è 0 (driver non pronto), esci
-    if (cur_frame.numero == safe_state.last_frame_num || cur_frame.numero == 0) return;
+    if (cur_frame.number == safe_state.last_frame_num || cur_frame.number == 0) return;
 
     // Leggi le velocità attuali del robot
-    drv_stato_t cur_state = {0};
-    drv_stato(&cur_state);
+    drv_status_t cur_state = {0};
+    drv_status(&cur_state);
 
     // Ricava i dati sulle velocità di movimento e rotazione
     double expected_v = cur_state.v;     // Velocità mandata dal driver
     double expected_w = cur_state.w;    // Velocità angolare mandata dal driver
 
     // Velocità reali delle ruote misurate dal driver
-    double encoder_v = cur_frame.s.vel_sx / GD32_SCALA_V;
-    double encoder_w = cur_frame.s.vel_dx / GD32_SCALA_W;
+    double encoder_v = cur_frame.s.v_measured / GD32_SCALE_V;
+    double encoder_w = cur_frame.s.w_measured / GD32_SCALE_W;
 
     // Velocità angolare del robot misurata dall'IMU 
-    double imu_w = cur_frame.s.vel_angolare[0] * (M_PI / 18000) * YAW_SCALE;  
+    double imu_w = cur_frame.s.angular_velocity[0] * (M_PI / 18000) * YAW_SCALE;  
 
     // Inizializza a zero la maschera degli errori
     uint8_t cur_error_mask = 0;
@@ -163,8 +163,8 @@ void job_safety(void *arg) {
 
         
         // Verifica se i motori sono in sovraccarico (se una delle correnti è > della soglia max, true)
-        bool is_overload =  (cur_frame.s.correnti[0] >= THRESHOLD_MAX_CURRENT) ||
-                            (cur_frame.s.correnti[1] >= THRESHOLD_MAX_CURRENT);
+        bool is_overload =  (cur_frame.s.currents[0] >= THRESHOLD_MAX_CURRENT) ||
+                            (cur_frame.s.currents[1] >= THRESHOLD_MAX_CURRENT);
 
 
         if (is_overload) {
@@ -183,8 +183,8 @@ void job_safety(void *arg) {
 
         // Verifica se la spazzola centrale è bloccata (se gira nel verso normale e la sua corrente è > della soglia, true).
         // Il controllo si salta quando la spazzola è spenta o gira al contrario (sblocco): al contrario la corrente è alta da sola
-        bool is_brush_blocked = (cur_state.spazzola_centrale > 0) &&
-                                (cur_frame.s.correnti[3] >= THRESHOLD_BRUSH_CURRENT);
+        bool is_brush_blocked = (cur_state.main_brush > 0) &&
+                                (cur_frame.s.currents[3] >= THRESHOLD_BRUSH_CURRENT);
 
 
         if (is_brush_blocked) {
@@ -197,8 +197,8 @@ void job_safety(void *arg) {
         } else safe_state.brush_frame_counter = 0;      // se la spazzola non risulta bloccata azzera il contatore
 
         // Verifica se la spazzola centrale è bloccata anche mentre gira al contrario
-        bool is_brush_blocked_unlock = (cur_state.spazzola_centrale < 0) &&
-                                       (cur_frame.s.correnti[3] >= THRESHOLD_BRUSH_UNLOCK_CURRENT);
+        bool is_brush_blocked_unlock = (cur_state.main_brush < 0) &&
+                                       (cur_frame.s.currents[3] >= THRESHOLD_BRUSH_UNLOCK_CURRENT);
 
         if (is_brush_blocked_unlock) {
             // Se la spazzola è bloccata durante lo sblocco, aumenta il contatore dei frame consecutivi in cui risulta bloccata
@@ -330,19 +330,19 @@ void job_safety(void *arg) {
     safety_alarm_t cur_alarm = {0};
 
     // se il driver blocca il moto in avanti per un bumper premuto o un anti-caduta nel vuoto, segnala il contatto
-    if (cur_state.limiti & (SIC_LIM_BUMPER | SIC_LIM_CLIFF)) cur_error_mask |= SAFETY_ERROR_CONTACT;
+    if (cur_state.limits & (INTERLOCK_LIM_BUMPER | INTERLOCK_LIM_CLIFF)) cur_error_mask |= SAFETY_ERROR_CONTACT;
 
     // riempi l'allarme corrente con i dati appena ricavati
-    cur_alarm.frame_num = cur_frame.numero;
+    cur_alarm.frame_num = cur_frame.number;
     cur_alarm.frame_acq_t = cur_frame.t_ns;
     cur_alarm.error_mask = cur_error_mask;
     cur_alarm.max_v_forw = MIN(obstacle_front_max_v, zone_front_max_v);
     cur_alarm.max_v_backw = MIN(obstacle_back_max_v, zone_back_max_v);
 
     // pubblica il dato sul doppio buffer
-    scambio_scrivi(&double_buffer, &cur_alarm);
+    exchange_write(&double_buffer, &cur_alarm);
     
     // aggiorna il numero dell'ultimo frame analizzato
-    safe_state.last_frame_num = cur_frame.numero;
+    safe_state.last_frame_num = cur_frame.number;
 
 }  

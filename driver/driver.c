@@ -20,27 +20,27 @@
 #include <termios.h>
 #include <unistd.h>
 
-#include "../gd32/sicurezza.h"
+#include "../gd32/interlock.h"
 #include "../spia/registro.h"
-#include "scambio.h"
+#include "exchange.h"
 
-#define SCALA_V GD32_SCALA_V          /* 0x66: unità di v per m/s (gd32/gd32.h, misura del 5/10) */
-#define SCALA_W GD32_SCALA_W          /* 0x66: unità di ω per rad/s */
+#define SCALE_V GD32_SCALE_V          /* 0x66: unità di v per m/s (gd32/gd32.h, misura del 5/10) */
+#define SCALE_W GD32_SCALE_W          /* 0x66: unità di ω per rad/s */
 #define TICK_NS           RT_MS(20)
 #define HEARTBEAT_NS      RT_MS(200)
 #define KEEPALIVE_NS      RT_S(3)
-#define SENSORI_VECCHI_NS RT_MS(100)
-#define SENSORI_MUTI_NS   RT_S(1)
-#define MAX_ISCRITTI      8
-#define MAX_SORVEGLIATI   16
-#define MAX_EVENTI        64
-#define RIPOSO_CARICA_NS     RT_S(5)   /* a carica attiva da tanto si va a riposo */
-#define RIPOSO_CONTATTO_NS   RT_S(20)  /* senza carica (batteria piena): contatto stabile da tanto */
-#define SVEGLIA_LIDAR_MAX_NS RT_S(6)
-#define LED_NORMALE       DRV_LED_AZZURRO
-#define LED_BATTERIA      6
-#define LED_CARICA        4
-#define LED_GUASTO        8
+#define SENSORS_OLD_NS RT_MS(100)
+#define SENSORS_SILENT_NS   RT_S(1)
+#define MAX_SUBSCRIBERS      8
+#define MAX_WATCHED   16
+#define MAX_EVENTS        64
+#define REST_CHARGING_NS     RT_S(5)   /* a carica attiva da tanto si va a riposo */
+#define REST_CONTACT_NS   RT_S(20)  /* senza carica (batteria piena): contatto stabile da tanto */
+#define WAKE_LIDAR_MAX_NS RT_S(6)
+#define LED_NORMAL       DRV_LED_BLUE
+#define LED_BATTERY      6
+#define LED_CHARGING        4
+#define LED_FAULT        8
 
 extern char **environ;
 
@@ -49,287 +49,287 @@ extern char **environ;
 /* Comandi dei task: campi atomici, letti dal driver a ogni risveglio. */
 static struct {
 	_Atomic int64_t vw;                    /* v (tick/s, 32 bit alti) e omega (tick/s, 32 bit bassi) */
-	_Atomic int spazzola_lat, spazzola_cen, aspirazione, led, lidar_acceso, lidar_cgiri, uscita_base;
-	_Atomic int azzera_guasto;
-	_Atomic int incastro;                  /* incastro in avanti, dalla sicurezza (drv_incastro) */
-	_Atomic int aggancia;                  /* 1 = parti, -1 = annulla, 0 = niente: lo azzera il driver (drv_aggancia) */
-	_Atomic(const char *) suono;
-	_Atomic int task_fault;                /* drv_task_fault_t asked by a task (drv_segnala_guasto), DRV_FAULT_NONE = none */
+	_Atomic int side_brush_cmd, main_brush_cmd, suction, led, lidar_on, lidar_crev_s, leaving_base;
+	_Atomic int clear_fault;
+	_Atomic int stuck;                  /* incastro in avanti, dalla sicurezza (drv_stuck) */
+	_Atomic int dock;                  /* 1 = parti, -1 = annulla, 0 = niente: lo azzera il driver (drv_dock) */
+	_Atomic(const char *) sound;
+	_Atomic int task_fault;                /* drv_task_fault_t asked by a task (drv_report_fault), DRV_FAULT_NONE = none */
 } cmd;
 
-/* Dati pubblicati: doppio buffer senza mutex (scambio.h). */
-static scambio_t sc_sensori, sc_giro, sc_stato, sc_contatti;
-static drv_contatti_t buf_contatti[2];
+/* Dati pubblicati: doppio buffer senza mutex (exchange.h). */
+static exchange_t sensors_exchange, scan_exchange, status_exchange, contacts_exchange;
+static drv_contacts_t contacts_buffers[2];
 /* Nell'altro verso: la posizione che il moto dà al driver (un solo scrittore, il task del moto). */
-static scambio_t sc_posa;
-static drv_posa_t buf_posa[2];
-static _Atomic int posa_pronta;               /* sc_posa inizializzato: drv_posa può scrivere */
-static drv_sensori_t buf_sensori[2];
-static lidar_giro_t buf_giro[2];
-static drv_stato_t buf_stato[2];
+static exchange_t pose_exchange;
+static drv_pose_t pose_buffers[2];
+static _Atomic int pose_ready;               /* pose_exchange inizializzato: drv_pose può scrivere */
+static drv_sensors_t sensors_buffers[2];
+static lidar_scan_t scan_buffers[2];
+static drv_status_t status_buffers[2];
 
-/* Task iscritti alle sveglie e sorvegliati: gli slot si riempiono una volta e si svuotano con drv_dimentica. */
-static _Atomic(rt_task_t *) iscritti[MAX_ISCRITTI];
+/* Task iscritti alle sveglie e sorvegliati: gli slot si riempiono una volta e si svuotano con drv_forget. */
+static _Atomic(rt_task_t *) subscribers[MAX_SUBSCRIBERS];
 static struct {
 	_Atomic(rt_task_t *) t;
-	int critico;
-	int64_t soglia_ns;
-	int segnalato;                          /* solo il driver lo usa */
-	uint64_t mancate_viste;                 /* solo il driver: scadenze mancate già trattate (azzerando il guasto) */
-} sorvegliati[MAX_SORVEGLIATI];
-static _Atomic uint64_t giri_driver;       /* risvegli completati: drv_dimentica aspetta che avanzi */
+	int critical;
+	int64_t threshold_ns;
+	int reported_once;                          /* solo il driver lo usa */
+	uint64_t seen_misses;                 /* solo il driver: scadenze mancate già trattate (azzerando il guasto) */
+} watched[MAX_WATCHED];
+static _Atomic uint64_t driver_rounds;       /* risvegli completati: drv_forget aspetta che avanzi */
 
 /* Eventi (testo) dal driver al thread di servizio, che li stampa: il driver non fa mai I/O lento. */
-static char eventi[MAX_EVENTI][160];
-static _Atomic uint32_t ev_testa, ev_coda;
+static char event_queue[MAX_EVENTS][160];
+static _Atomic uint32_t event_head, event_tail;
 
 /* ------------------------------------------------------------------------------------------ il driver --- */
 
 static struct {
 	drv_config_t cfg;
-	int fd_gd32, fd_lidar, fd_sveglia;
-	pthread_t thread, ricezione, servizio;
+	int fd_gd32, fd_lidar, fd_wakeup;
+	pthread_t thread, receiver, service;
 	pthread_mutex_t mx;                   /* stato interno, fra il thread del tempo e quello di ricezione */
 	_Atomic int stop;
-	int avviato;
-	int senza_rt;
-	int gd32_chiusa, lidar_chiusa;
+	int started;
+	int without_rt;
+	int gd32_closed, lidar_closed;
 	int64_t t0;
 
 	gd32_deframer_t dg;
 	lidar_deframer_t dl;
-	lidar_assemblatore_t ass;
-	lidar_regolatore_t reg;
-	lidar_giro_t giro;                    /* appoggio per il giro appena completato (grande: non sullo stack) */
-	batteria_t bat;
-	sicurezza_t sic;                      /* solo banco di prova */
-	contatti_t contatti;                  /* scatti di anti-caduta e bumper (contatti.h) */
-	aggancio_t agg;                       /* messa in carica in retromarcia (aggancio.h) */
-	int sulla_base_prec, in_carica_prec;
-	int tasto_max_ms[2];                  /* durata della pressione in corso (0 = tasto rilasciato): accensione, casa */
-	int tasti_in_attesa[2];               /* pressioni brevi viste dalla ricezione, da contare al prossimo tick */
-	uint32_t pressioni[2];                /* pressioni brevi contate (pubblicate in drv_stato_t) */
-	int64_t t_fuori_base;                 /* da quando il robot è fuori dalla base (0 = è sulla base) */
-	int base_rimessa;                     /* il robot è tornato sulla base dopo almeno 1 s fuori: da guardare al prossimo tick */
-	int64_t t_cambio_base, t_cambio_carica;
-	int riposo;                           /* 0 sveglio, 1 motori spenti, 2 anche sensori e lidar spenti */
-	int sollevato;                        /* resta attivo finché non rivede il pavimento (aggiorna_sollevamento) */
-	uint64_t vuoto_40;                    /* ultimi 40 frame: 1 = tutti e 4 gli anti-caduta sul vuoto */
-	int n_incrociati, n_anteriori, n_inclinato, n_pavimento;   /* frame di fila con la condizione vera */
-	int64_t t_riposo, t_sveglia, t_sensori_accesi;
-	int agg_fase_prec, agg_esito_prec;    /* per scrivere un evento quando cambiano */
+	lidar_assembler_t assembler;
+	lidar_regulator_t regulator;
+	lidar_scan_t scan;                    /* appoggio per il giro appena completato (grande: non sullo stack) */
+	battery_t bat;
+	interlock_t interlock;                      /* solo banco di prova */
+	contacts_t contacts;                  /* scatti di anti-caduta e bumper (contacts.h) */
+	docking_t dock_state;                       /* messa in carica in retromarcia (docking.h) */
+	int prev_on_base, prev_charging;
+	int button_max_ms[2];                  /* durata della pressione in corso (0 = tasto rilasciato): accensione, casa */
+	int pending_presses[2];               /* pressioni brevi viste dalla ricezione, da contare al prossimo tick */
+	uint32_t presses[2];                /* pressioni brevi contate (pubblicate in drv_status_t) */
+	int64_t t_off_base;                 /* da quando il robot è fuori dalla base (0 = è sulla base) */
+	int back_on_base;                     /* il robot è tornato sulla base dopo almeno 1 s fuori: da guardare al prossimo tick */
+	int64_t t_base_change, t_charging_change;
+	int rest_level;                           /* 0 sveglio, 1 motori spenti, 2 anche sensori e lidar spenti */
+	int lifted;                        /* resta attivo finché non rivede il pavimento (update_lifting) */
+	uint64_t void_40;                    /* ultimi 40 frame: 1 = tutti e 4 gli anti-caduta sul vuoto */
+	int n_crossed, n_front, n_tilted, n_floor;   /* frame di fila con la condizione vera */
+	int64_t t_rest, t_wake, t_sensors_on;
+	int prev_dock_phase, prev_dock_result;    /* per scrivere un evento quando cambiano */
 
-	int fase;
-	char guasto[96];
+	int phase;
+	char fault[96];
 	int task_fault;                       /* drv_task_fault_t of the current fault, if a task asked for it */
-	int ha_sensori;
-	gd32_sensori_t s;
-	int64_t t_sensori;
-	uint32_t n_sensori;
-	uint64_t sensori_secondo[2];          /* conteggio per i frame al secondo */
-	int64_t t_secondo;
-	char versione[33];
+	int has_sensors;
+	gd32_sensors_t s;
+	int64_t t_sensors;
+	uint32_t n_sensors;
+	uint64_t sensors_per_second[2];          /* conteggio per i frame al secondo */
+	int64_t t_second;
+	char version[33];
 
 	/* sequenza di avvio */
-	int i_avvio;
-	int64_t t_avvio;
+	int startup_step;
+	int64_t t_startup;
 
 	/* ultimo stato mandato al GD32 */
-	int32_t v_inv, w_inv;
-	int limiti;
-	int lat_inv, cen_inv, asp_inv, led_inv, lidar_inv, pot_inv, sensori_inv;
-	int asp_limiti;              /* perché l'aspirazione chiesta non va (drv_stato_t.aspirazione_limiti) */
-	int64_t t_rinfresca, t_potenza;
+	int32_t v_sent, w_sent;
+	int limits;
+	int side_sent, main_sent, suction_sent, led_sent, lidar_sent, power_sent, sensors_sent;
+	int suction_limits;              /* perché l'aspirazione chiesta non va (drv_status_t.suction_limits) */
+	int64_t t_refresh, t_power;
 	int lidar_ok;
-	int64_t t_lidar_acceso;
-	int bat_prec;
+	int64_t t_lidar_on;
+	int prev_battery;
 
 	/* tempi */
-	int64_t prossimo_tick, prossimo_hb, prossimo_ka;
-	int64_t tick_ritardo_max, lavoro_max, intervallo_max, intervallo_min;
-	uint64_t risvegli, keepalive, heartbeat, hb_gd32, altri, errori_scrittura;
+	int64_t next_tick, next_hb, next_ka;
+	int64_t tick_delay_max, work_max, interval_max, interval_min;
+	uint64_t wakeups_done, keepalives, heartbeats, gd32_hb, others, write_errors;
 } d;
 
-static int64_t adesso(void) { return rt_adesso(); }
+static int64_t now(void) { return rt_now(); }
 
-static void evento(const char *fmt, ...)
+static void event(const char *fmt, ...)
 {
-	uint32_t t = atomic_load(&ev_testa);
-	if (t - atomic_load(&ev_coda) >= MAX_EVENTI)
+	uint32_t t = atomic_load(&event_head);
+	if (t - atomic_load(&event_tail) >= MAX_EVENTS)
 		return;                                    /* coda piena: l'evento si perde, il driver non aspetta */
-	char *e = eventi[t % MAX_EVENTI];
-	int k = snprintf(e, sizeof eventi[0], "%8.3f ", (double)(adesso() - d.t0) / RT_NS_PER_S);
+	char *e = event_queue[t % MAX_EVENTS];
+	int k = snprintf(e, sizeof event_queue[0], "%8.3f ", (double)(now() - d.t0) / RT_NS_PER_S);
 	va_list ap;
 	va_start(ap, fmt);
-	vsnprintf(e + k, sizeof eventi[0] - (size_t)k, fmt, ap);
+	vsnprintf(e + k, sizeof event_queue[0] - (size_t)k, fmt, ap);
 	va_end(ap);
-	atomic_store(&ev_testa, t + 1);
+	atomic_store(&event_head, t + 1);
 }
 
 /* ------------------------------------------------------------------------------------------ registrazione --- */
 
-/* Registrazione dei byte grezzi (drv_config_t.registra), nel formato della spia, così le prove fatte con il driver
+/* Registrazione dei byte grezzi (drv_config_t.record), nel formato della spia, così le prove fatte con il driver
  * servono anche a tools/taratura e a tools/valida-sim.py. I thread del driver non scrivono MAI sul file: mettono i
  * record in un anello in RAM (sempre con d.mx preso, oppure dopo che i due thread sono finiti: un solo produttore
  * alla volta) e il thread di servizio, non real-time, li scrive. Se l'anello è pieno il record si perde e si conta. */
-#define ANELLO (1u << 20)                /* 1 MB: ~75 s di traffico (GD32 + lidar ~14 KB/s) */
-#define CANALE_GD32 0
-#define CANALE_LIDAR 1
+#define RING_SIZE (1u << 20)                /* 1 MB: ~75 s di traffico (GD32 + lidar ~14 KB/s) */
+#define CHANNEL_GD32 0
+#define CHANNEL_LIDAR 1
 static struct {
 	FILE *f;
 	uint8_t *buf;
-	_Atomic uint32_t testa, coda;        /* byte messi / tolti, modulo 2^32 */
-	_Atomic uint64_t persi;
-} rg;
+	_Atomic uint32_t testa, tail;        /* byte messi / tolti, modulo 2^32 */
+	_Atomic uint64_t lost;
+} rec;
 
-static void anello_copia_in(uint32_t pos, const void *src, size_t n)
+static void ring_copy_in(uint32_t pos, const void *src, size_t n)
 {
 	const uint8_t *s = src;
 	for (size_t i = 0; i < n; i++)
-		rg.buf[(pos + i) & (ANELLO - 1)] = s[i];
+		rec.buf[(pos + i) & (RING_SIZE - 1)] = s[i];
 }
 
-static void anello_copia_da(uint32_t pos, void *dst, size_t n)
+static void ring_copy_out(uint32_t pos, void *dst, size_t n)
 {
 	uint8_t *o = dst;
 	for (size_t i = 0; i < n; i++)
-		o[i] = rg.buf[(pos + i) & (ANELLO - 1)];
+		o[i] = rec.buf[(pos + i) & (RING_SIZE - 1)];
 }
 
-static void registra(uint8_t canale, uint8_t direzione, const void *dati, size_t n, int64_t t)
+static void record(uint8_t canale, uint8_t direction, const void *data, size_t n, int64_t t)
 {
-	if (!rg.f || n == 0 || n > 4096)
+	if (!rec.f || n == 0 || n > 4096)
 		return;
-	uint32_t testa = atomic_load_explicit(&rg.testa, memory_order_relaxed);
-	uint32_t usato = testa - atomic_load_explicit(&rg.coda, memory_order_acquire);
-	if (12 + n > ANELLO - usato) {
-		atomic_fetch_add(&rg.persi, 1);
+	uint32_t testa = atomic_load_explicit(&rec.testa, memory_order_relaxed);
+	uint32_t used = testa - atomic_load_explicit(&rec.tail, memory_order_acquire);
+	if (12 + n > RING_SIZE - used) {
+		atomic_fetch_add(&rec.lost, 1);
 		return;
 	}
 	uint8_t h[12];
 	uint16_t nn = (uint16_t)n;
 	memcpy(h, &t, 8);
 	h[8] = canale;
-	h[9] = direzione;
+	h[9] = direction;
 	memcpy(h + 10, &nn, 2);
-	anello_copia_in(testa, h, 12);
-	anello_copia_in(testa + 12, dati, n);
-	atomic_store_explicit(&rg.testa, testa + 12 + (uint32_t)n, memory_order_release);
+	ring_copy_in(testa, h, 12);
+	ring_copy_in(testa + 12, data, n);
+	atomic_store_explicit(&rec.testa, testa + 12 + (uint32_t)n, memory_order_release);
 }
 
 /* Dal thread di servizio: scrive sul file tutti i record nell'anello. */
-static void registra_svuota(void)
+static void record_flush(void)
 {
-	static uint8_t dati[4096];
-	if (!rg.f)
+	static uint8_t data[4096];
+	if (!rec.f)
 		return;
-	uint32_t coda = atomic_load_explicit(&rg.coda, memory_order_relaxed);
-	uint32_t testa = atomic_load_explicit(&rg.testa, memory_order_acquire);
-	while (coda != testa) {
+	uint32_t tail = atomic_load_explicit(&rec.tail, memory_order_relaxed);
+	uint32_t testa = atomic_load_explicit(&rec.testa, memory_order_acquire);
+	while (tail != testa) {
 		uint8_t h[12];
 		int64_t t;
 		uint16_t n;
-		anello_copia_da(coda, h, 12);
+		ring_copy_out(tail, h, 12);
 		memcpy(&t, h, 8);
 		memcpy(&n, h + 10, 2);
-		anello_copia_da(coda + 12, dati, n);
-		reg_scrivi_record(rg.f, t, h[8], h[9], dati, n);
-		coda += 12 + n;
-		atomic_store_explicit(&rg.coda, coda, memory_order_release);
+		ring_copy_out(tail + 12, data, n);
+		reg_scrivi_record(rec.f, t, h[8], h[9], data, n);
+		tail += 12 + n;
+		atomic_store_explicit(&rec.tail, tail, memory_order_release);
 	}
 }
 
-static int registra_apri(const drv_config_t *c)
+static int record_open(const drv_config_t *c)
 {
-	memset(&rg, 0, sizeof rg);
-	if (!c->registra)
+	memset(&rec, 0, sizeof rec);
+	if (!c->record)
 		return 0;
-	if (!(rg.buf = calloc(1, ANELLO)) || !(rg.f = fopen(c->registra, "wb"))) {
-		free(rg.buf);
-		rg.buf = NULL;
+	if (!(rec.buf = calloc(1, RING_SIZE)) || !(rec.f = fopen(c->record, "wb"))) {
+		free(rec.buf);
+		rec.buf = NULL;
 		return -1;
 	}
 	reg_intestazione_t h;
 	memset(&h, 0, sizeof h);
 	h.n_canali = c->dev_lidar ? 2 : 1;
-	h.canali[0].id = CANALE_GD32;
+	h.canali[0].id = CHANNEL_GD32;
 	h.canali[0].protocollo = REG_PROTO_GD32;
-	snprintf(h.canali[0].nome, sizeof h.canali[0].nome, "gd32");
+	snprintf(h.canali[0].name, sizeof h.canali[0].name, "gd32");
 	snprintf(h.canali[0].dispositivo, sizeof h.canali[0].dispositivo, "%s", c->dev_gd32);
 	if (c->dev_lidar) {
-		h.canali[1].id = CANALE_LIDAR;
+		h.canali[1].id = CHANNEL_LIDAR;
 		h.canali[1].protocollo = REG_PROTO_LIDAR;
-		snprintf(h.canali[1].nome, sizeof h.canali[1].nome, "lidar");
+		snprintf(h.canali[1].name, sizeof h.canali[1].name, "lidar");
 		snprintf(h.canali[1].dispositivo, sizeof h.canali[1].dispositivo, "%s", c->dev_lidar);
 	}
-	return reg_scrivi_intestazione(rg.f, &h);
+	return reg_scrivi_intestazione(rec.f, &h);
 }
 
-static void registra_chiudi(void)
+static void record_close(void)
 {
-	if (!rg.f)
+	if (!rec.f)
 		return;
-	registra_svuota();
-	fclose(rg.f);
-	rg.f = NULL;
-	free(rg.buf);
-	rg.buf = NULL;
+	record_flush();
+	fclose(rec.f);
+	rec.f = NULL;
+	free(rec.buf);
+	rec.buf = NULL;
 }
 
 /* -------------------------------------------------------------------------------------------- seriale --- */
 
-static void invia(uint8_t cmd_gd32, const void *dati, size_t n)
+static void send(uint8_t cmd_gd32, const void *data, size_t n)
 {
 	uint8_t fr[GD32_MAX_FRAME];
-	size_t k = gd32_componi(cmd_gd32, dati, n, fr, sizeof fr);
+	size_t k = gd32_build_frame(cmd_gd32, data, n, fr, sizeof fr);
 	if (k && write(d.fd_gd32, fr, k) != (ssize_t)k)
-		d.errori_scrittura++;
-	registra(CANALE_GD32, REG_DAL_SOC, fr, k, adesso());
+		d.write_errors++;
+	record(CHANNEL_GD32, REG_DAL_SOC, fr, k, now());
 }
 
-static void invia1(uint8_t c, uint8_t v) { invia(c, &v, 1); }
+static void send_u8(uint8_t c, uint8_t v) { send(c, &v, 1); }
 
-static void invia_i32(uint8_t c, int32_t v)
+static void send_i32(uint8_t c, int32_t v)
 {
 	uint8_t b[4] = { (uint8_t)v, (uint8_t)(v >> 8), (uint8_t)(v >> 16), (uint8_t)(v >> 24) };
-	invia(c, b, 4);
+	send(c, b, 4);
 }
 
-static void invia_velocita(int32_t v, int32_t w)
+static void send_velocity(int32_t v, int32_t w)
 {
 	uint8_t b[8];
 	for (int i = 0; i < 4; i++) {
 		b[i] = (uint8_t)((uint32_t)v >> (8 * i));
 		b[4 + i] = (uint8_t)((uint32_t)w >> (8 * i));
 	}
-	invia(GD32_VELOCITA, b, 8);
-	d.v_inv = v;
-	d.w_inv = w;
+	send(GD32_VELOCITY, b, 8);
+	d.v_sent = v;
+	d.w_sent = w;
 }
 
-static void arresto(void)
+static void full_stop(void)
 {
 	uint8_t buf[256];
-	size_t k = sic_frame_arresto(buf, sizeof buf);
+	size_t k = interlock_stop_frames(buf, sizeof buf);
 	if (k && write(d.fd_gd32, buf, k) != (ssize_t)k)
-		d.errori_scrittura++;
-	registra(CANALE_GD32, REG_DAL_SOC, buf, k, adesso());
-	d.v_inv = d.w_inv = 0;
-	d.lat_inv = d.cen_inv = d.asp_inv = 0;
+		d.write_errors++;
+	record(CHANNEL_GD32, REG_DAL_SOC, buf, k, now());
+	d.v_sent = d.w_sent = 0;
+	d.side_sent = d.main_sent = d.suction_sent = 0;
 }
 
 /* Un altro processo ha già aperto la seriale? (es. AuxCtrl dello stack originale, o il custode) */
-static int occupato(const char *disp)
+static int device_busy(const char *device)
 {
-	char vero[PATH_MAX];
-	if (!realpath(disp, vero) || strncmp(vero, "/dev/tty", 8))
+	char real_path[PATH_MAX];
+	if (!realpath(device, real_path) || strncmp(real_path, "/dev/tty", 8))
 		return 0;                    /* le pseudo-seriali del simulatore (/dev/pts) le tiene aperte il simulatore */
 	DIR *proc = opendir("/proc");
 	if (!proc)
 		return 0;
 	struct dirent *p;
-	int trovato = 0;
-	while (!trovato && (p = readdir(proc))) {
+	int found_one = 0;
+	while (!found_one && (p = readdir(proc))) {
 		if (p->d_name[0] < '1' || p->d_name[0] > '9' || atoi(p->d_name) == getpid())
 			continue;
 		char dir[300];
@@ -342,9 +342,9 @@ static int occupato(const char *disp)
 			ssize_t k = readlink(link, dest, sizeof dest - 1);
 			if (k > 0) {
 				dest[k] = 0;
-				if (!strcmp(dest, vero)) {
-					fprintf(stderr, "driver: %s è già aperto dal processo %s (fermalo prima)\n", disp, p->d_name);
-					trovato = 1;
+				if (!strcmp(dest, real_path)) {
+					fprintf(stderr, "driver: %s è già aperto dal processo %s (fermalo prima)\n", device, p->d_name);
+					found_one = 1;
 					break;
 				}
 			}
@@ -353,12 +353,12 @@ static int occupato(const char *disp)
 			closedir(fds);
 	}
 	closedir(proc);
-	return trovato;
+	return found_one;
 }
 
-static int apri_seriale(const char *disp)
+static int open_serial(const char *device)
 {
-	int fd = open(disp, O_RDWR | O_NOCTTY | O_NONBLOCK);
+	int fd = open(device, O_RDWR | O_NOCTTY | O_NONBLOCK);
 	if (fd < 0)
 		return -1;
 	struct termios t;
@@ -376,48 +376,48 @@ static int apri_seriale(const char *disp)
 
 /* -------------------------------------------------------------------------------------- stato e guasto --- */
 
-static void entra_in_guasto(const char *motivo)
+static void enter_fault(const char *reason)
 {
-	if (d.fase == DRV_GUASTO)
+	if (d.phase == DRV_FAULT)
 		return;
-	d.fase = DRV_GUASTO;
-	snprintf(d.guasto, sizeof d.guasto, "%s", motivo);
-	arresto();
-	invia1(GD32_LED_TASTO, LED_GUASTO);
-	d.led_inv = LED_GUASTO;
-	atomic_store(&cmd.suono, "sound_erro_harefault");
-	evento("GUASTO: %s. Motori fermi, LED 8", motivo);
+	d.phase = DRV_FAULT;
+	snprintf(d.fault, sizeof d.fault, "%s", reason);
+	full_stop();
+	send_u8(GD32_BUTTON_LED, LED_FAULT);
+	d.led_sent = LED_FAULT;
+	atomic_store(&cmd.sound, "sound_erro_harefault");
+	event("GUASTO: %s. Motori fermi, LED 8", reason);
 }
 
-static void prova_ad_azzerare_guasto(int64_t t)
+static void try_clear_fault(int64_t t)
 {
 	/* la richiesta si consuma sempre: una richiesta fatta quando non c'era un guasto non deve azzerare il prossimo */
-	int richiesta = atomic_exchange(&cmd.azzera_guasto, 0);
-	if (d.fase != DRV_GUASTO || !richiesta)
+	int request = atomic_exchange(&cmd.clear_fault, 0);
+	if (d.phase != DRV_FAULT || !request)
 		return;
-	if (!d.ha_sensori || t - d.t_sensori > SENSORI_VECCHI_NS || (d.cfg.banco && d.sic.scattato)) {
-		evento("guasto NON azzerato: la causa c'è ancora");
+	if (!d.has_sensors || t - d.t_sensors > SENSORS_OLD_NS || (d.cfg.bench && d.interlock.tripped)) {
+		event("guasto NON azzerato: la causa c'è ancora");
 		return;
 	}
-	for (int i = 0; i < MAX_SORVEGLIATI; i++) {
-		rt_task_t *k = atomic_load(&sorvegliati[i].t);
-		if (k && sorvegliati[i].critico &&
-		    (rt_task_bloccato(k, t, sorvegliati[i].soglia_ns) || atomic_load(&k->mancate_di_fila) >= 3)) {
-			evento("guasto NON azzerato: il task %s è ancora bloccato", k->cfg.nome ? k->cfg.nome : "?");
+	for (int i = 0; i < MAX_WATCHED; i++) {
+		rt_task_t *k = atomic_load(&watched[i].t);
+		if (k && watched[i].critical &&
+		    (rt_task_is_stuck(k, t, watched[i].threshold_ns) || atomic_load(&k->consecutive_misses) >= 3)) {
+			event("guasto NON azzerato: il task %s è ancora bloccato", k->cfg.name ? k->cfg.name : "?");
 			return;
 		}
 	}
-	d.fase = DRV_PRONTO;
-	d.guasto[0] = 0;
+	d.phase = DRV_READY;
+	d.fault[0] = 0;
 	d.task_fault = DRV_FAULT_NONE;
-	d.led_inv = -1;                       /* rimanda il LED giusto al prossimo ciclo */
-	for (int i = 0; i < MAX_SORVEGLIATI; i++) {
-		rt_task_t *k = atomic_load(&sorvegliati[i].t);
-		sorvegliati[i].segnalato = 0;
+	d.led_sent = -1;                       /* rimanda il LED giusto al prossimo ciclo */
+	for (int i = 0; i < MAX_WATCHED; i++) {
+		rt_task_t *k = atomic_load(&watched[i].t);
+		watched[i].reported_once = 0;
 		if (k)
-			sorvegliati[i].mancate_viste = atomic_load(&k->mancate_totali);
+			watched[i].seen_misses = atomic_load(&k->total_misses);
 	}
-	evento("guasto azzerato");
+	event("guasto azzerato");
 }
 
 /* Every value of drv_task_fault_t needs its own case: -Wswitch-enum warns about an enum value without a case even when
@@ -444,350 +444,350 @@ const char *drv_task_fault_text(drv_task_fault_t reason)
 }
 #pragma GCC diagnostic pop
 
-/* Fault asked by a task (drv_segnala_guasto). Checked after the reset request: if in the same tick one task asks for
+/* Fault asked by a task (drv_report_fault). Checked after the reset request: if in the same tick one task asks for
    the fault and another one for the reset, the fault wins. */
-static void guasto_chiesto_da_un_task(void)
+static void task_fault_request(void)
 {
 	int reason = atomic_exchange(&cmd.task_fault, DRV_FAULT_NONE);
-	if (reason == DRV_FAULT_NONE || d.fase == DRV_GUASTO)
+	if (reason == DRV_FAULT_NONE || d.phase == DRV_FAULT)
 		return;
-	char text[sizeof d.guasto];
+	char text[sizeof d.fault];
 	snprintf(text, sizeof text, "task fault %d: %s", reason, drv_task_fault_text((drv_task_fault_t)reason));
-	entra_in_guasto(text);
+	enter_fault(text);
 	d.task_fault = reason;
 }
 
-static void pubblica_stato(int64_t t)
+static void publish_status(int64_t t)
 {
-	drv_stato_t s;
+	drv_status_t s;
 	memset(&s, 0, sizeof s);
 	s.t_ns = t;
-	s.fase = d.fase;
-	memcpy(s.guasto, d.guasto, sizeof s.guasto);
+	s.phase = d.phase;
+	memcpy(s.fault, d.fault, sizeof s.fault);
 	s.task_fault = d.task_fault;
-	memcpy(s.versione_gd32, d.versione, sizeof s.versione_gd32);
-	s.volt = batteria_volt(&d.bat);
-	s.percentuale = batteria_percentuale(&d.bat);
-	s.batteria = d.bat.livello;
-	if (d.cfg.prova_rientro_s > 0 && (double)(t - d.t0) / RT_NS_PER_S >= d.cfg.prova_rientro_s) {
-		static int detto;
-		if (!detto++)
-			evento("PROVA: da adesso i task leggono una batteria bassa (quella vera non cambia)");
-		s.batteria = BAT_BASSA;
-		if (s.percentuale > 50)
-			s.percentuale = 50;          /* sotto la soglia per ripartire: una volta agganciato resta sulla base */
+	memcpy(s.gd32_version, d.version, sizeof s.gd32_version);
+	s.volts = battery_volts(&d.bat);
+	s.percentage = battery_percentage(&d.bat);
+	s.battery = d.bat.level;
+	if (d.cfg.test_return_s > 0 && (double)(t - d.t0) / RT_NS_PER_S >= d.cfg.test_return_s) {
+		static int told;
+		if (!told++)
+			event("PROVA: da adesso i task leggono una batteria bassa (quella vera non cambia)");
+		s.battery = BAT_LOW;
+		if (s.percentage > 50)
+			s.percentage = 50;          /* sotto la soglia per ripartire: una volta agganciato resta sulla base */
 	}
 	/* il bit "in carica" del GD32 vuol dire carica finita: la carica passa ogni volta che i contatti toccano */
-	s.in_carica = d.s.sulla_base;
-	s.carica_completa = d.s.in_carica;
-	s.sollevato = d.sollevato;
-	s.pressioni_accensione = d.pressioni[0];
-	if (d.cfg.prova_premi_s > 0 && (double)(t - d.t0) / RT_NS_PER_S >= d.cfg.prova_premi_s) {
-		static int detto;
-		if (!detto++)
-			evento("PROVA: da adesso i task vedono una pressione del tasto di accensione in più");
-		s.pressioni_accensione++;
+	s.charging = d.s.on_base;
+	s.charge_complete = d.s.charging;
+	s.lifted = d.lifted;
+	s.power_presses = d.presses[0];
+	if (d.cfg.test_press_s > 0 && (double)(t - d.t0) / RT_NS_PER_S >= d.cfg.test_press_s) {
+		static int told;
+		if (!told++)
+			event("PROVA: da adesso i task vedono una pressione del tasto di accensione in più");
+		s.power_presses++;
 	}
-	s.pressioni_casa = d.pressioni[1];
-	s.sulla_base = d.s.sulla_base;
-	s.temperatura_c = d.s.temperatura_c;
-	s.v = d.v_inv / SCALA_V;
-	s.w = d.w_inv / SCALA_W;
-	s.limiti = d.limiti;
-	s.spazzola_laterale = d.lat_inv;
-	s.spazzola_centrale = d.cen_inv;
-	s.aspirazione_giri = d.asp_inv;
-	s.aspirazione_limiti = d.asp_limiti;
-	s.aggancio = d.agg.esito;
-	s.aggancio_fase = (int)d.agg.fase;
-	s.aggancio_tentativo = d.agg.tentativo;
-	s.led = d.led_inv;
-	s.lidar_acceso = d.lidar_inv > 0;
-	s.lidar_potenza = d.lidar_inv > 0 ? d.pot_inv : 0;
+	s.home_presses = d.presses[1];
+	s.on_base = d.s.on_base;
+	s.temperature_c = d.s.temperature_c;
+	s.v = d.v_sent / SCALE_V;
+	s.w = d.w_sent / SCALE_W;
+	s.limits = d.limits;
+	s.side_brush = d.side_sent;
+	s.main_brush = d.main_sent;
+	s.suction_rpm = d.suction_sent;
+	s.suction_limits = d.suction_limits;
+	s.docking = d.dock_state.result;
+	s.docking_phase = (int)d.dock_state.phase;
+	s.docking_attempt = d.dock_state.attempt;
+	s.led = d.led_sent;
+	s.lidar_on = d.lidar_sent > 0;
+	s.lidar_power = d.lidar_sent > 0 ? d.power_sent : 0;
 	s.lidar_ok = d.lidar_ok;
-	s.lidar_giri_s = d.ass.giri_s;
-	s.lidar_giri = d.ass.giri;
-	s.frame_sensori = d.n_sensori;
-	s.frame_errati = d.dg.checksum_errati + d.dg.len_errati;
-	s.byte_scartati = d.dg.byte_scartati;
-	s.frame_gd32_altri = d.altri;
-	s.heartbeat_gd32 = d.hb_gd32;
-	s.keepalive = d.keepalive;
-	s.heartbeat = d.heartbeat;
-	s.errori_scrittura = d.errori_scrittura;
-	s.sensori_hz = (double)d.sensori_secondo[1];
-	s.eta_sensori_ns = d.ha_sensori ? t - d.t_sensori : -1;
-	s.tick_ritardo_max_ns = d.tick_ritardo_max;
-	s.intervallo_sensori_max_ns = d.intervallo_max;
-	s.intervallo_sensori_min_ns = d.intervallo_min;
-	s.lavoro_max_ns = d.lavoro_max;
-	s.risvegli = d.risvegli;
-	s.senza_rt = d.senza_rt;
-	scambio_scrivi(&sc_stato, &s);
+	s.lidar_rev_s = d.assembler.rev_s;
+	s.lidar_revolutions = d.assembler.revolutions;
+	s.sensor_frames = d.n_sensors;
+	s.bad_frames = d.dg.bad_checksums + d.dg.bad_lengths;
+	s.discarded_bytes = d.dg.discarded_bytes;
+	s.other_gd32_frames = d.others;
+	s.gd32_heartbeats = d.gd32_hb;
+	s.keepalives = d.keepalives;
+	s.heartbeats = d.heartbeats;
+	s.write_errors = d.write_errors;
+	s.sensors_hz = (double)d.sensors_per_second[1];
+	s.sensors_age_ns = d.has_sensors ? t - d.t_sensors : -1;
+	s.tick_delay_max_ns = d.tick_delay_max;
+	s.sensors_interval_max_ns = d.interval_max;
+	s.sensors_interval_min_ns = d.interval_min;
+	s.work_max_ns = d.work_max;
+	s.wakeups_done = d.wakeups_done;
+	s.without_rt = d.without_rt;
+	exchange_write(&status_exchange, &s);
 }
 
 /* ------------------------------------------------------------------------------------ limiti e comandi --- */
 
 /* Le condizioni per qualunque motore (ruote, spazzole, aspirazione), prima dei limiti specifici delle ruote. */
-static int limiti_generali(int64_t t)
+static int general_limits(int64_t t)
 {
-	if (!d.cfg.motori)
-		return DRV_LIM_DISABILITATI;
-	if (d.fase == DRV_AVVIO)
-		return DRV_LIM_NON_PRONTO;
-	if (d.fase != DRV_PRONTO)
-		return DRV_LIM_GUASTO;
-	if (!d.ha_sensori || t - d.t_sensori > SENSORI_VECCHI_NS)
-		return DRV_LIM_SENSORI_VECCHI;
-	if (d.bat.livello == BAT_CRITICA && !d.s.sulla_base)
-		return DRV_LIM_BATTERIA;
+	if (!d.cfg.motors)
+		return DRV_LIM_DISABLED;
+	if (d.phase == DRV_STARTING)
+		return DRV_LIM_NOT_READY;
+	if (d.phase != DRV_READY)
+		return DRV_LIM_FAULT;
+	if (!d.has_sensors || t - d.t_sensors > SENSORS_OLD_NS)
+		return DRV_LIM_OLD_SENSORS;
+	if (d.bat.level == BAT_CRITICAL && !d.s.on_base)
+		return DRV_LIM_BATTERY;
 	return 0;
 }
 
 /* Comando di velocità dei task -> quello che si può davvero mandare. */
-static int limita_velocita(int64_t t, int32_t *v, int32_t *w)
+static int limit_velocity(int64_t t, int32_t *v, int32_t *w)
 {
 	int64_t vw = atomic_load(&cmd.vw);
 	*v = (int32_t)(vw >> 32);
 	*w = (int32_t)(uint32_t)vw;
 	/* durante l'aggancio comanda lui, non i task; i limiti qui sotto restano (al contatto le ruote si fermano da sole) */
-	int aggancio = aggancio_attivo(&d.agg);
-	if (aggancio) {
-		*v = (int32_t)lround(d.agg.v * SCALA_V);
-		*w = (int32_t)lround(d.agg.w * SCALA_W);
+	int docking = docking_active(&d.dock_state);
+	if (docking) {
+		*v = (int32_t)lround(d.dock_state.v * SCALE_V);
+		*w = (int32_t)lround(d.dock_state.w * SCALE_W);
 	}
-	int lim = limiti_generali(t);
+	int lim = general_limits(t);
 	if (lim) {
 		*v = *w = 0;
 		return lim;
 	}
-	if (d.cfg.banco) {
+	if (d.cfg.bench) {
 		uint8_t b[8];
 		for (int i = 0; i < 4; i++) {
 			b[i] = (uint8_t)((uint32_t)*v >> (8 * i));
 			b[4 + i] = (uint8_t)((uint32_t)*w >> (8 * i));
 		}
-		if (sic_permesso(&d.sic, GD32_VELOCITA, b, 8, t) != SIC_PERMESSO) {
+		if (interlock_permit(&d.interlock, GD32_VELOCITY, b, 8, t) != INTERLOCK_ALLOWED) {
 			*v = *w = 0;
-			return DRV_LIM_BANCO;
+			return DRV_LIM_BENCH;
 		}
 		return 0;
 	}
-	int lim_terra = sic_terra_limita(&d.s, aggancio ? aggancio_stacco(&d.agg) : atomic_load(&cmd.uscita_base), v, w);
+	int ground_lim = interlock_ground_limit(&d.s, docking ? docking_detach(&d.dock_state) : atomic_load(&cmd.leaving_base), v, w);
 	/* si parte solo con gli encoder che contano: vedi l'alimentazione dei sensori più sotto */
-	if (!(d.s.controllo & GD32_CONTROLLO_SENSORI_ACCESI) || t - d.t_sensori_accesi < RT_MS(200) || d.riposo) {
+	if (!(d.s.control & GD32_CONTROL_SENSORS_ON) || t - d.t_sensors_on < RT_MS(200) || d.rest_level) {
 		*v = *w = 0;
-		lim_terra |= SIC_LIM_SENSORI;
+		ground_lim |= INTERLOCK_LIM_SENSORS;
 	}
-	if (d.sollevato) {
+	if (d.lifted) {
 		*v = *w = 0;
-		lim_terra |= SIC_LIM_SOLLEVATO;
+		ground_lim |= INTERLOCK_LIM_LIFTED;
 	}
 	/* dopo il riposo si parte con la mappa che funziona: si aspetta il primo giro del lidar, al massimo qualche secondo */
-	if (d.t_sveglia && atomic_load(&cmd.lidar_acceso) && d.giro.t_fine_ns < d.t_sveglia && t - d.t_sveglia < SVEGLIA_LIDAR_MAX_NS) {
+	if (d.t_wake && atomic_load(&cmd.lidar_on) && d.scan.t_end_ns < d.t_wake && t - d.t_wake < WAKE_LIDAR_MAX_NS) {
 		*v = *w = 0;
-		lim_terra |= SIC_LIM_SENSORI;
+		ground_lim |= INTERLOCK_LIM_SENSORS;
 	}
-	return lim_terra;
+	return ground_lim;
 }
 
 /* Spazzole e aspirazione: niente se il robot è sollevato o sulla base (a terra), o se il banco non lo permette.
  * Ritorna 0 se il comando si può mandare, altrimenti il motivo (SIC_LIM_* | DRV_LIM_*). */
-static int attuatori_limiti(int64_t t, uint8_t cmd_gd32, int valore)
+static int actuator_limits(int64_t t, uint8_t cmd_gd32, int value)
 {
-	if (valore == 0)
+	if (value == 0)
 		return 0;
-	int lim = limiti_generali(t);
+	int lim = general_limits(t);
 	if (lim)
 		return lim;
-	if (d.cfg.banco) {
-		uint8_t b = (uint8_t)valore;
-		return sic_permesso(&d.sic, cmd_gd32, &b, 1, t) == SIC_PERMESSO ? 0 : DRV_LIM_BANCO;
+	if (d.cfg.bench) {
+		uint8_t b = (uint8_t)value;
+		return interlock_permit(&d.interlock, cmd_gd32, &b, 1, t) == INTERLOCK_ALLOWED ? 0 : DRV_LIM_BENCH;
 	}
-	if (d.sollevato)
-		return SIC_LIM_SOLLEVATO;
+	if (d.lifted)
+		return INTERLOCK_LIM_LIFTED;
 	int32_t v = 1, w = 0;
-	return sic_terra_limita(&d.s, 0, &v, &w) & (SIC_LIM_SOLLEVATO | SIC_LIM_BASE | SIC_LIM_SENSORI);
+	return interlock_ground_limit(&d.s, 0, &v, &w) & (INTERLOCK_LIM_LIFTED | INTERLOCK_LIM_BASE | INTERLOCK_LIM_SENSORS);
 }
 
 static int clamp(int v, int lo, int hi) { return v < lo ? lo : v > hi ? hi : v; }
 
 /* Ruote: manda 0x66 se il comando limitato è cambiato (o sempre, con forza = 1: ogni 20 ms). */
-static void aggiorna_ruote(int64_t t, int forza)
+static void update_wheels(int64_t t, int force)
 {
 	int32_t v, w;
-	d.limiti = limita_velocita(t, &v, &w);
-	if (d.fase == DRV_AVVIO)
+	d.limits = limit_velocity(t, &v, &w);
+	if (d.phase == DRV_STARTING)
 		return;                            /* durante l'avvio va solo la sequenza (e l'arresto iniziale) */
-	if (forza || v != d.v_inv || w != d.w_inv)
-		invia_velocita(v, w);
+	if (force || v != d.v_sent || w != d.w_sent)
+		send_velocity(v, w);
 }
 
-static void aggiorna_attuatori(int64_t t)
+static void update_actuators(int64_t t)
 {
-	int rinfresca = t - d.t_rinfresca > RT_S(2);   /* ogni 2 s si rimanda tutto: il GD32 potrebbe essersi resettato */
-	if (rinfresca)
-		d.t_rinfresca = t;
+	int refresh = t - d.t_refresh > RT_S(2);   /* ogni 2 s si rimanda tutto: il GD32 potrebbe essersi resettato */
+	if (refresh)
+		d.t_refresh = t;
 
-	int lat = clamp(atomic_load(&cmd.spazzola_lat), -100, 100);
-	int cen = clamp(atomic_load(&cmd.spazzola_cen), -100, 100);
-	int asp = clamp(atomic_load(&cmd.aspirazione), 0, 30000);
-	if (attuatori_limiti(t, GD32_SPAZZOLA_LATERALE, lat)) lat = 0;
-	if (attuatori_limiti(t, GD32_SPAZZOLA_CENTRALE, cen)) cen = 0;
+	int side = clamp(atomic_load(&cmd.side_brush_cmd), -100, 100);
+	int center = clamp(atomic_load(&cmd.main_brush_cmd), -100, 100);
+	int suction_now = clamp(atomic_load(&cmd.suction), 0, 30000);
+	if (actuator_limits(t, GD32_SIDE_BRUSH, side)) side = 0;
+	if (actuator_limits(t, GD32_MAIN_BRUSH, center)) center = 0;
 	/* Aspirazione: anche niente cassetto della polvere (byte 4 bit 2). Il GD32 non la ferma da solo (provato il 5/10:
 	   cassetto sfilato per 10 s con la ventola a 8000 giri/min, la ventola ha continuato); l'originale non la accende
 	   (eccezione 6, EXCEPTION_DUSTBOX_INEXISTENCE). */
-	int asp_lim = !asp ? 0 : !d.cfg.aspirazione ? DRV_LIM_VIETATA : attuatori_limiti(t, GD32_ASPIRAZIONE, 1);
-	if (asp && !asp_lim && !d.s.cassetto)
-		asp_lim = DRV_LIM_CASSETTO;
-	d.asp_limiti = asp_lim;
-	if (asp_lim) asp = 0;
-	if (lat != d.lat_inv || rinfresca) {
-		invia1(GD32_SPAZZOLA_LATERALE, (uint8_t)(int8_t)lat);
-		d.lat_inv = lat;
+	int suction_lim = !suction_now ? 0 : !d.cfg.suction ? DRV_LIM_FORBIDDEN : actuator_limits(t, GD32_SUCTION, 1);
+	if (suction_now && !suction_lim && !d.s.dustbin)
+		suction_lim = DRV_LIM_NO_DUSTBIN;
+	d.suction_limits = suction_lim;
+	if (suction_lim) suction_now = 0;
+	if (side != d.side_sent || refresh) {
+		send_u8(GD32_SIDE_BRUSH, (uint8_t)(int8_t)side);
+		d.side_sent = side;
 	}
-	if (cen != d.cen_inv || (rinfresca && cen >= 0)) {   /* lo sblocco (< 0) non si ripete: il GD32 lo ferma da solo */
-		invia1(GD32_SPAZZOLA_CENTRALE, (uint8_t)(int8_t)cen);
-		d.cen_inv = cen;
+	if (center != d.main_sent || (refresh && center >= 0)) {   /* lo sblocco (< 0) non si ripete: il GD32 lo ferma da solo */
+		send_u8(GD32_MAIN_BRUSH, (uint8_t)(int8_t)center);
+		d.main_sent = center;
 	}
-	if (asp != d.asp_inv || (rinfresca && asp)) {
-		int16_t a = (int16_t)(asp / 10);
+	if (suction_now != d.suction_sent || (refresh && suction_now)) {
+		int16_t a = (int16_t)(suction_now / 10);
 		uint8_t b[2] = { (uint8_t)a, (uint8_t)(a >> 8) };
-		invia(GD32_ASPIRAZIONE, b, 2);
-		d.asp_inv = asp;
+		send(GD32_SUCTION, b, 2);
+		d.suction_sent = suction_now;
 	}
 
 	/* LED: guasto > batteria critica o bassa > in carica > quello chiesto dai task */
 	int led = clamp(atomic_load(&cmd.led), 0, 31);
-	if (d.fase == DRV_GUASTO)
-		led = LED_GUASTO;
-	else if (d.bat.livello != BAT_OK)
-		led = LED_BATTERIA;
-	else if (d.s.sulla_base)
-		led = LED_CARICA;
-	if (led != d.led_inv || rinfresca) {
-		invia1(GD32_LED_TASTO, (uint8_t)led);
-		d.led_inv = led;
+	if (d.phase == DRV_FAULT)
+		led = LED_FAULT;
+	else if (d.bat.level != BAT_OK)
+		led = LED_BATTERY;
+	else if (d.s.on_base)
+		led = LED_CHARGING;
+	if (led != d.led_sent || refresh) {
+		send_u8(GD32_BUTTON_LED, (uint8_t)led);
+		d.led_sent = led;
 	}
 
 	/* Riposo sulla base: a carica stabile lidar, motori e sensori si spengono; prima di uscire si riaccendono.
-	   Spegnere i sensori (0x9d 00) ferma gli encoder, e il GD32 regola la velocità proprio con quelli: nelle prove del 5/11
+	   Spegnere i sensors_on (0x9d 00) ferma gli encoder, e il GD32 regola la velocità proprio con quelli: nelle prove del 5/11
 	   lo spegnimento dava a volte una lettura falsa dell'encoder sinistro (r2, r10) con il robot che scattava in avanti di
 	   ~12 cm staccandosi dai contatti, e uscendo con i sensori spenti spariva dall'odometria un tratto di ~11 cm (o1, o2).
-	   Per questo si spengono prima i motori (0x65 00, come freeMotorControl dell'originale), e si esce solo a sensori accesi. */
-	if (d.ha_sensori) {
-		if (d.s.sulla_base != d.sulla_base_prec) {
-			d.sulla_base_prec = d.s.sulla_base;
-			d.t_cambio_base = t;
+	   Per questo si spengono prima i motors (0x65 00, come freeMotorControl dell'originale), e si esce solo a sensori accesi. */
+	if (d.has_sensors) {
+		if (d.s.on_base != d.prev_on_base) {
+			d.prev_on_base = d.s.on_base;
+			d.t_base_change = t;
 		}
-		if (d.s.in_carica != d.in_carica_prec) {
-			d.in_carica_prec = d.s.in_carica;
-			d.t_cambio_carica = t;
+		if (d.s.charging != d.prev_charging) {
+			d.prev_charging = d.s.charging;
+			d.t_charging_change = t;
 		}
-		int esce = atomic_load(&cmd.uscita_base) || aggancio_attivo(&d.agg);
-		int stabile = d.s.sulla_base && !esce &&
-		              ((d.s.in_carica && t - d.t_cambio_carica > RIPOSO_CARICA_NS) || t - d.t_cambio_base > RIPOSO_CONTATTO_NS);
-		int sveglia = esce || (!d.s.sulla_base && t - d.t_cambio_base > RT_MS(500));
-		if (d.riposo == 0) {
-			if (d.sensori_inv != 1) {
-				invia1(GD32_ALIMENTAZIONE_SENSORI, 1);
-				d.sensori_inv = 1;
-				d.t_sensori_accesi = t;
-				evento("sensori accesi");
-			} else if (stabile) {
-				invia1(GD32_TIPO_CONTROLLO, 0);
-				d.riposo = 1;
-				d.t_riposo = t;
+		int leaving = atomic_load(&cmd.leaving_base) || docking_active(&d.dock_state);
+		int stable = d.s.on_base && !leaving &&
+		              ((d.s.charging && t - d.t_charging_change > REST_CHARGING_NS) || t - d.t_base_change > REST_CONTACT_NS);
+		int wakeup = leaving || (!d.s.on_base && t - d.t_base_change > RT_MS(500));
+		if (d.rest_level == 0) {
+			if (d.sensors_sent != 1) {
+				send_u8(GD32_SENSOR_POWER, 1);
+				d.sensors_sent = 1;
+				d.t_sensors_on = t;
+				event("sensori accesi");
+			} else if (stable) {
+				send_u8(GD32_CONTROL_TYPE, 0);
+				d.rest_level = 1;
+				d.t_rest = t;
 			}
-		} else if (d.riposo == 1) {
-			if (sveglia) {
-				invia1(GD32_TIPO_CONTROLLO, 2);
-				d.riposo = 0;
-			} else if (t - d.t_riposo > RT_MS(200)) {
-				invia1(GD32_ALIMENTAZIONE_SENSORI, 0);
-				d.sensori_inv = 0;
-				d.riposo = 2;
-				evento("riposo: motori, lidar e sensori spenti");
+		} else if (d.rest_level == 1) {
+			if (wakeup) {
+				send_u8(GD32_CONTROL_TYPE, 2);
+				d.rest_level = 0;
+			} else if (t - d.t_rest > RT_MS(200)) {
+				send_u8(GD32_SENSOR_POWER, 0);
+				d.sensors_sent = 0;
+				d.rest_level = 2;
+				event("riposo: motori, lidar e sensori spenti");
 			}
-		} else if (sveglia) {
-			invia1(GD32_ALIMENTAZIONE_SENSORI, 1);
-			invia1(GD32_TIPO_CONTROLLO, 2);
-			d.sensori_inv = 1;
-			d.t_sensori_accesi = t;
-			d.t_sveglia = t;
-			d.riposo = 0;
-			evento("sveglia: sensori, motori e lidar accesi");
+		} else if (wakeup) {
+			send_u8(GD32_SENSOR_POWER, 1);
+			send_u8(GD32_CONTROL_TYPE, 2);
+			d.sensors_sent = 1;
+			d.t_sensors_on = t;
+			d.t_wake = t;
+			d.rest_level = 0;
+			event("sveglia: sensori, motori e lidar accesi");
 		}
 	}
 }
 
-static void aggiorna_lidar(int64_t t)
+static void update_lidar(int64_t t)
 {
 	if (d.fd_lidar < 0)
 		return;
-	int acceso = atomic_load(&cmd.lidar_acceso) && !d.riposo && !d.sollevato;
-	if (acceso != d.lidar_inv) {
-		invia1(GD32_ALIMENTAZIONE_LIDAR, (uint8_t)acceso);
-		d.lidar_inv = acceso;
-		d.t_lidar_acceso = t;
+	int on = atomic_load(&cmd.lidar_on) && !d.rest_level && !d.lifted;
+	if (on != d.lidar_sent) {
+		send_u8(GD32_LIDAR_POWER, (uint8_t)on);
+		d.lidar_sent = on;
+		d.t_lidar_on = t;
 		d.lidar_ok = 1;
-		lidar_regolatore_init(&d.reg, 0);
-		if (!acceso) {
-			invia_i32(GD32_MOTORE_LIDAR, 0);
-			d.pot_inv = 0;
+		lidar_regulator_init(&d.regulator, 0);
+		if (!on) {
+			send_i32(GD32_LIDAR_MOTOR, 0);
+			d.power_sent = 0;
 		}
-		evento("lidar %s", acceso ? "acceso" : "spento");
+		event("lidar %s", on ? "acceso" : "spento");
 	}
-	if (!acceso)
+	if (!on)
 		return;
-	double obiettivo = atomic_load(&cmd.lidar_cgiri) / 100.0;
-	if (obiettivo <= 0)
-		obiettivo = d.cfg.lidar_giri_s;
-	d.reg.obiettivo = obiettivo;
-	int fresca = d.ass.t_velocita && t - d.ass.t_velocita < RT_MS(500) && d.ass.t_velocita > d.t_lidar_acceso;
-	int pot = lidar_regola(&d.reg, fresca ? d.ass.giri_s : 0);
-	if (!fresca && t - d.t_lidar_acceso > RT_S(4)) {
+	double target = atomic_load(&cmd.lidar_crev_s) / 100.0;
+	if (target <= 0)
+		target = d.cfg.lidar_rev_s;
+	d.regulator.target = target;
+	int fresh = d.assembler.t_speed && t - d.assembler.t_speed < RT_MS(500) && d.assembler.t_speed > d.t_lidar_on;
+	int power_now = lidar_regulate(&d.regulator, fresh ? d.assembler.rev_s : 0);
+	if (!fresh && t - d.t_lidar_on > RT_S(4)) {
 		if (d.lidar_ok)
-			evento("ATTENZIONE: il lidar non manda dati da 0,5 s (potenza tenuta a 60)");
+			event("ATTENZIONE: il lidar non manda dati da 0,5 s (potenza tenuta a 60)");
 		d.lidar_ok = 0;
-		pot = 60;
-		d.reg.integrale = 0;
-	} else if (fresca && !d.lidar_ok) {
+		power_now = 60;
+		d.regulator.integral = 0;
+	} else if (fresh && !d.lidar_ok) {
 		d.lidar_ok = 1;
-		evento("il lidar manda di nuovo dati");
+		event("il lidar manda di nuovo dati");
 	}
-	if (pot != d.pot_inv || t - d.t_potenza > RT_S(1)) {
-		invia_i32(GD32_MOTORE_LIDAR, pot);
-		d.pot_inv = pot;
-		d.t_potenza = t;
+	if (power_now != d.power_sent || t - d.t_power > RT_S(1)) {
+		send_i32(GD32_LIDAR_MOTOR, power_now);
+		d.power_sent = power_now;
+		d.t_power = t;
 	}
 }
 
 /* ------------------------------------------------------------------------------------ frame in arrivo --- */
 
 /* A ogni frame dei sensori: comandi dei task per l'aggancio, un passo della guida, eventi quando cambia qualcosa. */
-static void aggiorna_aggancio(int64_t t)
+static void update_docking(int64_t t)
 {
-	int c = atomic_exchange(&cmd.aggancia, 0);
+	int c = atomic_exchange(&cmd.dock, 0);
 	if (c > 0)
-		aggancio_avvia(&d.agg, t);
+		docking_start(&d.dock_state, t);
 	else if (c < 0)
-		aggancio_annulla(&d.agg);
-	if (aggancio_attivo(&d.agg))
-		aggancio_frame(&d.agg, &d.s, t);
-	if ((int)d.agg.fase != d.agg_fase_prec || d.agg.esito != d.agg_esito_prec) {
-		evento("aggancio: esito %d, fase %d, tentativo %d, ir %02x, davanti %.3f m, angolo %+.1f°%s%s", d.agg.esito,
-		       d.agg.fase, d.agg.tentativo, (d.s.ir_base_a << 4) | d.s.ir_base_b, d.agg.dist_davanti, d.agg.yaw * 180 / M_PI,
-		       d.agg.motivo ? ", " : "", d.agg.motivo ? d.agg.motivo : "");
-		d.agg_fase_prec = (int)d.agg.fase;
-		d.agg_esito_prec = d.agg.esito;
+		docking_cancel(&d.dock_state);
+	if (docking_active(&d.dock_state))
+		docking_frame(&d.dock_state, &d.s, t);
+	if ((int)d.dock_state.phase != d.prev_dock_phase || d.dock_state.result != d.prev_dock_result) {
+		event("aggancio: esito %d, fase %d, tentativo %d, ir %02x, davanti %.3f m, angolo %+.1f°%s%s", d.dock_state.result,
+		       d.dock_state.phase, d.dock_state.attempt, (d.s.ir_dock_right << 4) | d.s.ir_dock_left, d.dock_state.front_dist, d.dock_state.yaw * 180 / M_PI,
+		       d.dock_state.reason ? ", " : "", d.dock_state.reason ? d.dock_state.reason : "");
+		d.prev_dock_phase = (int)d.dock_state.phase;
+		d.prev_dock_result = d.dock_state.result;
 	}
 }
 
 /* Sollevamento, a ogni frame dei sensori (50 al secondo), come CHwdriverExceptionDetect::detectWithCliffIRSensor
    dell'originale. Il robot è sollevato quando una di queste condizioni vale per tutta la sua finestra:
      - tutti e 4 gli anti-caduta sul vuoto, in almeno il 90% degli ultimi 40 frame (0,8 s);
-     - due anti-caduta "incrociati" sul vuoto (sx anteriore + dx laterale, dx anteriore + sx laterale, i due laterali)
+     - due anti-caduta "incrociati" sul empty (sx anteriore + dx laterale, dx anteriore + sx laterale, i due laterali)
        per 50 frame (1 s): un bordo dritto, come un gradino, non li può dare;
      - almeno un anti-caduta sul vuoto e beccheggio fuori da -16°..+14° per 10 frame (0,2 s);
      - i due anteriori sul vuoto per 250 frame (5 s): davanti a un gradino il robot fa retromarcia molto prima
@@ -796,281 +796,281 @@ static void aggiorna_aggancio(int64_t t)
    "pavimento" per tutto il tempo, e "tutti e 4 sul vuoto" da sola non scattava mai. Riappoggiato quando tutti e 4
    vedono il pavimento per 40 frame (0,8 s). Sollevato, i motori si spengono (0x65 00), come l'originale ("free motor
    when wheel up"); riappoggiato, si riprende a comandare solo dopo il primo giro del lidar: cosa fare poi lo decidono
-   i task (drv_stato_t.sollevato). Sulla base non si entra in "sollevato"; a riposo o a sensori spenti (o accesi da
+   i task (drv_status_t.lifted). Sulla base non si entra in "sollevato"; a riposo o a sensori spenti (o accesi da
    meno di 300 ms) non si guarda niente, perché gli anti-caduta non valgono. */
-static void aggiorna_sollevamento(int64_t t)
+static void update_lifting(int64_t t)
 {
-	if (d.riposo || !(d.s.controllo & GD32_CONTROLLO_SENSORI_ACCESI) || t - d.t_sensori_accesi <= RT_MS(300)) {
-		d.vuoto_40 = 0;
-		d.n_incrociati = d.n_anteriori = d.n_inclinato = d.n_pavimento = 0;
+	if (d.rest_level || !(d.s.control & GD32_CONTROL_SENSORS_ON) || t - d.t_sensors_on <= RT_MS(300)) {
+		d.void_40 = 0;
+		d.n_crossed = d.n_front = d.n_tilted = d.n_floor = 0;
 		return;
 	}
 	const int *c = d.s.cliff;
-	int tutti = c[0] && c[1] && c[2] && c[3], nessuno = !c[0] && !c[1] && !c[2] && !c[3];
-	double beccheggio = d.s.angolo[1] / 100.0;
-	d.vuoto_40 = (d.vuoto_40 << 1 | (uint64_t)tutti) & ((1ULL << 40) - 1);
-	d.n_incrociati = (c[1] && c[3]) || (c[2] && c[0]) || (c[0] && c[3]) ? d.n_incrociati + 1 : 0;
-	d.n_anteriori = c[1] && c[2] ? d.n_anteriori + 1 : 0;
-	d.n_inclinato = !nessuno && (beccheggio < -16 || beccheggio > 14) ? d.n_inclinato + 1 : 0;
-	d.n_pavimento = nessuno ? d.n_pavimento + 1 : 0;
-	if (!d.sollevato) {
-		const char *motivo = d.s.sulla_base ? NULL
-		                   : __builtin_popcountll(d.vuoto_40) >= 36 ? "tutti e 4 gli anti-caduta sul vuoto"
-		                   : d.n_incrociati >= 50 ? "due anti-caduta incrociati sul vuoto"
-		                   : d.n_inclinato >= 10 ? "anti-caduta sul vuoto e robot inclinato"
-		                   : d.n_anteriori >= 250 ? "i due anti-caduta anteriori sul vuoto da 5 s" : NULL;
-		if (motivo) {
-			d.sollevato = 1;
-			invia1(GD32_TIPO_CONTROLLO, 0);
-			if (aggancio_attivo(&d.agg))
-				aggancio_interrompi(&d.agg, "robot sollevato");
-			evento("sollevato (%s, beccheggio %+.1f°): motori e lidar spenti", motivo, beccheggio);
+	int all = c[0] && c[1] && c[2] && c[3], none = !c[0] && !c[1] && !c[2] && !c[3];
+	double pitch = d.s.angle[1] / 100.0;
+	d.void_40 = (d.void_40 << 1 | (uint64_t)all) & ((1ULL << 40) - 1);
+	d.n_crossed = (c[1] && c[3]) || (c[2] && c[0]) || (c[0] && c[3]) ? d.n_crossed + 1 : 0;
+	d.n_front = c[1] && c[2] ? d.n_front + 1 : 0;
+	d.n_tilted = !none && (pitch < -16 || pitch > 14) ? d.n_tilted + 1 : 0;
+	d.n_floor = none ? d.n_floor + 1 : 0;
+	if (!d.lifted) {
+		const char *reason = d.s.on_base ? NULL
+		                   : __builtin_popcountll(d.void_40) >= 36 ? "tutti e 4 gli anti-caduta sul vuoto"
+		                   : d.n_crossed >= 50 ? "due anti-caduta incrociati sul vuoto"
+		                   : d.n_tilted >= 10 ? "anti-caduta sul vuoto e robot inclinato"
+		                   : d.n_front >= 250 ? "i due anti-caduta anteriori sul vuoto da 5 s" : NULL;
+		if (reason) {
+			d.lifted = 1;
+			send_u8(GD32_CONTROL_TYPE, 0);
+			if (docking_active(&d.dock_state))
+				docking_abort(&d.dock_state, "robot sollevato");
+			event("sollevato (%s, beccheggio %+.1f°): motori e lidar spenti", reason, pitch);
 		}
-	} else if (d.n_pavimento >= 40) {
-		d.sollevato = 0;
-		d.vuoto_40 = 0;
-		d.n_incrociati = d.n_anteriori = d.n_inclinato = 0;
-		invia1(GD32_TIPO_CONTROLLO, 2);
-		d.t_sveglia = t;
-		evento("riappoggiato: motori e lidar accesi");
+	} else if (d.n_floor >= 40) {
+		d.lifted = 0;
+		d.void_40 = 0;
+		d.n_crossed = d.n_front = d.n_tilted = 0;
+		send_u8(GD32_CONTROL_TYPE, 2);
+		d.t_wake = t;
+		event("riappoggiato: motori e lidar accesi");
 	}
 }
 
 /* Tasti e base, a ogni frame dei sensori. Il GD32 manda da quanto è premuto ogni tasto (byte 58 e 62, 0 se rilasciato):
-   al rilascio, se la pressione è durata meno di DRV_TASTO_BREVE_MS, è una pressione breve. Il frame arriva ogni 20 ms,
+   al rilascio, se la pressione è durata meno di DRV_SHORT_PRESS_MS, è una pressione breve. Il frame arriva ogni 20 ms,
    quindi qui si vedono anche le pressioni brevissime, che un task da 100 ms potrebbe perdere. Le pressioni si contano al
-   tick, dopo l'azzeramento del guasto (vedi tasti_e_base). Lo stesso per il ritorno sulla base dopo almeno 1 s fuori */
-static void aggiorna_tasti_e_base(int64_t t)
+   tick, dopo l'azzeramento del fault (vedi buttons_and_base). Lo stesso per il ritorno sulla base dopo almeno 1 s fuori */
+static void update_buttons_and_base(int64_t t)
 {
-	const int premuto_ms[2] = { d.s.tasto_accensione_ms, d.s.tasto_casa_ms };
-	static const char *nomi[2] = { "accensione", "casa" };
+	const int pressed_ms[2] = { d.s.power_button_ms, d.s.home_button_ms };
+	static const char *names[2] = { "accensione", "casa" };
 	for (int k = 0; k < 2; k++) {
-		if (premuto_ms[k] > 0) {
-			if (premuto_ms[k] > d.tasto_max_ms[k])
-				d.tasto_max_ms[k] = premuto_ms[k];
-		} else if (d.tasto_max_ms[k] > 0) {
-			if (d.tasto_max_ms[k] < DRV_TASTO_BREVE_MS) {
-				d.tasti_in_attesa[k]++;
-				evento("tasto %s: pressione breve (%d ms)", nomi[k], d.tasto_max_ms[k]);
+		if (pressed_ms[k] > 0) {
+			if (pressed_ms[k] > d.button_max_ms[k])
+				d.button_max_ms[k] = pressed_ms[k];
+		} else if (d.button_max_ms[k] > 0) {
+			if (d.button_max_ms[k] < DRV_SHORT_PRESS_MS) {
+				d.pending_presses[k]++;
+				event("tasto %s: pressione breve (%d ms)", names[k], d.button_max_ms[k]);
 			} else {
-				evento("tasto %s: pressione lunga (%d ms), non conta", nomi[k], d.tasto_max_ms[k]);
+				event("tasto %s: pressione lunga (%d ms), non conta", names[k], d.button_max_ms[k]);
 			}
-			d.tasto_max_ms[k] = 0;
+			d.button_max_ms[k] = 0;
 		}
 	}
-	if (!d.s.sulla_base) {
-		if (!d.t_fuori_base)
-			d.t_fuori_base = t;
+	if (!d.s.on_base) {
+		if (!d.t_off_base)
+			d.t_off_base = t;
 	} else {
-		if (d.t_fuori_base && t - d.t_fuori_base >= RT_S(1))
-			d.base_rimessa = 1;
-		d.t_fuori_base = 0;
+		if (d.t_off_base && t - d.t_off_base >= RT_S(1))
+			d.back_on_base = 1;
+		d.t_off_base = 0;
 	}
 }
 
 /* Al tick: una pressione breve o il ritorno sulla base azzerano il guasto (se la causa non c'è più), poi le pressioni si
    contano. Così un task che vede crescere il numero trova già il guasto azzerato (decisione dell'utente, 2026-11-06) */
-static void tasti_e_base(int64_t t)
+static void buttons_and_base(int64_t t)
 {
-	int premuti = d.tasti_in_attesa[0] + d.tasti_in_attesa[1];
-	if (d.fase == DRV_GUASTO && (premuti || d.base_rimessa)) {
-		evento("guasto: provo ad azzerarlo (%s)", premuti ? "tasto premuto" : "robot rimesso sulla base");
-		atomic_store(&cmd.azzera_guasto, 1);
+	int pressed = d.pending_presses[0] + d.pending_presses[1];
+	if (d.phase == DRV_FAULT && (pressed || d.back_on_base)) {
+		event("guasto: provo ad azzerarlo (%s)", pressed ? "tasto premuto" : "robot rimesso sulla base");
+		atomic_store(&cmd.clear_fault, 1);
 	}
-	d.base_rimessa = 0;
-	prova_ad_azzerare_guasto(t);
+	d.back_on_base = 0;
+	try_clear_fault(t);
 	for (int k = 0; k < 2; k++) {
-		d.pressioni[k] += (uint32_t)d.tasti_in_attesa[k];
-		d.tasti_in_attesa[k] = 0;
+		d.presses[k] += (uint32_t)d.pending_presses[k];
+		d.pending_presses[k] = 0;
 	}
 }
 
-static void frame_gd32(const gd32_frame_t *f, void *ctx)
+static void on_gd32_frame(const gd32_frame_t *f, void *ctx)
 {
 	int64_t t = *(const int64_t *)ctx;
-	if (f->cmd == GD32_SENSORI) {
-		if (gd32_leggi_sensori(f, &d.s))
+	if (f->cmd == GD32_SENSORS) {
+		if (gd32_read_sensors(f, &d.s))
 			return;
 		/* intervallo fra due frame visti dal driver: il GD32 li manda ogni 20,0 ms, quindi lo scarto misura i ritardi
 		 * del percorso seriale (interrupt, kernel, thread del driver) */
-		if (d.ha_sensori && d.n_sensori > 50) {
-			int64_t dt = t - d.t_sensori;
-			if (dt > d.intervallo_max)
-				d.intervallo_max = dt;
-			if (dt < d.intervallo_min || d.intervallo_min == 0)
-				d.intervallo_min = dt;
+		if (d.has_sensors && d.n_sensors > 50) {
+			int64_t dt = t - d.t_sensors;
+			if (dt > d.interval_max)
+				d.interval_max = dt;
+			if (dt < d.interval_min || d.interval_min == 0)
+				d.interval_min = dt;
 		}
-		d.ha_sensori = 1;
-		d.t_sensori = t;
-		d.n_sensori++;
-		d.sensori_secondo[0]++;
-		aggiorna_sollevamento(t);
-		aggiorna_tasti_e_base(t);
+		d.has_sensors = 1;
+		d.t_sensors = t;
+		d.n_sensors++;
+		d.sensors_per_second[0]++;
+		update_lifting(t);
+		update_buttons_and_base(t);
 		/* "in movimento" come l'originale: v + |ω| misurati (byte 32 e 36) maggiori di zero */
-		int in_moto = d.s.vel_sx / SCALA_V + fabs(d.s.vel_dx / SCALA_W) > 0;
-		int liv = batteria_aggiorna(&d.bat, d.s.tensione_dv, d.s.in_carica, d.s.sulla_base, in_moto, d.s.byte69_x100);
-		if (liv != d.bat_prec) {
-			static const char *nomi[] = { "normale", "BASSA (LED 6)", "CRITICA: motori fermi" };
-			evento("batteria %s, %.2f V", nomi[liv], batteria_volt(&d.bat));
-			d.bat_prec = liv;
+		int moving = d.s.v_measured / SCALE_V + fabs(d.s.w_measured / SCALE_W) > 0;
+		int new_level = battery_update(&d.bat, d.s.voltage_dv, d.s.charging, d.s.on_base, moving, d.s.fan_rpm);
+		if (new_level != d.prev_battery) {
+			static const char *names[] = { "normale", "BASSA (LED 6)", "CRITICA: motori fermi" };
+			event("batteria %s, %.2f V", names[new_level], battery_volts(&d.bat));
+			d.prev_battery = new_level;
 		}
-		if (d.cfg.banco && sic_ricevuto(&d.sic, f, t)) {
-			arresto();
-			entra_in_guasto(d.sic.motivo);
+		if (d.cfg.bench && interlock_received(&d.interlock, f, t)) {
+			full_stop();
+			enter_fault(d.interlock.reason);
 		}
-		drv_sensori_t p = { .numero = d.n_sensori, .t_ns = t, .s = d.s };
-		scambio_scrivi(&sc_sensori, &p);
-		drv_posa_t posa;
-		int ha_posa = scambio_leggi(&sc_posa, &posa) != 0;
-		int incastro = atomic_load(&cmd.incastro);
-		if (contatti_frame(&d.contatti, &d.s, t, ha_posa ? &posa : NULL, incastro))   /* prima di svegliare i task: trovano già l'evento */
-			scambio_scrivi(&sc_contatti, &d.contatti.pub);
-		for (int i = 0; i < MAX_ISCRITTI; i++) {
-			rt_task_t *k = atomic_load(&iscritti[i]);
+		drv_sensors_t p = { .number = d.n_sensors, .t_ns = t, .s = d.s };
+		exchange_write(&sensors_exchange, &p);
+		drv_pose_t pose;
+		int has_pose = exchange_read(&pose_exchange, &pose) != 0;
+		int stuck = atomic_load(&cmd.stuck);
+		if (contacts_frame(&d.contacts, &d.s, t, has_pose ? &pose : NULL, stuck))   /* prima di svegliare i task: trovano già l'evento */
+			exchange_write(&contacts_exchange, &d.contacts.published);
+		for (int i = 0; i < MAX_SUBSCRIBERS; i++) {
+			rt_task_t *k = atomic_load(&subscribers[i]);
 			if (k)
-				rt_task_sveglia(k, t);
+				rt_task_wake(k, t);
 		}
-		aggiorna_aggancio(t);
+		update_docking(t);
 		/* reazione immediata: se i nuovi sensori cambiano il comando permesso (bumper, vuoto), lo si manda ora */
-		aggiorna_ruote(t, 0);
+		update_wheels(t, 0);
 		return;
 	}
 	switch (f->cmd) {
 	case GD32_HEARTBEAT:
-		d.hb_gd32++;
+		d.gd32_hb++;
 		break;
-	case GD32_VERSIONE: {
-		size_t n = f->n_dati < 32 ? f->n_dati : 32;
-		memcpy(d.versione, f->dati, n);
-		d.versione[n] = 0;
+	case GD32_VERSION: {
+		size_t n = f->data_len < 32 ? f->data_len : 32;
+		memcpy(d.version, f->data, n);
+		d.version[n] = 0;
 		for (size_t i = 0; i < n; i++)
-			if (d.versione[i] < 32 || d.versione[i] > 126)
-				d.versione[i] = 0;
-		evento("GD32 firmware %s", d.versione);
+			if (d.version[i] < 32 || d.version[i] > 126)
+				d.version[i] = 0;
+		event("GD32 firmware %s", d.version);
 		break;
 	}
 	case GD32_WAKEUP_ACK:
-		invia(GD32_WAKEUP_ACK, NULL, 0);     /* non lo mettiamo mai in sospensione, ma se chiede conferma la diamo */
-		d.altri++;
+		send(GD32_WAKEUP_ACK, NULL, 0);     /* non lo mettiamo mai in sospensione, ma se chiede conferma la diamo */
+		d.others++;
 		break;
-	case GD32_CODICE_ERRORE:
+	case GD32_ERROR_CODE:
 	case GD32_DEBUG:
-		evento("GD32 manda 0x%02x (%s), %d byte", f->cmd, gd32_nome_cmd(f->cmd), f->n_dati);
-		d.altri++;
+		event("GD32 manda 0x%02x (%s), %d byte", f->cmd, gd32_cmd_name(f->cmd), f->data_len);
+		d.others++;
 		break;
 	default:
-		d.altri++;
+		d.others++;
 		break;
 	}
 }
 
-static void pacchetto_lidar(const lidar_pacchetto_t *p, void *ctx)
+static void on_lidar_packet(const lidar_packet_t *p, void *ctx)
 {
 	int64_t t = *(const int64_t *)ctx;
-	if (lidar_assembla(&d.ass, p, t, &d.giro)) {
-		scambio_scrivi(&sc_giro, &d.giro);
-		aggancio_giro(&d.agg, &d.giro, t);
+	if (lidar_assemble(&d.assembler, p, t, &d.scan)) {
+		exchange_write(&scan_exchange, &d.scan);
+		docking_scan(&d.dock_state, &d.scan, t);
 	}
 }
 
 /* ------------------------------------------------------------------------------------------ ogni 20 ms --- */
 
 /* Sequenza di avvio di everest-server (docs/protocollo.md), un frame per ciclo. */
-static const struct { uint8_t cmd, n, dati[4]; } AVVIO[] = {
-	{ GD32_SORVEGLIA_SOC, 1, { 1 } }, { GD32_VERSIONE, 0, { 0 } }, { GD32_IMU_GREZZA, 4, { 1, 0, 0, 0 } },
-	{ GD32_FUNZIONI_MACCHINA, 0, { 0 } }, { GD32_MOTORE_LIDAR, 4, { 0, 0, 0, 0 } }, { GD32_TIPO_CONTROLLO, 1, { 0 } },
-	{ GD32_CLIFF_RETROMARCIA, 1, { 1 } }, { GD32_MASCHERA_SENSORI, 3, { 0, 0xff, 0xff } }, { GD32_CLIFF_IR, 1, { 1 } },
-	{ GD32_IMU_ZERO, 0, { 0 } }, { GD32_TIPO_CONTROLLO, 1, { 2 } },
+static const struct { uint8_t cmd, n, data[4]; } STARTUP[] = {
+	{ GD32_SOC_WATCHDOG, 1, { 1 } }, { GD32_VERSION, 0, { 0 } }, { GD32_IMU_RAW, 4, { 1, 0, 0, 0 } },
+	{ GD32_MACHINE_FUNCTIONS, 0, { 0 } }, { GD32_LIDAR_MOTOR, 4, { 0, 0, 0, 0 } }, { GD32_CONTROL_TYPE, 1, { 0 } },
+	{ GD32_CLIFF_BACKOFF, 1, { 1 } }, { GD32_SENSOR_MASK, 3, { 0, 0xff, 0xff } }, { GD32_CLIFF_IR, 1, { 1 } },
+	{ GD32_IMU_ZERO, 0, { 0 } }, { GD32_CONTROL_TYPE, 1, { 2 } },
 };
-#define N_AVVIO ((int)(sizeof AVVIO / sizeof AVVIO[0]))
+#define N_STARTUP ((int)(sizeof STARTUP / sizeof STARTUP[0]))
 
 static void tick(int64_t t)
 {
-	if (d.fase == DRV_AVVIO) {
-		if (d.i_avvio < N_AVVIO) {
-			invia(AVVIO[d.i_avvio].cmd, AVVIO[d.i_avvio].dati, AVVIO[d.i_avvio].n);
-			d.i_avvio++;
-		} else if (d.ha_sensori) {
-			d.fase = DRV_PRONTO;
-			d.led_inv = -1;
-			d.sensori_inv = -1;
-			invia_velocita(0, 0);
-			evento("pronto: GD32 %s, %u frame dei sensori già ricevuti",
-			       d.versione[0] ? d.versione : "(versione non ricevuta)", d.n_sensori);
-		} else if (t - d.t_avvio > RT_S(5)) {
-			entra_in_guasto("il GD32 non manda i sensori (5 s dall'avvio)");
+	if (d.phase == DRV_STARTING) {
+		if (d.startup_step < N_STARTUP) {
+			send(STARTUP[d.startup_step].cmd, STARTUP[d.startup_step].data, STARTUP[d.startup_step].n);
+			d.startup_step++;
+		} else if (d.has_sensors) {
+			d.phase = DRV_READY;
+			d.led_sent = -1;
+			d.sensors_sent = -1;
+			send_velocity(0, 0);
+			event("pronto: GD32 %s, %u frame dei sensori già ricevuti",
+			       d.version[0] ? d.version : "(versione non ricevuta)", d.n_sensors);
+		} else if (t - d.t_startup > RT_S(5)) {
+			enter_fault("il GD32 non manda i sensori (5 s dall'avvio)");
 		}
 	}
 
 	/* il GD32 tace? */
-	if (d.fase == DRV_PRONTO && d.ha_sensori && t - d.t_sensori > SENSORI_MUTI_NS)
-		entra_in_guasto("nessun frame dei sensori da 1 s");
+	if (d.phase == DRV_READY && d.has_sensors && t - d.t_sensors > SENSORS_SILENT_NS)
+		enter_fault("nessun frame dei sensori da 1 s");
 
 	/* watchdog dei task */
-	for (int i = 0; i < MAX_SORVEGLIATI; i++) {
-		rt_task_t *k = atomic_load(&sorvegliati[i].t);
-		if (!k || sorvegliati[i].segnalato)
+	for (int i = 0; i < MAX_WATCHED; i++) {
+		rt_task_t *k = atomic_load(&watched[i].t);
+		if (!k || watched[i].reported_once)
 			continue;
-		const char *nome = k->cfg.nome ? k->cfg.nome : "?";
-		char motivo[96] = "";
+		const char *name = k->cfg.name ? k->cfg.name : "?";
+		char reason[96] = "";
 		/* Sul robot una sola scadenza mancata, di qualsiasi task, è un guasto (decisione del 2026-11-04). Nel
 		   simulatore, dove lo scheduling è quello normale del PC, restano solo contate. */
-		int scadenza = !d.cfg.senza_rt && atomic_load(&k->mancate_totali) > sorvegliati[i].mancate_viste;
-		if (scadenza) {
-			snprintf(motivo, sizeof motivo, "il task %s ha mancato una scadenza", nome);
-			evento("PRIMA SCADENZA MANCATA %s job %llu: risposta %.3f ms su %.3f (attesa %.3f, esecuzione %.3f, di cui CPU %.3f)",
-			       nome, (unsigned long long)k->prima_mancata.job, k->prima_mancata.risposta_ns / 1e6,
-			       k->cfg.deadline_ns / 1e6, k->prima_mancata.latenza_ns / 1e6,
-			       k->prima_mancata.esecuzione_ns / 1e6, k->prima_mancata.cpu_ns / 1e6);
-		} else if (rt_task_bloccato(k, t, sorvegliati[i].soglia_ns))
-			snprintf(motivo, sizeof motivo, "il task %s è bloccato", nome);
-		else if (atomic_load(&k->mancate_di_fila) >= 3)
-			snprintf(motivo, sizeof motivo, "il task %s ha mancato 3 scadenze di fila", nome);
-		if (!motivo[0])
+		int deadline_missed = !d.cfg.without_rt && atomic_load(&k->total_misses) > watched[i].seen_misses;
+		if (deadline_missed) {
+			snprintf(reason, sizeof reason, "il task %s ha mancato una scadenza", name);
+			event("PRIMA SCADENZA MANCATA %s job %llu: risposta %.3f ms su %.3f (attesa %.3f, esecuzione %.3f, di cui CPU %.3f)",
+			       name, (unsigned long long)k->first_miss.job, k->first_miss.response_ns / 1e6,
+			       k->cfg.deadline_ns / 1e6, k->first_miss.latency_ns / 1e6,
+			       k->first_miss.execution_ns / 1e6, k->first_miss.cpu_ns / 1e6);
+		} else if (rt_task_is_stuck(k, t, watched[i].threshold_ns))
+			snprintf(reason, sizeof reason, "il task %s è bloccato", name);
+		else if (atomic_load(&k->consecutive_misses) >= 3)
+			snprintf(reason, sizeof reason, "il task %s ha mancato 3 scadenze di fila", name);
+		if (!reason[0])
 			continue;
-		sorvegliati[i].segnalato = 1;
-		if (sorvegliati[i].critico || scadenza)
-			entra_in_guasto(motivo);
+		watched[i].reported_once = 1;
+		if (watched[i].critical || deadline_missed)
+			enter_fault(reason);
 		else
-			evento("ATTENZIONE: %s (non critico)", motivo);
+			event("ATTENZIONE: %s (non critico)", reason);
 	}
-	tasti_e_base(t);
-	guasto_chiesto_da_un_task();
+	buttons_and_base(t);
+	task_fault_request();
 
-	if (d.fase != DRV_AVVIO) {
-		aggiorna_ruote(t, 1);
-		aggiorna_attuatori(t);
-		aggiorna_lidar(t);
+	if (d.phase != DRV_STARTING) {
+		update_wheels(t, 1);
+		update_actuators(t);
+		update_lidar(t);
 	}
-	if (t - d.t_secondo >= RT_S(1)) {
-		d.sensori_secondo[1] = d.sensori_secondo[0];
-		d.sensori_secondo[0] = 0;
-		d.t_secondo += RT_S(1);
-		if (t - d.t_secondo > RT_S(1))
-			d.t_secondo = t;
+	if (t - d.t_second >= RT_S(1)) {
+		d.sensors_per_second[1] = d.sensors_per_second[0];
+		d.sensors_per_second[0] = 0;
+		d.t_second += RT_S(1);
+		if (t - d.t_second > RT_S(1))
+			d.t_second = t;
 	}
-	pubblica_stato(t);
+	publish_status(t);
 }
 
 /* --------------------------------------------------------------------------------------------- thread --- */
 
 /* Legge tutto quello che c'è. Ritorna -1 se la seriale è chiusa dall'altra parte (succede solo con le
  * pseudo-seriali del simulatore, quando il simulatore esce). */
-static int leggi(int fd, int gd32, int64_t t)
+static int read_serial(int fd, int is_gd32, int64_t t)
 {
 	uint8_t buf[1024];
 	ssize_t k;
 	while ((k = read(fd, buf, sizeof buf)) > 0) {
-		registra(gd32 ? CANALE_GD32 : CANALE_LIDAR, REG_VERSO_SOC, buf, (size_t)k, t);
-		if (gd32)
-			gd32_deframer_scrivi(&d.dg, buf, (size_t)k, frame_gd32, &t);
+		record(is_gd32 ? CHANNEL_GD32 : CHANNEL_LIDAR, REG_VERSO_SOC, buf, (size_t)k, t);
+		if (is_gd32)
+			gd32_deframer_feed(&d.dg, buf, (size_t)k, on_gd32_frame, &t);
 		else
-			lidar_deframer_scrivi(&d.dl, buf, (size_t)k, pacchetto_lidar, &t);
+			lidar_deframer_feed(&d.dl, buf, (size_t)k, on_lidar_packet, &t);
 	}
 	return (k == 0 || (k < 0 && errno != EAGAIN && errno != EINTR)) ? -1 : 0;
 }
 
-static void fissa_cpu(void)
+static void pin_cpu(void)
 {
 	if (d.cfg.cpu >= 0) {
 		cpu_set_t set;
@@ -1087,22 +1087,22 @@ static void fissa_cpu(void)
  * interruzioni si cercano per nome in /proc/interrupts, i thread per nome in /proc/PID/comm. kblockd e i kworker/u il
  * kernel 3.4 non li lascia spostare. Si fa una volta, all'avvio; lo stato resta fino al riavvio del robot.
  */
-static void sposta_flash(int cpu)
+static void move_flash_work(int cpu)
 {
 	int irq = 0, thread = 0;
-	char riga[256], percorso[64];
+	char line[256], path[64];
 
 	FILE *f = fopen("/proc/interrupts", "r");
-	while (f && fgets(riga, sizeof riga, f)) {
-		size_t n = strlen(riga);
-		while (n && (riga[n - 1] == '\n' || riga[n - 1] == ' '))
-			riga[--n] = 0;
+	while (f && fgets(line, sizeof line, f)) {
+		size_t n = strlen(line);
+		while (n && (line[n - 1] == '\n' || line[n - 1] == ' '))
+			line[--n] = 0;
 		int num;
-		if ((n >= 5 && !strcmp(riga + n - 5, " nand")) || (n >= 11 && !strcmp(riga + n - 11, " sunxi_dmac"))) {
-			if (sscanf(riga, " %d:", &num) != 1)
+		if ((n >= 5 && !strcmp(line + n - 5, " nand")) || (n >= 11 && !strcmp(line + n - 11, " sunxi_dmac"))) {
+			if (sscanf(line, " %d:", &num) != 1)
 				continue;
-			snprintf(percorso, sizeof percorso, "/proc/irq/%d/smp_affinity", num);
-			FILE *a = fopen(percorso, "w");
+			snprintf(path, sizeof path, "/proc/irq/%d/smp_affinity", num);
+			FILE *a = fopen(path, "w");
 			if (a && fprintf(a, "%x\n", 1u << cpu) > 0 && fclose(a) == 0)
 				irq++;
 			else if (a)
@@ -1121,174 +1121,174 @@ static void sposta_flash(int cpu)
 		int pid = atoi(e->d_name);
 		if (pid <= 0)
 			continue;
-		snprintf(percorso, sizeof percorso, "/proc/%d/comm", pid);
-		FILE *c = fopen(percorso, "r");
+		snprintf(path, sizeof path, "/proc/%d/comm", pid);
+		FILE *c = fopen(path, "r");
 		if (!c)
 			continue;
-		char nome[32] = "";
-		if (fgets(nome, sizeof nome, c))
-			nome[strcspn(nome, "\n")] = 0;
+		char name[32] = "";
+		if (fgets(name, sizeof name, c))
+			name[strcspn(name, "\n")] = 0;
 		fclose(c);
-		if (!strcmp(nome, "nand") || !strcmp(nome, "nand_rcd") || !strcmp(nome, "bdi-default") ||
-		    !strcmp(nome, "sync_supers") || !strncmp(nome, "jbd2/", 5) || !strncmp(nome, "flush-", 6))
+		if (!strcmp(name, "nand") || !strcmp(name, "nand_rcd") || !strcmp(name, "bdi-default") ||
+		    !strcmp(name, "sync_supers") || !strncmp(name, "jbd2/", 5) || !strncmp(name, "flush-", 6))
 			if (sched_setaffinity(pid, sizeof set, &set) == 0)
 				thread++;
 	}
 	if (dir)
 		closedir(dir);
-	evento("flash sul core %d: %d interruzioni e %d thread del kernel spostati", cpu, irq, thread);
+	event("flash sul core %d: %d interruzioni e %d thread del kernel spostati", cpu, irq, thread);
 }
 
-static int64_t minimo(int64_t a, int64_t b) { return a < b ? a : b; }
+static int64_t min_ns(int64_t a, int64_t b) { return a < b ? a : b; }
 
-static void lavoro_fatto(int64_t inizio)
+static void work_done(int64_t start)
 {
-	int64_t lavoro = adesso() - inizio;
-	if (lavoro > d.lavoro_max && d.risvegli > 100)
-		d.lavoro_max = lavoro;
-	d.risvegli++;
-	atomic_fetch_add(&giri_driver, 1);
+	int64_t work = now() - start;
+	if (work > d.work_max && d.wakeups_done > 100)
+		d.work_max = work;
+	d.wakeups_done++;
+	atomic_fetch_add(&driver_rounds, 1);
 }
 
 /*
  * Il driver ha due thread, sullo stesso core (docs/fase3.md, prove r4-r6: un thread che dorme in ppoll sulle seriali
  * a volte si sveglia con millisecondi di ritardo, uno che dorme con clock_nanosleep no):
- *   - TEMPO (priorità cfg.priorita, 99): dorme con clock_nanosleep fino al prossimo evento a tempo e fa heartbeat,
+ *   - TEMPO (priorità cfg.priority, 99): dorme con clock_nanosleep fino al prossimo evento a tempo e fa heartbeat,
  *     keepalive, il ciclo da 20 ms (0x66, attuatori, lidar, watchdog, stato);
- *   - RICEZIONE (priorità cfg.priorita - 1, 98): dorme in ppoll sulle seriali e sull'eventfd dei comandi; decodifica,
+ *   - RICEZIONE (priorità cfg.priority - 1, 98): dorme in ppoll sulle seriali e sull'eventfd dei comandi; decodifica,
  *     pubblica, sveglia i task, reagisce subito ai sensori e ai comandi nuovi.
  * Lo stato interno del driver (d) lo usano entrambi, sempre con d.mx preso (mutex con priority inheritance; sezioni
  * di decine di microsecondi). I task non lo toccano mai.
  */
-static void *ciclo_tempo(void *arg)
+static void *timer_loop(void *arg)
 {
 	(void)arg;
-	fissa_cpu();
+	pin_cpu();
 	pthread_mutex_lock(&d.mx);
-	int64_t t = adesso();
-	d.t_avvio = d.t_secondo = t;
-	d.prossimo_tick = d.prossimo_hb = d.prossimo_ka = t;
-	arresto();                                  /* stato sicuro prima di tutto */
-	evento("driver avviato (CPU %d, %s), sequenza di avvio del GD32", d.cfg.cpu,
-	       d.senza_rt ? "SENZA SCHED_FIFO" : "SCHED_FIFO 99 + ricezione 98");
-	if (!d.cfg.senza_rt && !d.senza_rt && d.cfg.cpu_flash >= 0)      /* solo sul robot: nel simulatore cfg.senza_rt è 1 */
-		sposta_flash(d.cfg.cpu_flash);
+	int64_t t = now();
+	d.t_startup = d.t_second = t;
+	d.next_tick = d.next_hb = d.next_ka = t;
+	full_stop();                                  /* stato sicuro prima di tutto */
+	event("driver avviato (CPU %d, %s), sequenza di avvio del GD32", d.cfg.cpu,
+	       d.without_rt ? "SENZA SCHED_FIFO" : "SCHED_FIFO 99 + ricezione 98");
+	if (!d.cfg.without_rt && !d.without_rt && d.cfg.cpu_flash >= 0)      /* solo sul robot: nel simulatore cfg.without_rt è 1 */
+		move_flash_work(d.cfg.cpu_flash);
 	pthread_mutex_unlock(&d.mx);
 
 	while (!atomic_load(&d.stop)) {
-		rt_dormi_fino_a(minimo(d.prossimo_tick, minimo(d.prossimo_hb, d.prossimo_ka)));
+		rt_sleep_until(min_ns(d.next_tick, min_ns(d.next_hb, d.next_ka)));
 		if (atomic_load(&d.stop))
 			break;
 		pthread_mutex_lock(&d.mx);
-		int64_t inizio = adesso();
-		t = inizio;
-		if (t >= d.prossimo_hb) {
-			invia(GD32_HEARTBEAT, NULL, 0);
-			d.heartbeat++;
-			d.prossimo_hb += HEARTBEAT_NS;
-			if (d.prossimo_hb <= t)
-				d.prossimo_hb = t + HEARTBEAT_NS;
+		int64_t start = now();
+		t = start;
+		if (t >= d.next_hb) {
+			send(GD32_HEARTBEAT, NULL, 0);
+			d.heartbeats++;
+			d.next_hb += HEARTBEAT_NS;
+			if (d.next_hb <= t)
+				d.next_hb = t + HEARTBEAT_NS;
 		}
-		if (t >= d.prossimo_ka) {
-			invia(GD32_KEEPALIVE, NULL, 0);
-			d.keepalive++;
-			d.prossimo_ka += KEEPALIVE_NS;
-			if (d.prossimo_ka <= t)
-				d.prossimo_ka = t + KEEPALIVE_NS;
+		if (t >= d.next_ka) {
+			send(GD32_KEEPALIVE, NULL, 0);
+			d.keepalives++;
+			d.next_ka += KEEPALIVE_NS;
+			if (d.next_ka <= t)
+				d.next_ka = t + KEEPALIVE_NS;
 		}
-		if (t >= d.prossimo_tick) {
-			int64_t ritardo = t - d.prossimo_tick;
-			if (ritardo > d.tick_ritardo_max && d.risvegli > 100) {  /* i primi giri (avvio) non contano */
-				d.tick_ritardo_max = ritardo;
-				if (ritardo > RT_US(300))
-					evento("ritardo del ciclo da 20 ms: %.0f us (nuovo massimo)", ritardo / 1e3);
+		if (t >= d.next_tick) {
+			int64_t delay = t - d.next_tick;
+			if (delay > d.tick_delay_max && d.wakeups_done > 100) {  /* i primi giri (avvio) non contano */
+				d.tick_delay_max = delay;
+				if (delay > RT_US(300))
+					event("ritardo del ciclo da 20 ms: %.0f us (nuovo massimo)", delay / 1e3);
 			}
 			tick(t);
-			d.prossimo_tick += TICK_NS;
-			if (d.prossimo_tick <= t)
-				d.prossimo_tick = t + TICK_NS;
+			d.next_tick += TICK_NS;
+			if (d.next_tick <= t)
+				d.next_tick = t + TICK_NS;
 		}
-		lavoro_fatto(inizio);
+		work_done(start);
 		pthread_mutex_unlock(&d.mx);
 	}
 	return NULL;
 }
 
-static void *ciclo_ricezione(void *arg)
+static void *receiver_loop(void *arg)
 {
 	(void)arg;
-	fissa_cpu();
+	pin_cpu();
 	while (!atomic_load(&d.stop)) {
 		struct pollfd p[3] = {
-			{ .fd = d.gd32_chiusa ? -1 : d.fd_gd32, .events = POLLIN }, { .fd = d.fd_sveglia, .events = POLLIN },
-			{ .fd = d.lidar_chiusa ? -1 : d.fd_lidar, .events = POLLIN },
+			{ .fd = d.gd32_closed ? -1 : d.fd_gd32, .events = POLLIN }, { .fd = d.fd_wakeup, .events = POLLIN },
+			{ .fd = d.lidar_closed ? -1 : d.fd_lidar, .events = POLLIN },
 		};
 		struct timespec to = { .tv_sec = 1 };
 		if (ppoll(p, d.fd_lidar >= 0 ? 3 : 2, &to, NULL) <= 0)
 			continue;
 		pthread_mutex_lock(&d.mx);
-		int64_t inizio = adesso(), t = inizio;
-		if ((p[0].revents & (POLLIN | POLLHUP | POLLERR)) && leggi(d.fd_gd32, 1, t) < 0 && !d.gd32_chiusa) {
-			d.gd32_chiusa = 1;
-			entra_in_guasto("la seriale del GD32 è stata chiusa");
+		int64_t start = now(), t = start;
+		if ((p[0].revents & (POLLIN | POLLHUP | POLLERR)) && read_serial(d.fd_gd32, 1, t) < 0 && !d.gd32_closed) {
+			d.gd32_closed = 1;
+			enter_fault("la seriale del GD32 è stata chiusa");
 		}
-		if (d.fd_lidar >= 0 && (p[2].revents & (POLLIN | POLLHUP | POLLERR)) && leggi(d.fd_lidar, 0, t) < 0 &&
-		    !d.lidar_chiusa) {
-			d.lidar_chiusa = 1;
-			evento("ATTENZIONE: la seriale del lidar è stata chiusa");
+		if (d.fd_lidar >= 0 && (p[2].revents & (POLLIN | POLLHUP | POLLERR)) && read_serial(d.fd_lidar, 0, t) < 0 &&
+		    !d.lidar_closed) {
+			d.lidar_closed = 1;
+			event("ATTENZIONE: la seriale del lidar è stata chiusa");
 		}
 		if (p[1].revents & POLLIN) {
 			uint64_t n;
-			if (read(d.fd_sveglia, &n, sizeof n) < 0)
+			if (read(d.fd_wakeup, &n, sizeof n) < 0)
 				n = 0;
-			if (d.fase != DRV_AVVIO && !atomic_load(&d.stop)) {   /* comandi nuovi dei task: subito */
-				aggiorna_ruote(t, 0);
-				aggiorna_attuatori(t);
+			if (d.phase != DRV_STARTING && !atomic_load(&d.stop)) {   /* comandi nuovi dei task: subito */
+				update_wheels(t, 0);
+				update_actuators(t);
 			}
 		}
-		lavoro_fatto(inizio);
+		work_done(start);
 		pthread_mutex_unlock(&d.mx);
 	}
 	return NULL;
 }
 
 /* Dopo che i due thread sono terminati: tutto fermo. */
-static void spegni(void)
+static void shutdown(void)
 {
-	arresto();
+	full_stop();
 	if (d.fd_lidar >= 0) {
-		invia1(GD32_ALIMENTAZIONE_LIDAR, 0);
-		invia_i32(GD32_MOTORE_LIDAR, 0);
+		send_u8(GD32_LIDAR_POWER, 0);
+		send_i32(GD32_LIDAR_MOTOR, 0);
 	}
-	invia1(GD32_LED_TASTO, LED_NORMALE);
+	send_u8(GD32_BUTTON_LED, LED_NORMAL);
 	tcdrain(d.fd_gd32);
-	d.fase = DRV_FINE;
-	pubblica_stato(adesso());
-	evento("driver fermato: motori a zero, lidar spento");
+	d.phase = DRV_STOPPED;
+	publish_status(now());
+	event("driver fermato: motori a zero, lidar spento");
 }
 
 /* Thread NON real-time: stampa gli eventi e suona. Così il driver non fa mai I/O lento. */
-static void *ciclo_servizio(void *arg)
+static void *service_loop(void *arg)
 {
 	(void)arg;
 	for (;;) {
-		int fine = atomic_load(&d.stop) && d.fase == DRV_FINE;
-		while (atomic_load(&ev_coda) != atomic_load(&ev_testa)) {
-			uint32_t c = atomic_load(&ev_coda);
-			fprintf(stderr, "driver %s\n", eventi[c % MAX_EVENTI]);
-			atomic_store(&ev_coda, c + 1);
+		int end = atomic_load(&d.stop) && d.phase == DRV_STOPPED;
+		while (atomic_load(&event_tail) != atomic_load(&event_head)) {
+			uint32_t c = atomic_load(&event_tail);
+			fprintf(stderr, "driver %s\n", event_queue[c % MAX_EVENTS]);
+			atomic_store(&event_tail, c + 1);
 		}
-		const char *s = atomic_exchange(&cmd.suono, NULL);
-		if (s && d.cfg.cmd_suono) {
+		const char *s = atomic_exchange(&cmd.sound, NULL);
+		if (s && d.cfg.sound_cmd) {
 			char c[300];
-			snprintf(c, sizeof c, d.cfg.cmd_suono, s);
+			snprintf(c, sizeof c, d.cfg.sound_cmd, s);
 			char *argv[] = { "sh", "-c", c, NULL };
 			pid_t pid;
 			if (posix_spawn(&pid, "/bin/sh", NULL, NULL, argv, environ) == 0)
 				waitpid(pid, NULL, 0);
 		}
-		registra_svuota();
-		if (fine)
+		record_flush();
+		if (end)
 			break;
 		usleep(20000);
 	}
@@ -1297,11 +1297,11 @@ static void *ciclo_servizio(void *arg)
 
 /* ------------------------------------------------------------------------------------------------ API --- */
 
-static void sveglia_driver(void);
+static void wake_driver(void);
 
-/* Thread SCHED_FIFO alla priorità data, sullo stack di RT_STACK_DEFAULT; senza permessi (solo con cfg.senza_rt)
+/* Thread SCHED_FIFO alla priorità data, sullo stack di RT_STACK_DEFAULT; senza permessi (solo con cfg.without_rt)
  * parte con lo scheduling normale. */
-static int crea_thread(pthread_t *th, void *(*f)(void *), int prio)
+static int create_thread(pthread_t *th, void *(*f)(void *), int prio)
 {
 	pthread_attr_t a;
 	struct sched_param sp = { .sched_priority = prio };
@@ -1311,11 +1311,11 @@ static int crea_thread(pthread_t *th, void *(*f)(void *), int prio)
 	pthread_attr_setschedparam(&a, &sp);
 	pthread_attr_setstacksize(&a, RT_STACK_DEFAULT);
 	int r = pthread_create(th, &a, f, NULL);
-	if (r == EPERM && d.cfg.senza_rt) {
+	if (r == EPERM && d.cfg.without_rt) {
 		pthread_attr_setinheritsched(&a, PTHREAD_INHERIT_SCHED);
-		if (!d.senza_rt)
+		if (!d.without_rt)
 			fprintf(stderr, "driver: niente permessi per SCHED_FIFO: gira con lo scheduling normale (solo per il PC)\n");
-		d.senza_rt = 1;
+		d.without_rt = 1;
 		r = pthread_create(th, &a, f, NULL);
 	}
 	pthread_attr_destroy(&a);
@@ -1328,99 +1328,99 @@ void drv_config_default(drv_config_t *c)
 	/* nel simulatore ./rtes.sh sim imposta RTES_GD32 e RTES_LIDAR: lo stesso programma va sul PC e sul robot */
 	c->dev_gd32 = getenv("RTES_GD32") ? getenv("RTES_GD32") : "/dev/ttyS3";
 	c->dev_lidar = getenv("RTES_LIDAR") ? getenv("RTES_LIDAR") : "/dev/ttyS1";
-	c->senza_rt = getenv("RTES_GD32") != NULL;   /* nel simulatore si parte anche senza permessi per SCHED_FIFO */
-	c->registra = getenv("RTES_REGISTRA");       /* i programmi dei task non hanno opzioni: la registrazione si chiede così */
-	c->prova_rientro_s = getenv("RTES_PROVA_RIENTRO_DOPO_S") ? atof(getenv("RTES_PROVA_RIENTRO_DOPO_S")) : 0;
-	c->prova_premi_s = getenv("RTES_PROVA_PREMI_DOPO_S") ? atof(getenv("RTES_PROVA_PREMI_DOPO_S")) : 0;
+	c->without_rt = getenv("RTES_GD32") != NULL;   /* nel simulatore si parte anche senza permessi per SCHED_FIFO */
+	c->record = getenv("RTES_REGISTRA");       /* i programmi dei task non hanno opzioni: la registrazione si chiede così */
+	c->test_return_s = getenv("RTES_PROVA_RIENTRO_DOPO_S") ? atof(getenv("RTES_PROVA_RIENTRO_DOPO_S")) : 0;
+	c->test_press_s = getenv("RTES_PROVA_PREMI_DOPO_S") ? atof(getenv("RTES_PROVA_PREMI_DOPO_S")) : 0;
 	c->cpu = 0;
 	c->cpu_flash = 3;
-	c->priorita = RT_PRIO_DRIVER;
-	c->motori = 1;
-	c->aspirazione = 1;
-	c->cliff_atteso = -1;
-	c->lidar_giri_s = 6.0;
-	c->scarto_lidar_cdeg = LIDAR_SCARTO_CDEG;
-	c->cmd_suono = access("/bin/tinyplayer", X_OK) == 0 ? "tinyplayer /usr/share/audio/english/%s.mp3 >/dev/null 2>&1"
+	c->priority = RT_PRIO_DRIVER;
+	c->motors = 1;
+	c->suction = 1;
+	c->expected_cliff = -1;
+	c->lidar_rev_s = 6.0;
+	c->lidar_offset_cdeg = LIDAR_OFFSET_CDEG;
+	c->sound_cmd = access("/bin/tinyplayer", X_OK) == 0 ? "tinyplayer /usr/share/audio/english/%s.mp3 >/dev/null 2>&1"
 	                                                     : NULL;
 														 
 }
 
-void drv_config_prova(drv_config_t *c)
+void drv_config_test(drv_config_t *c)
 {
 	drv_config_default(c);
-	c->aspirazione = 0;
+	c->suction = 0;
 }
 
-int drv_avvia(const drv_config_t *c)
+int drv_start(const drv_config_t *c)
 {
 	memset(&d, 0, sizeof d);
 	d.cfg = *c;
 	d.fd_lidar = -1;
-	d.t0 = adesso();
-	d.fase = DRV_AVVIO;
-	d.lat_inv = d.cen_inv = d.asp_inv = 0;
-	d.led_inv = d.sensori_inv = -1;
-	d.bat_prec = BAT_OK;
+	d.t0 = now();
+	d.phase = DRV_STARTING;
+	d.side_sent = d.main_sent = d.suction_sent = 0;
+	d.led_sent = d.sensors_sent = -1;
+	d.prev_battery = BAT_OK;
 	gd32_deframer_init(&d.dg);
 	lidar_deframer_init(&d.dl);
-	lidar_assemblatore_init(&d.ass, c->scarto_lidar_cdeg);
-	lidar_regolatore_init(&d.reg, 0);
-	batteria_init(&d.bat);
-	contatti_init(&d.contatti);
-	aggancio_init(&d.agg);
-	atomic_store(&cmd.aggancia, 0);
-	sic_init(&d.sic, 1, SENSORI_VECCHI_NS);
-	if (c->cliff_atteso >= 0)
-		sic_cliff_atteso(&d.sic, (uint8_t)c->cliff_atteso);
-	scambio_init(&sc_sensori, &buf_sensori[0], &buf_sensori[1], sizeof buf_sensori[0]);
-	scambio_init(&sc_giro, &buf_giro[0], &buf_giro[1], sizeof buf_giro[0]);
-	scambio_init(&sc_stato, &buf_stato[0], &buf_stato[1], sizeof buf_stato[0]);
-	scambio_init(&sc_contatti, &buf_contatti[0], &buf_contatti[1], sizeof buf_contatti[0]);
-	scambio_init(&sc_posa, &buf_posa[0], &buf_posa[1], sizeof buf_posa[0]);
-	atomic_store(&posa_pronta, 1);
+	lidar_assembler_init(&d.assembler, c->lidar_offset_cdeg);
+	lidar_regulator_init(&d.regulator, 0);
+	battery_init(&d.bat);
+	contacts_init(&d.contacts);
+	docking_init(&d.dock_state);
+	atomic_store(&cmd.dock, 0);
+	interlock_init(&d.interlock, 1, SENSORS_OLD_NS);
+	if (c->expected_cliff >= 0)
+		interlock_set_expected_cliff(&d.interlock, (uint8_t)c->expected_cliff);
+	exchange_init(&sensors_exchange, &sensors_buffers[0], &sensors_buffers[1], sizeof sensors_buffers[0]);
+	exchange_init(&scan_exchange, &scan_buffers[0], &scan_buffers[1], sizeof scan_buffers[0]);
+	exchange_init(&status_exchange, &status_buffers[0], &status_buffers[1], sizeof status_buffers[0]);
+	exchange_init(&contacts_exchange, &contacts_buffers[0], &contacts_buffers[1], sizeof contacts_buffers[0]);
+	exchange_init(&pose_exchange, &pose_buffers[0], &pose_buffers[1], sizeof pose_buffers[0]);
+	atomic_store(&pose_ready, 1);
 	atomic_store(&cmd.vw, 0);
-	atomic_store(&cmd.spazzola_lat, 0);
-	atomic_store(&cmd.spazzola_cen, 0);
-	atomic_store(&cmd.aspirazione, 0);
-	atomic_store(&cmd.led, LED_NORMALE);
-	atomic_store(&cmd.lidar_acceso, 0);
-	atomic_store(&cmd.lidar_cgiri, 0);
-	atomic_store(&cmd.uscita_base, 0);
-	atomic_store(&cmd.azzera_guasto, 0);
-	atomic_store(&cmd.suono, NULL);
+	atomic_store(&cmd.side_brush_cmd, 0);
+	atomic_store(&cmd.main_brush_cmd, 0);
+	atomic_store(&cmd.suction, 0);
+	atomic_store(&cmd.led, LED_NORMAL);
+	atomic_store(&cmd.lidar_on, 0);
+	atomic_store(&cmd.lidar_crev_s, 0);
+	atomic_store(&cmd.leaving_base, 0);
+	atomic_store(&cmd.clear_fault, 0);
+	atomic_store(&cmd.sound, NULL);
 	atomic_store(&cmd.task_fault, DRV_FAULT_NONE);
-	atomic_store(&ev_testa, 0);
-	atomic_store(&ev_coda, 0);
+	atomic_store(&event_head, 0);
+	atomic_store(&event_tail, 0);
 	atomic_init(&d.stop, 0);
 
-	if (!c->forza && (occupato(c->dev_gd32) || (c->dev_lidar && occupato(c->dev_lidar))))
+	if (!c->force && (device_busy(c->dev_gd32) || (c->dev_lidar && device_busy(c->dev_lidar))))
 		return EBUSY;
-	if (registra_apri(c) != 0) {
+	if (record_open(c) != 0) {
 		int e = errno;
-		fprintf(stderr, "driver: registrazione in %s: %s\n", c->registra, strerror(e));
+		fprintf(stderr, "driver: registrazione in %s: %s\n", c->record, strerror(e));
 		return e ? e : EIO;
 	}
-	if ((d.fd_gd32 = apri_seriale(c->dev_gd32)) < 0) {
+	if ((d.fd_gd32 = open_serial(c->dev_gd32)) < 0) {
 		int e = errno;
 		fprintf(stderr, "driver: apro %s: %s\n", c->dev_gd32, strerror(e));
-		registra_chiudi();
+		record_close();
 		return e;
 	}
-	if (c->dev_lidar && *c->dev_lidar && (d.fd_lidar = apri_seriale(c->dev_lidar)) < 0) {
+	if (c->dev_lidar && *c->dev_lidar && (d.fd_lidar = open_serial(c->dev_lidar)) < 0) {
 		int e = errno;
 		fprintf(stderr, "driver: apro %s: %s\n", c->dev_lidar, strerror(e));
 		close(d.fd_gd32);
-		registra_chiudi();
+		record_close();
 		return e;
 	}
-	d.fd_sveglia = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
+	d.fd_wakeup = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
 	if (rt_init() != 0)
 		fprintf(stderr, "driver: mlockall non riuscito (sul PC va bene, sul robot no)\n");
 
 	rt_mutex_init(&d.mx);
-	int r = crea_thread(&d.thread, ciclo_tempo, c->priorita);
+	int r = create_thread(&d.thread, timer_loop, c->priority);
 	if (r == 0) {
-		r = crea_thread(&d.ricezione, ciclo_ricezione, c->priorita > RT_PRIO_MIN ? c->priorita - 1 : c->priorita);
+		r = create_thread(&d.receiver, receiver_loop, c->priority > RT_PRIO_MIN ? c->priority - 1 : c->priority);
 		if (r) {
 			atomic_store(&d.stop, 1);
 			pthread_join(d.thread, NULL);
@@ -1431,7 +1431,7 @@ int drv_avvia(const drv_config_t *c)
 		close(d.fd_gd32);
 		if (d.fd_lidar >= 0)
 			close(d.fd_lidar);
-		registra_chiudi();
+		record_close();
 		return r;
 	}
 	pthread_attr_t a;
@@ -1439,185 +1439,185 @@ int drv_avvia(const drv_config_t *c)
 	 * (8 MB) supera il limite di memoria bloccabile dei normali utenti (sul PC pthread_create fallirebbe). */
 	pthread_attr_init(&a);
 	pthread_attr_setstacksize(&a, 128 * 1024);
-	r = pthread_create(&d.servizio, &a, ciclo_servizio, NULL);
+	r = pthread_create(&d.service, &a, service_loop, NULL);
 	pthread_attr_destroy(&a);
 	if (r) {
 		fprintf(stderr, "driver: non riesco a creare il thread di servizio: %s\n", strerror(r));
 		atomic_store(&d.stop, 1);
-		sveglia_driver();
+		wake_driver();
 		pthread_join(d.thread, NULL);
-		pthread_join(d.ricezione, NULL);
+		pthread_join(d.receiver, NULL);
 		close(d.fd_gd32);
 		if (d.fd_lidar >= 0)
 			close(d.fd_lidar);
-		registra_chiudi();
+		record_close();
 		return r;
 	}
-	d.avviato = 1;
+	d.started = 1;
 	return 0;
 }
 
-static void sveglia_driver(void)
+static void wake_driver(void)
 {
-	uint64_t uno = 1;
-	if (write(d.fd_sveglia, &uno, sizeof uno) < 0)
+	uint64_t one = 1;
+	if (write(d.fd_wakeup, &one, sizeof one) < 0)
 		return;
 }
 
-void drv_ferma(void)
+void drv_stop(void)
 {
-	if (!d.avviato)
+	if (!d.started)
 		return;
-	d.avviato = 0;
+	d.started = 0;
 	atomic_store(&d.stop, 1);
-	sveglia_driver();
-	pthread_join(d.ricezione, NULL);
+	wake_driver();
+	pthread_join(d.receiver, NULL);
 	pthread_join(d.thread, NULL);        /* si sveglia al prossimo evento a tempo: al massimo 20 ms */
-	spegni();
-	pthread_join(d.servizio, NULL);
-	registra_chiudi();
+	shutdown();
+	pthread_join(d.service, NULL);
+	record_close();
 	close(d.fd_gd32);
 	if (d.fd_lidar >= 0)
 		close(d.fd_lidar);
-	close(d.fd_sveglia);
+	close(d.fd_wakeup);
 }
 
-uint32_t drv_sensori(drv_sensori_t *out) { return scambio_leggi(&sc_sensori, out); }
-uint32_t drv_giro(lidar_giro_t *out) { return scambio_leggi(&sc_giro, out); }
-uint32_t drv_stato(drv_stato_t *out) { return scambio_leggi(&sc_stato, out); }
-uint32_t drv_contatti(drv_contatti_t *out) { return scambio_leggi(&sc_contatti, out); }
+uint32_t drv_sensors(drv_sensors_t *out) { return exchange_read(&sensors_exchange, out); }
+uint32_t drv_scan(lidar_scan_t *out) { return exchange_read(&scan_exchange, out); }
+uint32_t drv_status(drv_status_t *out) { return exchange_read(&status_exchange, out); }
+uint32_t drv_contacts(drv_contacts_t *out) { return exchange_read(&contacts_exchange, out); }
 
-void drv_punto_xy(const lidar_punto_t *p, double *x, double *y)
+void drv_point_xy(const lidar_point_t *p, double *x, double *y)
 {
-	lidar_punto_xy(p, x, y);
+	lidar_point_xy(p, x, y);
 }
 
-void drv_posa(double x, double y, double theta)
+void drv_pose(double x, double y, double theta)
 {
-	if (!atomic_load(&posa_pronta) || !(x == x) || !(y == y) || !(theta == theta))   /* prima di drv_avvia, o NaN */
+	if (!atomic_load(&pose_ready) || !(x == x) || !(y == y) || !(theta == theta))   /* prima di drv_start, o NaN */
 		return;
-	drv_posa_t p = { .x = x, .y = y, .theta = theta, .t_ns = adesso() };
-	scambio_scrivi(&sc_posa, &p);
+	drv_pose_t p = { .x = x, .y = y, .theta = theta, .t_ns = now() };
+	exchange_write(&pose_exchange, &p);
 }
 
-void drv_velocita(double v, double w)
+void drv_velocity(double v, double w)
 {
 	if (!(v == v)) v = 0;                         /* NaN */
 	if (!(w == w)) w = 0;
 	v = fmax(-0.5, fmin(0.5, v));
 	w = fmax(-2 * M_PI, fmin(2 * M_PI, w));
-	int32_t vt = (int32_t)lround(v * SCALA_V), wt = (int32_t)lround(w * SCALA_W);
+	int32_t vt = (int32_t)lround(v * SCALE_V), wt = (int32_t)lround(w * SCALE_W);
 	atomic_store(&cmd.vw, (int64_t)((uint64_t)(uint32_t)vt << 32 | (uint32_t)wt));
-	sveglia_driver();
+	wake_driver();
 }
 
-void drv_spazzole(int laterale, int centrale)
+void drv_brushes(int side_speed, int main_speed)
 {
-	atomic_store(&cmd.spazzola_lat, laterale);
-	atomic_store(&cmd.spazzola_cen, centrale);
-	sveglia_driver();
+	atomic_store(&cmd.side_brush_cmd, side_speed);
+	atomic_store(&cmd.main_brush_cmd, main_speed);
+	wake_driver();
 }
 
-void drv_aspirazione(int giri_min)
+void drv_suction(int rpm)
 {
-	atomic_store(&cmd.aspirazione, giri_min);
-	sveglia_driver();
+	atomic_store(&cmd.suction, rpm);
+	wake_driver();
 }
 
-void drv_led(int modo)
+void drv_led(int mode)
 {
-	atomic_store(&cmd.led, modo);
-	sveglia_driver();
+	atomic_store(&cmd.led, mode);
+	wake_driver();
 }
 
-void drv_lidar(int acceso, double giri_s)
+void drv_lidar(int on, double rev_s)
 {
-	atomic_store(&cmd.lidar_cgiri, giri_s > 0 ? (int)lround(giri_s * 100) : 0);
-	atomic_store(&cmd.lidar_acceso, acceso ? 1 : 0);
+	atomic_store(&cmd.lidar_crev_s, rev_s > 0 ? (int)lround(rev_s * 100) : 0);
+	atomic_store(&cmd.lidar_on, on ? 1 : 0);
 }
 
-void drv_esci_dalla_base(int si)
+void drv_leave_base(int enable)
 {
-	atomic_store(&cmd.uscita_base, si ? 1 : 0);
-	sveglia_driver();
+	atomic_store(&cmd.leaving_base, enable ? 1 : 0);
+	wake_driver();
 }
 
-void drv_aggancia(int si)
+void drv_dock(int enable)
 {
-	atomic_store(&cmd.aggancia, si ? 1 : -1);      /* lo legge il prossimo frame: niente risveglio */
+	atomic_store(&cmd.dock, enable ? 1 : -1);      /* lo legge il prossimo frame: niente risveglio */
 }
 
-void drv_incastro(int si)
+void drv_stuck(int enable)
 {
-	atomic_store(&cmd.incastro, si ? 1 : 0);   /* lo legge il prossimo frame: niente risveglio */
+	atomic_store(&cmd.stuck, enable ? 1 : 0);   /* lo legge il prossimo frame: niente risveglio */
 }
 
-void drv_suono(const char *nome)
+void drv_sound(const char *name)
 {
-	atomic_store(&cmd.suono, nome);
+	atomic_store(&cmd.sound, name);
 }
 
-void drv_segnala_guasto(drv_task_fault_t reason)
+void drv_report_fault(drv_task_fault_t reason)
 {
 	atomic_store(&cmd.task_fault, (int)reason);   /* read at the next tick */
 }
 
-int drv_azzera_guasto(void)
+int drv_clear_fault(void)
 {
-	atomic_store(&cmd.azzera_guasto, 1);
+	atomic_store(&cmd.clear_fault, 1);
 	for (int i = 0; i < 10; i++) {           /* aspetta fino a 2 tick */
 		usleep(5000);
-		drv_stato_t s;
-		if (drv_stato(&s) && s.fase != DRV_GUASTO)
+		drv_status_t s;
+		if (drv_status(&s) && s.phase != DRV_FAULT)
 			return 0;
 	}
 	return -1;
 }
 
-int drv_sveglia_ai_sensori(rt_task_t *t)
+int drv_wake_on_sensors(rt_task_t *t)
 {
-	if (!t->cfg.sporadico)
+	if (!t->cfg.sporadic)
 		return EINVAL;
-	for (int i = 0; i < MAX_ISCRITTI; i++) {
-		rt_task_t *vuoto = NULL;
-		if (atomic_compare_exchange_strong(&iscritti[i], &vuoto, t))
+	for (int i = 0; i < MAX_SUBSCRIBERS; i++) {
+		rt_task_t *empty = NULL;
+		if (atomic_compare_exchange_strong(&subscribers[i], &empty, t))
 			return 0;
 	}
 	return ENOSPC;
 }
 
-int drv_sorveglia(rt_task_t *t, int critico, int64_t soglia_ns)
+int drv_watch(rt_task_t *t, int critical, int64_t threshold_ns)
 {
-	for (int i = 0; i < MAX_SORVEGLIATI; i++) {
-		if (atomic_load(&sorvegliati[i].t))
+	for (int i = 0; i < MAX_WATCHED; i++) {
+		if (atomic_load(&watched[i].t))
 			continue;
-		sorvegliati[i].critico = critico;
-		sorvegliati[i].soglia_ns = soglia_ns > 0 ? soglia_ns : 3 * t->cfg.periodo_ns;
-		sorvegliati[i].segnalato = 0;
-		sorvegliati[i].mancate_viste = 0;   /* conta anche quelle di prima: il task parte prima di essere sorvegliato */
-		rt_task_t *vuoto = NULL;
-		if (atomic_compare_exchange_strong(&sorvegliati[i].t, &vuoto, t))
+		watched[i].critical = critical;
+		watched[i].threshold_ns = threshold_ns > 0 ? threshold_ns : 3 * t->cfg.period_ns;
+		watched[i].reported_once = 0;
+		watched[i].seen_misses = 0;   /* conta anche quelle di prima: il task parte prima di essere sorvegliato */
+		rt_task_t *empty = NULL;
+		if (atomic_compare_exchange_strong(&watched[i].t, &empty, t))
 			return 0;
 	}
 	return ENOSPC;
 }
 
-void drv_dimentica(rt_task_t *t)
+void drv_forget(rt_task_t *t)
 {
-	for (int i = 0; i < MAX_ISCRITTI; i++) {
+	for (int i = 0; i < MAX_SUBSCRIBERS; i++) {
 		rt_task_t *x = t;
-		atomic_compare_exchange_strong(&iscritti[i], &x, NULL);
+		atomic_compare_exchange_strong(&subscribers[i], &x, NULL);
 	}
-	for (int i = 0; i < MAX_SORVEGLIATI; i++) {
+	for (int i = 0; i < MAX_WATCHED; i++) {
 		rt_task_t *x = t;
-		atomic_compare_exchange_strong(&sorvegliati[i].t, &x, NULL);
+		atomic_compare_exchange_strong(&watched[i].t, &x, NULL);
 	}
 	/* il driver potrebbe avere in mano il puntatore: si aspetta che finisca il risveglio in corso */
-	if (d.fase == DRV_FINE || atomic_load(&d.stop))
+	if (d.phase == DRV_STOPPED || atomic_load(&d.stop))
 		return;
-	uint64_t g = atomic_load(&giri_driver);
-	for (int i = 0; i < 100 && atomic_load(&giri_driver) < g + 2; i++) {
-		sveglia_driver();
+	uint64_t g = atomic_load(&driver_rounds);
+	for (int i = 0; i < 100 && atomic_load(&driver_rounds) < g + 2; i++) {
+		wake_driver();
 		usleep(1000);
 	}
 }

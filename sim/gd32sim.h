@@ -42,7 +42,7 @@
 typedef struct {
 	double t;
 	uint8_t cmd, n;
-	uint8_t dati[12];
+	uint8_t data[12];
 } sim_cmd_log_t;
 
 typedef struct {
@@ -53,7 +53,7 @@ typedef struct {
 
 typedef struct {
 	double t;                     /* da quando vale */
-	int modo;                     /* -1 = 0x66, -2 = 0x67, altrimenti nuovo valore di 0x65 */
+	int mode;                     /* -1 = 0x66, -2 = 0x67, altrimenti nuovo valore di 0x65 */
 	int32_t a, b;
 } sim_comando_t;
 
@@ -67,50 +67,50 @@ typedef struct {
 	/* fisica */
 	double x, y, dir;             /* posizione (m) e direzione (rad) */
 	double v_cmd, w_cmd;          /* velocità richieste dopo le rampe, in unità di 0x66 (tick/s per ruota) */
-	double vel_sx, vel_dx;        /* velocità delle ruote (tick/s) */
+	double v_measured, w_measured;        /* velocità delle ruote (tick/s) */
 	double dist_sx, dist_dx;      /* tick percorsi da ogni ruota (continui) */
 	int32_t enc_sx, enc_dx;
 	int32_t storia_enc[SIM_FINESTRA][2];
 	double storia_t[SIM_FINESTRA];
 	int i_enc;
 	double prossimo_enc;
-	int sollevato, caduto;
+	int lifted, caduto;
 	int bloccato, incastrato;     /* urto del corpo / della sola torretta nell'ultimo passo */
 	double ang_urto, t_urto;      /* urto del corpo: direzione (rispetto al robot) e istante */
 	double t_incastro;            /* ultimo urto della sola torretta */
-	int bumper_sx, bumper_dx;
+	int bumper_left, bumper_right;
 	uint8_t cliff;                /* bit 0 sx laterale ... bit 3 dx laterale */
-	int contatto_base, in_carica;
+	int contatto_base, charging;
 	double t_contatto;
 	uint8_t ir_base;
 	double soc;                   /* 1 = 16,3 V, 0 = 13,8 V, negativo = riserva fino alla protezione */
-	double corrente, tensione;
+	double current, tensione;
 	double imbardata, vel_imbardata;     /* rad, rad/s (angolo integrato dal GD32: deriva) */
-	int cassetto;
+	int dustbin;
 	double tasto_da[2];
 	double t_avvio_ruote;         /* per il picco di corrente alla partenza */
 
 	/* firmware */
 	double t_simulato;
-	int acceso;
+	int on;
 	double t_riaccensione;
-	int modo;
+	int mode;
 	int32_t cmd_v, cmd_w, cmd_ruote[2];  /* comandi in vigore (dopo il ritardo) */
 	sim_comando_t coda_cmd[SIM_COMANDI];
 	int n_coda_cmd;
 	int spazzola_lat, spazzola_cen, eco_lat, eco_cen;
 	double fine_sblocco;
-	int aspirazione_giri, aspirazione_pwm;
+	int suction_rpm, aspirazione_pwm;
 	double ventola_giri;
 	uint8_t led;
-	int sensori_accesi, cliff_retromarcia, cliff_ir, lidar_alimentato, lidar_potenza;
+	int sensori_accesi, cliff_retromarcia, cliff_ir, lidar_alimentato, lidar_power;
 	int sospeso, risveglio;
 	double ultimo_hb, ultimo_ka;
 	int motori_alimentati;
 	double prossimo_sensori, prossimo_hb_gd32, prossimo_05, risposta_08;
 
 	/* contatori e storia */
-	uint64_t frame_ricevuti, frame_sensori, reset, rx_per_cmd[256];
+	uint64_t frame_ricevuti, sensor_frames, reset, rx_per_cmd[256];
 	int n_storia, i_storia;
 	sim_cmd_log_t storia[SIM_STORIA];
 	char avviso[160];

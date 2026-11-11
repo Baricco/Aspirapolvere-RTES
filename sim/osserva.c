@@ -29,11 +29,11 @@
  * dei campi, la posizione di clean_cell_mask e strip_axis_x si chiede alle informazioni di debug con readelf (una volta sola).
  *
  * Posizione creduta: dallo stesso eseguibile legge anche `sc_posa` e `buf_posa` (driver/driver.c), cioè l'ultima posizione
- * che il moto ha dato al driver con drv_posa() (x, y, theta nel sistema della mappa), molto più spesso della griglia
- * (ogni 20 ms) perché sulla pagina deve stare al passo con il robot vero. Non serve la struttura dei task: drv_posa è
+ * che il moto ha dato al driver con drv_pose() (x, y, theta nel sistema della mappa), molto più spesso della griglia
+ * (ogni 20 ms) perché sulla pagina deve stare al passo con il robot vero. Non serve la struttura dei task: drv_pose è
  * l'interfaccia del driver. Se il programma non ha quei simboli la posizione manca e il resto funziona.
  * File FILE_posa, riscritto con un rename, little endian: 0 "RTPS"; 4 uint32 pid; 8 uint32 versione (scritture di
- * drv_posa); 12 uint32 riservato; 16, 24, 32 double x, y, theta.
+ * drv_pose); 12 uint32 riservato; 16, 24, 32 double x, y, theta.
  *
  * Uso: build/host/osserva [--uscita FILE] [--simbolo NOME] [--ogni-ms N] -- programma [argomenti...]
  * Ctrl+C arriva al programma (che si ferma da solo e stampa le statistiche); osserva aspetta che finisca ed esce con
@@ -55,7 +55,7 @@
 
 #define CELLE      65536                 /* NAV_MAP_CELL_NUMBER * NAV_MAP_CELL_NUMBER (tasks/vacuum/mapping.h) */
 #define TESTA      128
-#define POSA_DIM   32                    /* sizeof(drv_posa_t), driver/contatti.h */
+#define POSA_DIM   32                    /* sizeof(drv_pose_t), driver/contacts.h */
 #define PULITE_TESTA 4                   /* presente, strip_axis_x, 2 riservati */
 #define PULITE_DIM (CELLE / 4)           /* sizeof(clean_cell_mask): 2 bit per cella */
 
@@ -78,12 +78,12 @@ static void al_segnale(int s)
 static void metti32(uint8_t *b, uint32_t v) { memcpy(b, &v, 4); }
 
 /* Riscrive il file di uscita con lo stato, il messaggio e la griglia che ci sono adesso in file_out. */
-static void scrivi(uint32_t stato, uint32_t versione, const char *msg)
+static void scrivi(uint32_t status, uint32_t version, const char *msg)
 {
 	memcpy(file_out, "RTNM", 4);
 	metti32(file_out + 4, (uint32_t)figlio);
-	metti32(file_out + 8, stato);
-	metti32(file_out + 12, versione);
+	metti32(file_out + 8, status);
+	metti32(file_out + 12, version);
 	metti32(file_out + 16, letture);
 	memset(file_out + 20, 0, TESTA - 20);
 	snprintf((char *)file_out + 20, TESTA - 20, "%s", msg);
@@ -98,7 +98,7 @@ static void scrivi(uint32_t stato, uint32_t versione, const char *msg)
 }
 
 /* Cerca `nome` nella tabella dei simboli dell'ELF a 64 bit `percorso`. 0 se lo trova. */
-static int cerca_simbolo(const char *percorso, const char *nome, uint64_t *val, uint64_t *dim, int *pie, char *msg, size_t n)
+static int cerca_simbolo(const char *percorso, const char *name, uint64_t *val, uint64_t *size, int *pie, char *msg, size_t n)
 {
 	FILE *f = fopen(percorso, "rb");
 	if (!f) {
@@ -132,15 +132,15 @@ static int cerca_simbolo(const char *percorso, const char *nome, uint64_t *val, 
 		const char *str = (const char *)(b + sh[sh[i].sh_link].sh_offset);
 		uint64_t ns = sh[i].sh_size / sizeof *s;
 		for (uint64_t j = 0; j < ns; j++)
-			if (s[j].st_name && !strcmp(str + s[j].st_name, nome) && ELF64_ST_TYPE(s[j].st_info) == STT_OBJECT) {
+			if (s[j].st_name && !strcmp(str + s[j].st_name, name) && ELF64_ST_TYPE(s[j].st_info) == STT_OBJECT) {
 				*val = s[j].st_value;
-				*dim = s[j].st_size;
+				*size = s[j].st_size;
 				r = 0;
 				break;
 			}
 	}
 	if (r)
-		snprintf(msg, n, "il programma non ha il simbolo %s (non usa tasks/vacuum/mapping.c, o è strippato)", nome);
+		snprintf(msg, n, "il programma non ha il simbolo %s (non usa tasks/vacuum/mapping.c, o è strippato)", name);
 fine:
 	free(b);
 	return r;
@@ -157,10 +157,10 @@ static int base_caricamento(pid_t pid, const char *percorso, uint64_t *base)
 	int r = -1;
 	while (fgets(riga, sizeof riga, f)) {
 		unsigned long long da, off;
-		int nome = 0;
-		if (sscanf(riga, "%llx-%*x %*s %llx %*s %*s %n", &da, &off, &nome) < 2 || !nome)
+		int name = 0;
+		if (sscanf(riga, "%llx-%*x %*s %llx %*s %*s %n", &da, &off, &name) < 2 || !name)
 			continue;
-		char *q = riga + nome;
+		char *q = riga + name;
 		q[strcspn(q, "\n")] = 0;
 		if (off == 0 && !strcmp(q, percorso)) {
 			*base = da;
@@ -182,7 +182,7 @@ static int cerca_campi_pulizia(const char *exe, uint64_t *off_maschera, uint64_t
 	FILE *f = popen(cmd, "r");
 	if (!f)
 		return -1;
-	uint64_t *attesa = NULL;
+	uint64_t *pending = NULL;
 	int trovati = 0;
 	while (fgets(riga, sizeof riga, f)) {
 		riga[strcspn(riga, "\n")] = 0;
@@ -192,12 +192,12 @@ static int cerca_campi_pulizia(const char *exe, uint64_t *off_maschera, uint64_t
 			while (n && riga[n - 1] == ' ')
 				riga[--n] = 0;
 			q = strrchr(riga, ' ');
-			attesa = !q ? NULL : !strcmp(q + 1, "clean_cell_mask") ? off_maschera :
+			pending = !q ? NULL : !strcmp(q + 1, "clean_cell_mask") ? off_maschera :
 			         !strcmp(q + 1, "strip_axis_x") ? off_asse : NULL;
-		} else if (attesa && (q = strstr(riga, "DW_AT_data_member_location:"))) {
-			*attesa = strtoull(q + strlen("DW_AT_data_member_location:"), NULL, 0);
+		} else if (pending && (q = strstr(riga, "DW_AT_data_member_location:"))) {
+			*pending = strtoull(q + strlen("DW_AT_data_member_location:"), NULL, 0);
 			trovati++;
-			attesa = NULL;
+			pending = NULL;
 		}
 	}
 	pclose(f);
@@ -220,7 +220,7 @@ static void leggi_pulite(void)
 static void leggi(void)
 {
 	static char exe_noto[600];
-	static uint64_t indirizzo;
+	static uint64_t address;
 	char p[64], exe[600], msg[200];
 	snprintf(p, sizeof p, "/proc/%d/exe", (int)figlio);
 	ssize_t k = readlink(p, exe, sizeof exe - 1);
@@ -229,21 +229,21 @@ static void leggi(void)
 	exe[k] = 0;
 	if (strcmp(exe, exe_noto)) {                 /* nuovo eseguibile: all'inizio c'è taskset, poi il programma */
 		snprintf(exe_noto, sizeof exe_noto, "%s", exe);
-		indirizzo = 0;
+		address = 0;
 		ind_sc_posa = ind_buf_posa = 0;
 		ind_maschera = ind_asse = 0;
 		if (fd_mem >= 0)
 			close(fd_mem);
 		fd_mem = -1;
-		uint64_t val = 0, dim = 0, base = 0;
+		uint64_t val = 0, size = 0, base = 0;
 		int pie = 0;
-		if (cerca_simbolo(exe, simbolo, &val, &dim, &pie, msg, sizeof msg)) {
+		if (cerca_simbolo(exe, simbolo, &val, &size, &pie, msg, sizeof msg)) {
 			scrivi(CERCO, 0, msg);
 			return;
 		}
-		if (dim < CELLE + 4) {
+		if (size < CELLE + 4) {
 			snprintf(msg, sizeof msg, "%s è di %llu byte, meno di griglia + versione: la struttura è cambiata?", simbolo,
-			         (unsigned long long)dim);
+			         (unsigned long long)size);
 			scrivi(ERRORE, 0, msg);
 			return;
 		}
@@ -252,12 +252,12 @@ static void leggi(void)
 			exe_noto[0] = 0;
 			return;
 		}
-		indirizzo = base + val;
+		address = base + val;
 		uint64_t v1, v2, d1, d2;
 		int pie2;
 		char ignora[200];
-		if (!cerca_simbolo(exe, "sc_posa", &v1, &d1, &pie2, ignora, sizeof ignora) &&
-		    !cerca_simbolo(exe, "buf_posa", &v2, &d2, &pie2, ignora, sizeof ignora) && d2 == 2 * POSA_DIM) {
+		if (!cerca_simbolo(exe, "pose_exchange", &v1, &d1, &pie2, ignora, sizeof ignora) &&
+		    !cerca_simbolo(exe, "pose_buffers", &v2, &d2, &pie2, ignora, sizeof ignora) && d2 == 2 * POSA_DIM) {
 			ind_sc_posa = base + v1;
 			ind_buf_posa = base + v2;
 		}
@@ -275,21 +275,21 @@ static void leggi(void)
 			return;
 		}
 	}
-	if (fd_mem < 0 || !indirizzo)
+	if (fd_mem < 0 || !address)
 		return;
 	uint8_t b[CELLE + 4];
-	if (pread(fd_mem, b, sizeof b, (off_t)indirizzo) != (ssize_t)sizeof b) {
+	if (pread(fd_mem, b, sizeof b, (off_t)address) != (ssize_t)sizeof b) {
 		snprintf(msg, sizeof msg, "lettura della memoria fallita: %s", strerror(errno));
 		scrivi(ERRORE, 0, msg);
 		return;
 	}
-	uint32_t versione;
-	memcpy(&versione, b + CELLE, 4);
+	uint32_t version;
+	memcpy(&version, b + CELLE, 4);
 	memcpy(file_out + TESTA, b, CELLE);
 	leggi_pulite();
 	letture++;
-	ultima_versione = versione;
-	scrivi(LETTA, versione, "");
+	ultima_versione = version;
+	scrivi(LETTA, version, "");
 }
 
 /* Copia nel file _posa l'ultima posizione data dal moto al driver, se è nuova. Legge senza fermare il programma: se nel
@@ -297,12 +297,12 @@ static void leggi(void)
 static void leggi_posa(void)
 {
 	static uint32_t ultima;
-	static char nome[640], tmp[650];
+	static char name[640], tmp[650];
 	if (fd_mem < 0 || !ind_sc_posa)
 		return;
 	uint32_t v, v2;
 	uint8_t buf[POSA_DIM];
-	if (pread(fd_mem, &v, 4, (off_t)ind_sc_posa) != 4 || v == 0 || v == ultima)   /* versione: primo campo di scambio_t */
+	if (pread(fd_mem, &v, 4, (off_t)ind_sc_posa) != 4 || v == 0 || v == ultima)   /* versione: primo campo di exchange_t */
 		return;
 	if (pread(fd_mem, buf, sizeof buf, (off_t)(ind_buf_posa + (v & 1) * POSA_DIM)) != (ssize_t)sizeof buf)
 		return;
@@ -312,17 +312,17 @@ static void leggi_posa(void)
 	uint8_t out[40] = "RTPS";
 	metti32(out + 4, (uint32_t)figlio);
 	metti32(out + 8, v);
-	memcpy(out + 16, buf, 24);                 /* x, y, theta: i primi campi di drv_posa_t */
-	if (!nome[0]) {
-		snprintf(nome, sizeof nome, "%s_posa", uscita);
-		snprintf(tmp, sizeof tmp, "%s.tmp", nome);
+	memcpy(out + 16, buf, 24);                 /* x, y, theta: i primi campi di drv_pose_t */
+	if (!name[0]) {
+		snprintf(name, sizeof name, "%s_posa", uscita);
+		snprintf(tmp, sizeof tmp, "%s.tmp", name);
 	}
 	FILE *f = fopen(tmp, "wb");
 	if (!f)
 		return;
 	size_t ok = fwrite(out, 1, sizeof out, f);
 	if (fclose(f) == 0 && ok == sizeof out)
-		rename(tmp, nome);
+		rename(tmp, name);
 }
 
 int main(int argc, char **argv)
@@ -358,19 +358,19 @@ int main(int argc, char **argv)
 	sigaction(SIGHUP, &sa, NULL);
 	scrivi(CERCO, 0, "programma appena avviato");
 
-	int st = 0, attesa = 0;
+	int st = 0, pending = 0;
 	for (;;) {
 		pid_t r = waitpid(figlio, &st, WNOHANG);
 		if (r == figlio)
 			break;
 		if (r < 0 && errno != EINTR)
 			break;
-		if (attesa <= 0) {
+		if (pending <= 0) {
 			leggi();
-			attesa = ogni_ms;
+			pending = ogni_ms;
 		}
 		leggi_posa();
-		attesa -= 20;
+		pending -= 20;
 		struct timespec ts = { 0, 20 * 1000000L };
 		nanosleep(&ts, NULL);
 	}

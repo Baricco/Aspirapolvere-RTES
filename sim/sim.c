@@ -55,7 +55,7 @@
 #include <time.h>
 #include <unistd.h>
 
-#include "../gd32/descrizione.h"
+#include "../gd32/description.h"
 #include "../gd32/gd32.h"
 #include "gd32sim.h"
 #include "lidarsim.h"
@@ -77,7 +77,7 @@ static struct { uint32_t pid; double x, y, dir; } programma;   /* origine del pr
 
 static void al_segnale(int s) { (void)s; fermati = 1; }
 
-static double adesso(void)
+static double now(void)
 {
 	struct timespec ts;
 	clock_gettime(CLOCK_MONOTONIC, &ts);
@@ -100,7 +100,7 @@ typedef struct {
 static voce_t storia[STORIA_N];
 static uint64_t storia_n;                 /* voci registrate in tutto; la voce k sta in storia[k % STORIA_N] */
 
-static void registra(double t, int canale, const uint8_t *b, size_t n)
+static void record(double t, int canale, const uint8_t *b, size_t n)
 {
 	voce_t *v = &storia[storia_n % STORIA_N];
 	v->n = storia_n++;
@@ -114,16 +114,16 @@ static void registra(double t, int canale, const uint8_t *b, size_t n)
 
 typedef struct {
 	int master, slave;      /* il simulatore tiene aperto anche lo slave: chi lo apre e lo chiude non lo rompe */
-	char nome[64];
+	char name[64];
 	uint64_t scartati;      /* byte buttati perché nessuno leggeva */
 } pty_t;
 
 static int apri_pty(pty_t *p, const char *collegamento)
 {
 	p->master = posix_openpt(O_RDWR | O_NOCTTY);
-	if (p->master < 0 || grantpt(p->master) || unlockpt(p->master) || ptsname_r(p->master, p->nome, sizeof p->nome))
+	if (p->master < 0 || grantpt(p->master) || unlockpt(p->master) || ptsname_r(p->master, p->name, sizeof p->name))
 		return -1;
-	p->slave = open(p->nome, O_RDWR | O_NOCTTY);
+	p->slave = open(p->name, O_RDWR | O_NOCTTY);
 	if (p->slave < 0)
 		return -1;
 	struct termios t;
@@ -134,7 +134,7 @@ static int apri_pty(pty_t *p, const char *collegamento)
 	tcsetattr(p->slave, TCSANOW, &t);
 	fcntl(p->master, F_SETFL, O_NONBLOCK);
 	unlink(collegamento);
-	if (symlink(p->nome, collegamento)) {
+	if (symlink(p->name, collegamento)) {
 		fprintf(stderr, "sim: non riesco a creare %s: %s\n", collegamento, strerror(errno));
 		return -1;
 	}
@@ -160,33 +160,33 @@ static int nome_valido(const char *s)
 	return 1;
 }
 
-static int carica_stanza(const char *nome, char *err, size_t dim)
+static int carica_stanza(const char *name, char *err, size_t size)
 {
 	char p[700];
-	snprintf(p, sizeof p, "%s/%s.txt", dir_stanze, nome);
-	if (mondo_leggi_file(&mondo, p, err, dim))
+	snprintf(p, sizeof p, "%s/%s.txt", dir_stanze, name);
+	if (mondo_leggi_file(&mondo, p, err, size))
 		return -1;
-	snprintf(stanza_corrente, sizeof stanza_corrente, "%s", nome);
+	snprintf(stanza_corrente, sizeof stanza_corrente, "%s", name);
 	gd32sim_sposta(&g, mondo.robot_x, mondo.robot_y, mondo.robot_dir);
 	return 0;
 }
 
 /* Un comando della pagina. Ritorna 0 e scrive "ok" o un messaggio in risp. Va chiamata con mx preso. */
-static int esegui_comando(const char *c, char *risp, size_t dim)
+static int esegui_comando(const char *c, char *risp, size_t size)
 {
 	double a, b, d;
-	char nome[61];
+	char name[61];
 	int i;
-	double t = adesso() - t0;
-	snprintf(risp, dim, "ok");
+	double t = now() - t0;
+	snprintf(risp, size, "ok");
 	if (!strcmp(c, "solleva")) {
-		g.sollevato = 1;
+		g.lifted = 1;
 	} else if (!strcmp(c, "posa")) {
-		g.sollevato = 0;
+		g.lifted = 0;
 	} else if (sscanf(c, "sposta %lf %lf %lf", &a, &b, &d) == 3) {
 		gd32sim_sposta(&g, a, b, d * M_PI / 180);
 	} else if (sscanf(c, "cassetto %d", &i) == 1) {
-		g.cassetto = i != 0;
+		g.dustbin = i != 0;
 	} else if (sscanf(c, "tasto accensione %d", &i) == 1) {
 		g.tasto_da[0] = i ? t : -1;
 	} else if (sscanf(c, "tasto casa %d", &i) == 1) {
@@ -195,20 +195,20 @@ static int esegui_comando(const char *c, char *risp, size_t dim)
 		g.soc = fmax(0, fmin(1, a / 100));
 	} else if (sscanf(c, "nuova %lf %lf", &a, &b) == 2) {
 		if (a < 0.5 || b < 0.5 || a > 50 || b > 50) {
-			snprintf(risp, dim, "dimensioni non valide (da 0,5 a 50 m)");
+			snprintf(risp, size, "dimensioni non valide (da 0,5 a 50 m)");
 			return -1;
 		}
 		mondo_nuovo(&mondo, a, b);
 		snprintf(stanza_corrente, sizeof stanza_corrente, "(nuova)");
 		gd32sim_sposta(&g, mondo.robot_x, mondo.robot_y, mondo.robot_dir);
-	} else if (sscanf(c, "salva %60s", nome) == 1) {
-		if (!nome_valido(nome)) {
-			snprintf(risp, dim, "nome non valido: solo lettere, cifre, - e _");
+	} else if (sscanf(c, "salva %60s", name) == 1) {
+		if (!nome_valido(name)) {
+			snprintf(risp, size, "nome non valido: solo lettere, cifre, - e _");
 			return -1;
 		}
 		char p[700];
-		snprintf(p, sizeof p, "%s/%s.txt", dir_stanze, nome);
-		snprintf(mondo.nome, sizeof mondo.nome, "%s", nome);
+		snprintf(p, sizeof p, "%s/%s.txt", dir_stanze, name);
+		snprintf(mondo.name, sizeof mondo.name, "%s", name);
 		char *testo = mondo_testo(&mondo);
 		FILE *f = testo ? fopen(p, "w") : NULL;
 		int ok = f && fputs(testo, f) >= 0;
@@ -216,23 +216,23 @@ static int esegui_comando(const char *c, char *risp, size_t dim)
 			fclose(f);
 		free(testo);
 		if (!ok) {
-			snprintf(risp, dim, "non riesco a scrivere %s", p);
+			snprintf(risp, size, "non riesco a scrivere %s", p);
 			return -1;
 		}
-		snprintf(stanza_corrente, sizeof stanza_corrente, "%s", nome);
-		snprintf(risp, dim, "salvata in %s", p);
-	} else if (sscanf(c, "carica %60s", nome) == 1) {
+		snprintf(stanza_corrente, sizeof stanza_corrente, "%s", name);
+		snprintf(risp, size, "salvata in %s", p);
+	} else if (sscanf(c, "carica %60s", name) == 1) {
 		char err[600];
-		if (!nome_valido(nome)) {
-			snprintf(risp, dim, "nome non valido");
+		if (!nome_valido(name)) {
+			snprintf(risp, size, "nome non valido");
 			return -1;
 		}
-		if (carica_stanza(nome, err, sizeof err)) {
-			snprintf(risp, dim, "%s", err);
+		if (carica_stanza(name, err, sizeof err)) {
+			snprintf(risp, size, "%s", err);
 			return -1;
 		}
 	} else {
-		snprintf(risp, dim, "comando sconosciuto: %s", c);
+		snprintf(risp, size, "comando sconosciuto: %s", c);
 		return -1;
 	}
 	return 0;
@@ -313,7 +313,7 @@ static int posa_creduta(double *x, double *y, double *dir)
 
 static void stato_json(testo_t *s)
 {
-	double t = adesso() - t0, v, w;
+	double t = now() - t0, v, w;
 	gd32sim_velocita(&g, &v, &w);
 	ag(s, "{\"t\":%.3f,\"stanza\":", t);
 	ag_stringa(s, stanza_corrente);
@@ -325,19 +325,19 @@ static void stato_json(testo_t *s)
 	ag(s, "],\"bumper_arco\":%.1f,\"contatti_dietro\":%d,\"base\":[%.3f,%.3f]},", BUMPER_MEZZO_ARCO * 180 / M_PI,
 	   CONTATTI_DIETRO, BASE_LARGHEZZA, BASE_PROFONDITA);
 	ag(s, "\"v\":%.3f,\"w\":%.3f,\"sollevato\":%d,\"caduto\":%d,\"bloccato\":%d,\"incastrato\":%d,\"bumper\":[%d,%d],"
-	      "\"cliff\":%d,\"ir_base\":%d,", v, w, g.sollevato, g.caduto, g.bloccato, g.incastrato, g.bumper_sx, g.bumper_dx,
+	      "\"cliff\":%d,\"ir_base\":%d,", v, w, g.lifted, g.caduto, g.bloccato, g.incastrato, g.bumper_left, g.bumper_right,
 	   g.cliff, g.ir_base);
 	ag(s, "\"contatto_base\":%d,\"in_carica\":%d,\"batteria\":{\"v\":%.2f,\"soc\":%.1f,\"i\":%.2f},\"cassetto\":%d,",
-	   g.contatto_base, g.in_carica, g.tensione, g.soc * 100, g.corrente, g.cassetto);
+	   g.contatto_base, g.charging, g.tensione, g.soc * 100, g.current, g.dustbin);
 	ag(s, "\"led\":%d,\"modo\":%d,\"cmd_v\":%.3f,\"cmd_w\":%.3f,\"spazzole\":[%d,%d],\"ventola\":%.0f,\"imbardata\":%.1f,",
-	   g.led, g.modo, g.cmd_v / SCALA_V, g.cmd_w / SCALA_W, g.eco_lat, g.eco_cen, g.ventola_giri, g.imbardata * 180 / M_PI);
+	   g.led, g.mode, g.cmd_v / SCALA_V, g.cmd_w / SCALA_W, g.eco_lat, g.eco_cen, g.ventola_giri, g.imbardata * 180 / M_PI);
 	ag(s, "\"gd32\":{\"acceso\":%d,\"sospeso\":%d,\"motori\":%d,\"senza_hb\":%.1f,\"senza_ka\":%.1f,\"reset\":%llu,"
 	      "\"rx\":%llu,\"sensori\":%llu,\"sensori_accesi\":%d,\"cliff_retromarcia\":%d,\"persi\":%llu},",
-	   g.acceso, g.sospeso, g.motori_alimentati, fmin(999, t - g.ultimo_hb), t - g.ultimo_ka,
-	   (unsigned long long)g.reset, (unsigned long long)g.frame_ricevuti, (unsigned long long)g.frame_sensori,
+	   g.on, g.sospeso, g.motori_alimentati, fmin(999, t - g.ultimo_hb), t - g.ultimo_ka,
+	   (unsigned long long)g.reset, (unsigned long long)g.frame_ricevuti, (unsigned long long)g.sensor_frames,
 	   g.sensori_accesi, g.cliff_retromarcia, (unsigned long long)g.persi);
 	ag(s, "\"lidar\":{\"alimentato\":%d,\"potenza\":%d,\"giri_s\":%.2f,\"giri\":%llu,\"punti\":[", l.alimentato,
-	   g.lidar_potenza, l.giri_s, (unsigned long long)l.giri);
+	   g.lidar_power, l.rev_s, (unsigned long long)l.revolutions);
 	for (int i = 0; i < l.n_giro; i++)
 		ag(s, "%s%.3f,%.3f", i ? "," : "", l.giro_x[i], l.giro_y[i]);
 	ag(s, "]},\"avviso\":");
@@ -350,39 +350,39 @@ static void stato_json(testo_t *s)
 	   programma.dir);
 }
 
-static void campo_json(testo_t *s, const campo_t *c)
+static void campo_json(testo_t *s, const field_t *c)
 {
 	ag(s, "{\"nome\":");
-	ag_stringa(s, c->nome);
+	ag_stringa(s, c->name);
 	ag(s, ",\"byte\":%d,\"n_byte\":%d,\"bit\":%d,\"n_bit\":%d,\"tipo\":\"%s\",\"scala\":%.10g,\"unita\":", c->byte,
-	   c->n_byte, c->bit, c->n_bit, c->tipo, c->scala);
-	ag_stringa(s, c->unita);
-	ag(s, ",\"aff\":\"%c\",\"gruppo\":%d,\"spiegazione\":", c->affidabilita, c->gruppo);
-	ag_stringa(s, c->spiegazione);
+	   c->n_bytes, c->bit, c->n_bits, c->type, c->scale);
+	ag_stringa(s, c->unit);
+	ag(s, ",\"aff\":\"%c\",\"gruppo\":%d,\"spiegazione\":", c->reliability, c->group);
+	ag_stringa(s, c->explanation);
 	ag(s, "}");
 }
 
 static void campi_json(testo_t *s)
 {
 	ag(s, "{\"messaggi\":[");
-	for (int i = 0; i < N_MESSAGGI; i++) {
-		const messaggio_t *m = &MESSAGGI[i];
+	for (int i = 0; i < N_MESSAGES; i++) {
+		const message_t *m = &MESSAGES[i];
 		ag(s, "%s{\"cmd\":%d,\"nome\":", i ? "," : "", m->cmd);
-		ag_stringa(s, m->nome);
-		ag(s, ",\"verso_gd32\":%d,\"spiegazione\":", m->verso_gd32);
-		ag_stringa(s, m->spiegazione);
+		ag_stringa(s, m->name);
+		ag(s, ",\"verso_gd32\":%d,\"spiegazione\":", m->to_gd32);
+		ag_stringa(s, m->explanation);
 		ag(s, ",\"campi\":[");
-		for (int k = 0; k < m->n_campi; k++) {
+		for (int k = 0; k < m->n_fields; k++) {
 			if (k)
 				ag(s, ",");
-			campo_json(s, &m->campi[k]);
+			campo_json(s, &m->fields[k]);
 		}
 		ag(s, "]}");
 	}
 	ag(s, "],\"nomi\":{");
 	int primo = 1;
 	for (int c = 0; c < 256; c++) {
-		const char *n = gd32_nome_cmd((uint8_t)c);
+		const char *n = gd32_cmd_name((uint8_t)c);
 		if (n) {
 			ag(s, "%s\"%d\":\"%s\"", primo ? "" : ",", c, n);
 			primo = 0;
@@ -412,11 +412,11 @@ static void storia_json(testo_t *s, uint64_t dopo)
 
 /* ------------------------------------------------------------------------------------------ http --- */
 
-static void rispondi(int fd, const char *stato, const char *tipo, const char *corpo, size_t n)
+static void rispondi(int fd, const char *status, const char *type, const char *corpo, size_t n)
 {
 	char h[256];
 	int k = snprintf(h, sizeof h, "HTTP/1.1 %s\r\nContent-Type: %s\r\nContent-Length: %zu\r\nCache-Control: no-store\r\n"
-	                 "Connection: close\r\n\r\n", stato, tipo, n);
+	                 "Connection: close\r\n\r\n", status, type, n);
 	if (write(fd, h, (size_t)k) < 0)
 		return;
 	size_t fatti = 0;
@@ -428,9 +428,9 @@ static void rispondi(int fd, const char *stato, const char *tipo, const char *co
 	}
 }
 
-static void rispondi_testo(int fd, const char *stato, const char *testo)
+static void rispondi_testo(int fd, const char *status, const char *testo)
 {
-	rispondi(fd, stato, "text/plain; charset=utf-8", testo, strlen(testo));
+	rispondi(fd, status, "text/plain; charset=utf-8", testo, strlen(testo));
 }
 
 static char *leggi_file(const char *p, size_t *n)
@@ -439,46 +439,46 @@ static char *leggi_file(const char *p, size_t *n)
 	if (!f)
 		return NULL;
 	fseek(f, 0, SEEK_END);
-	long dim = ftell(f);
+	long size = ftell(f);
 	fseek(f, 0, SEEK_SET);
-	char *b = malloc((size_t)dim + 1);
-	if (b && fread(b, 1, (size_t)dim, f) != (size_t)dim) {
+	char *b = malloc((size_t)size + 1);
+	if (b && fread(b, 1, (size_t)size, f) != (size_t)size) {
 		free(b);
 		b = NULL;
 	}
 	fclose(f);
 	if (b) {
-		b[dim] = 0;
-		*n = (size_t)dim;
+		b[size] = 0;
+		*n = (size_t)size;
 	}
 	return b;
 }
 
 /* File statico della pagina: solo nomi semplici dentro dir_web (niente ".." né sottocartelle). */
-static void servi_file(int fd, const char *nome)
+static void servi_file(int fd, const char *name)
 {
-	for (const char *p = nome; *p; p++)
+	for (const char *p = name; *p; p++)
 		if (!((*p >= 'a' && *p <= 'z') || (*p >= '0' && *p <= '9') || *p == '-' || *p == '_' || *p == '.')) {
 			rispondi_testo(fd, "404 Not Found", "");
 			return;
 		}
-	if (nome[0] == '.') {
+	if (name[0] == '.') {
 		rispondi_testo(fd, "404 Not Found", "");
 		return;
 	}
-	const char *est = strrchr(nome, '.');
-	const char *tipo = !est ? NULL : !strcmp(est, ".html") ? "text/html; charset=utf-8" :
+	const char *est = strrchr(name, '.');
+	const char *type = !est ? NULL : !strcmp(est, ".html") ? "text/html; charset=utf-8" :
 	                   !strcmp(est, ".js") ? "text/javascript; charset=utf-8" :
 	                   !strcmp(est, ".css") ? "text/css; charset=utf-8" : NULL;
 	char p[700];
-	snprintf(p, sizeof p, "%s/%s", dir_web, nome);
+	snprintf(p, sizeof p, "%s/%s", dir_web, name);
 	size_t k;
-	char *b = tipo ? leggi_file(p, &k) : NULL;
+	char *b = type ? leggi_file(p, &k) : NULL;
 	if (!b) {
 		rispondi_testo(fd, "404 Not Found", "file non trovato: avvia il simulatore dalla cartella della repository");
 		return;
 	}
-	rispondi(fd, "200 OK", tipo, b, k);
+	rispondi(fd, "200 OK", type, b, k);
 	free(b);
 }
 
@@ -622,8 +622,8 @@ static void ricevuto(const gd32_frame_t *f, void *ctx)
 {
 	double t = *(const double *)ctx;
 	uint8_t b[GD32_MAX_FRAME];
-	size_t k = gd32_componi(f->cmd, f->dati, f->n_dati, b, sizeof b);
-	registra(t, CAN_SOC_GD32, b, k);
+	size_t k = gd32_build_frame(f->cmd, f->data, f->data_len, b, sizeof b);
+	record(t, CAN_SOC_GD32, b, k);
 	gd32sim_ricevi(&g, f, t);
 }
 
@@ -631,9 +631,9 @@ static void stampa_stato(double t)
 {
 	printf("%8.1f s  x %.2f y %.2f dir %4.0f°  modo %d  bump %d%d cliff %x base %d/%d  %.1f V  led %2d  "
 	       "lidar %.1f giri/s  rx %llu  hb %.1f s fa  ka %.1f s fa%s%s%s\n",
-	       t, g.x, g.y, g.dir * 180 / M_PI, g.modo, g.bumper_sx, g.bumper_dx, g.cliff, g.contatto_base, g.in_carica,
-	       g.tensione, g.led, l.giri_s, (unsigned long long)g.frame_ricevuti, fmin(999, t - g.ultimo_hb),
-	       t - g.ultimo_ka, g.reset ? "  RESET!" : "", g.sollevato ? "  sollevato" : "", g.incastrato ? "  incastrato" : "");
+	       t, g.x, g.y, g.dir * 180 / M_PI, g.mode, g.bumper_left, g.bumper_right, g.cliff, g.contatto_base, g.charging,
+	       g.tensione, g.led, l.rev_s, (unsigned long long)g.frame_ricevuti, fmin(999, t - g.ultimo_hb),
+	       t - g.ultimo_ka, g.reset ? "  RESET!" : "", g.lifted ? "  sollevato" : "", g.incastrato ? "  incastrato" : "");
 	fflush(stdout);
 }
 
@@ -663,7 +663,7 @@ int main(int argc, char **argv)
 {
 	int porta = 8080, durata = 0, stampa = 0, senza_ritardi = 0;
 	const char *ascolta = "127.0.0.1", *dir = "build/sim", *file_par = "sim/parametri.txt";
-	double batteria = 1, scarto = LIDAR_SCARTO_CDEG / 100.0, timeout_ka = 190;
+	double battery = 1, scarto = LIDAR_OFFSET_CDEG / 100.0, timeout_ka = 190;
 	uint32_t seme = 12345;
 	static const struct option opz[] = {
 		{ "porta", required_argument, 0, 'p' }, { "ascolta", required_argument, 0, 'a' },
@@ -683,7 +683,7 @@ int main(int argc, char **argv)
 		case 's': dir_stanze = optarg; break;
 		case 'W': dir_web = optarg; break;
 		case 'P': file_par = optarg; break;
-		case 'b': batteria = atof(optarg); break;
+		case 'b': battery = atof(optarg); break;
 		case 'o': scarto = atof(optarg); break;
 		case 'k': timeout_ka = atof(optarg); break;
 		case 'R': senza_ritardi = 1; break;
@@ -725,9 +725,9 @@ int main(int argc, char **argv)
 		return 1;
 	}
 
-	t0 = adesso();
+	t0 = now();
 	g.seme = seme;
-	g.velocita_batteria = batteria;
+	g.velocita_batteria = battery;
 	g.timeout_keepalive = timeout_ka;
 	g.senza_ritardi = senza_ritardi;
 	gd32sim_init(&g, &mondo, 0);
@@ -757,7 +757,7 @@ int main(int argc, char **argv)
 		pthread_detach(tw);
 	}
 	printf("sim: stanza %s (%.1f x %.1f m, %d oggetti)\n", stanza_corrente, mondo.larghezza, mondo.profondita, mondo.n);
-	printf("sim: GD32 su %s (%s), lidar su %s (%s)\n", p_gd32, pg.nome, p_lidar, pl.nome);
+	printf("sim: GD32 su %s (%s), lidar su %s (%s)\n", p_gd32, pg.name, p_lidar, pl.name);
 	if (porta > 0)
 		printf("sim: pagina su http://%s:%d\n", strcmp(ascolta, "0.0.0.0") ? ascolta : "localhost", porta);
 	fflush(stdout);
@@ -768,12 +768,12 @@ int main(int argc, char **argv)
 	while (!fermati) {
 		/* dorme fino al prossimo passo della fisica (2 ms) o alla prossima consegna, se viene prima */
 		pthread_mutex_lock(&mx);
-		double sveglia = fmin(prossimo_passo, fmin(gd32sim_prossima_consegna(&g), lidarsim_prossima_consegna(&l)));
+		double wakeup = fmin(prossimo_passo, fmin(gd32sim_prossima_consegna(&g), lidarsim_prossima_consegna(&l)));
 		pthread_mutex_unlock(&mx);
-		double ass = t0 + sveglia;
+		double ass = t0 + wakeup;
 		struct timespec ts = { (time_t)ass, (long)((ass - floor(ass)) * 1e9) };
 		clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &ts, NULL);
-		double t = adesso() - t0;
+		double t = now() - t0;
 		if (durata > 0 && t >= durata)
 			break;
 		uint8_t buf[4096];
@@ -781,19 +781,19 @@ int main(int argc, char **argv)
 		pthread_mutex_lock(&mx);
 		gd32sim_avanza(&g, &mondo, t);
 		while ((k = read(pg.master, buf, sizeof buf)) > 0)
-			gd32_deframer_scrivi(&dfr, buf, (size_t)k, ricevuto, &t);
+			gd32_deframer_feed(&dfr, buf, (size_t)k, ricevuto, &t);
 		while (read(pl.master, buf, sizeof buf) > 0)
 			;                                                        /* il SoC non scrive mai al lidar */
-		lidarsim_avanza(&l, &mondo, t, g.lidar_alimentato && g.acceso, g.lidar_potenza, g.x, g.y, g.dir);
+		lidarsim_avanza(&l, &mondo, t, g.lidar_alimentato && g.on, g.lidar_power, g.x, g.y, g.dir);
 		const sim_uscita_t *u;
 		while ((u = gd32sim_prossimo(&g, t))) {
 			scrivi_pty(&pg, u->b, u->n);
-			registra(u->t, CAN_GD32_SOC, u->b, u->n);
+			record(u->t, CAN_GD32_SOC, u->b, u->n);
 		}
 		const lidarsim_uscita_t *ul;
 		while ((ul = lidarsim_prossimo(&l, t))) {
 			scrivi_pty(&pl, ul->b, ul->n);
-			registra(ul->t, CAN_LIDAR, ul->b, ul->n);
+			record(ul->t, CAN_LIDAR, ul->b, ul->n);
 		}
 		pthread_mutex_unlock(&mx);
 		while (prossimo_passo <= t)
@@ -814,6 +814,6 @@ int main(int argc, char **argv)
 	unlink(p_gd32);
 	unlink(p_lidar);
 	printf("sim: fine (frame ricevuti %llu, sensori mandati %llu, reset %llu)\n", (unsigned long long)g.frame_ricevuti,
-	       (unsigned long long)g.frame_sensori, (unsigned long long)g.reset);
+	       (unsigned long long)g.sensor_frames, (unsigned long long)g.reset);
 	return g.reset ? 3 : 0;
 }

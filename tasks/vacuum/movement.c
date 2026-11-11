@@ -1,5 +1,5 @@
 #include "driver/driver.h"
-#include "driver/scambio.h"
+#include "driver/exchange.h"
 #include <math.h>
 
 #include "movement.h"
@@ -37,12 +37,12 @@ typedef struct {
 static movement_state_t mov_state;
 
 // canale di scambio del doppio buffer
-static scambio_t double_buffer;
+static exchange_t double_buffer;
 // i due buffer
 static movement_position_data_t buffer1, buffer2;
 
 // canale di scambio dello storico delle pose dell'odometria
-static scambio_t double_buffer_history;
+static exchange_t double_buffer_history;
 // i due buffer
 static movement_odom_history_t history_buffer1, history_buffer2;
 // lo storico aggiornato da questo task
@@ -70,7 +70,7 @@ void init_movement(void) {
 
     // inizializza il doppio buffer passando i due buffer da usare
     // e la loro dimensione 
-    scambio_init(
+    exchange_init(
         &double_buffer,
         &buffer1,
         &buffer2, 
@@ -78,7 +78,7 @@ void init_movement(void) {
     );
 
     // inizializza il doppio buffer dello storico delle pose
-    scambio_init(
+    exchange_init(
         &double_buffer_history,
         &history_buffer1,
         &history_buffer2,
@@ -97,7 +97,7 @@ movement_position_data_t read_movement(void) {
     movement_position_data_t position_data = {0};
 
     // Copia il buffer pubblicato in position_data
-    scambio_leggi(&double_buffer, &position_data);
+    exchange_read(&double_buffer, &position_data);
 
     // ritorna position_data
     return position_data;
@@ -108,7 +108,7 @@ movement_position_data_t read_movement(void) {
 void read_odom_history(movement_odom_history_t *history) {
 
     // se non è ancora stato pubblicato niente, lo storico risulta vuoto
-    if (scambio_leggi(&double_buffer_history, history) == 0) history->count = 0;
+    if (exchange_read(&double_buffer_history, history) == 0) history->count = 0;
 }
 
 // funzione helper che legge il frame dal driver
@@ -119,32 +119,32 @@ void read_odom_history(movement_odom_history_t *history) {
 static movement_state_t get_cur_mov_state_from_driver(void) {
 
     // Inizializza il frame dei sensori a 0
-    drv_sensori_t cur_frame = {0};
+    drv_sensors_t cur_frame = {0};
 
     // leggi il cur:frame dei sensori dal driver
-    drv_sensori(&cur_frame);
+    drv_sensors(&cur_frame);
 
     // Inzializza il movement_state a 0
     movement_state_t cur_mov_state = {0};
 
     // Aggiorna il last_frame_num con il numero del frame
-    cur_mov_state.last_frame_num = cur_frame.numero;
+    cur_mov_state.last_frame_num = cur_frame.number;
 
     // Aggiorna il tempo di arrivo del frame
     cur_mov_state.last_frame_arrival_time = cur_frame.t_ns;
 
     // Aggiorna encoder sinistro e destro
-    cur_mov_state.l_enc = cur_frame.s.encoder_sx;
-    cur_mov_state.r_enc = cur_frame.s.encoder_dx;
+    cur_mov_state.l_enc = cur_frame.s.encoder_left;
+    cur_mov_state.r_enc = cur_frame.s.encoder_right;
 
     // Aggiorna imbardata
-    cur_mov_state.last_yaw = cur_frame.s.angolo[0];
+    cur_mov_state.last_yaw = cur_frame.s.angle[0];
 
     // Aggiorna velocità
-    cur_mov_state.v = cur_frame.s.vel_sx / GD32_SCALA_V;
+    cur_mov_state.v = cur_frame.s.v_measured / GD32_SCALE_V;
 
     // Aggiorna velocità angolare
-    cur_mov_state.omega = cur_frame.s.vel_dx  / GD32_SCALA_W;
+    cur_mov_state.omega = cur_frame.s.w_measured  / GD32_SCALE_W;
 
     return cur_mov_state;
 }
@@ -268,7 +268,7 @@ static void publish_odom_history(const movement_state_t *cur_state) {
     odom_history.next_index = (odom_history.next_index + 1) % MOVEMENT_ODOM_HISTORY_SIZE;
     if (odom_history.count < MOVEMENT_ODOM_HISTORY_SIZE) odom_history.count++;
 
-    scambio_scrivi(&double_buffer_history, &odom_history);
+    exchange_write(&double_buffer_history, &odom_history);
 }
 
 // job del task
@@ -283,11 +283,11 @@ void job_movement(void *arg) {
     if (mov_state.last_frame_num == 0) {
 
         // Carica lo stato del driver
-        drv_stato_t cur_drv_state = {0};
-        drv_stato(&cur_drv_state);
+        drv_status_t cur_drv_state = {0};
+        drv_status(&cur_drv_state);
 
         // Se il driver non è ancora pronto, ritorna
-        if (cur_drv_state.fase != DRV_PRONTO) return;
+        if (cur_drv_state.phase != DRV_READY) return;
 
         // Se ci troviamo qui significa che il driver è pronto, quindi
         // possiamo aggiornare lo stato in base al frame del driver
@@ -313,8 +313,8 @@ void job_movement(void *arg) {
 
 
         // Converti le differenze in distanze in metri
-        l_wheel_diff /= GD32_SCALA_V;
-        r_wheel_diff /= GD32_SCALA_V;
+        l_wheel_diff /= GD32_SCALE_V;
+        r_wheel_diff /= GD32_SCALE_V;
 
         // Il Centro del robot si sposta della media dei due spostamenti
         double mean_displacement = (l_wheel_diff + r_wheel_diff) / 2;
@@ -389,8 +389,8 @@ void job_movement(void *arg) {
             // se è un punto da attraversare continua ad andare, in attesa che la navigazione mandi il prossimo.
             // la navigazione gira ogni 100 ms: se tarda troppo il robot si ferma
             if (cur_obj.obj_type == OBJ_MOVE && cur_obj.pass_through) {
-                if (mov_state.pass_achieved_time == 0) mov_state.pass_achieved_time = rt_adesso();
-                if (rt_adesso() - mov_state.pass_achieved_time < PASS_HOLD_TIME) {
+                if (mov_state.pass_achieved_time == 0) mov_state.pass_achieved_time = rt_now();
+                if (rt_now() - mov_state.pass_achieved_time < PASS_HOLD_TIME) {
                     next_v = mov_state.last_cmd_v;
                     next_omega = mov_state.last_cmd_omega;
                 }
@@ -519,7 +519,7 @@ void job_movement(void *arg) {
                     next_v = 0;
                     next_omega = 0;
 
-                    drv_segnala_guasto(DRV_FAULT_UNKNOWN_OBJECTIVE);
+                    drv_report_fault(DRV_FAULT_UNKNOWN_OBJECTIVE);
 
                     break;
                 }
@@ -530,7 +530,7 @@ void job_movement(void *arg) {
         if (cur_obj.obj_type != OBJ_STOP) {
 
             // calcola il tempo trascorso dall'ultimo comando
-            double dt = (rt_adesso() - mov_state.last_cmd_time) / 1e9;
+            double dt = (rt_now() - mov_state.last_cmd_time) / 1e9;
             if (dt > 0.05) dt = 0.05;
 
             next_v = ramp_value(mov_state.last_cmd_v, next_v, MAX_ACCEL_V * dt, MAX_DECEL_V * dt);
@@ -539,19 +539,19 @@ void job_movement(void *arg) {
 
         mov_state.last_cmd_v = next_v;
         mov_state.last_cmd_omega = next_omega;
-        mov_state.last_cmd_time = rt_adesso();
+        mov_state.last_cmd_time = rt_now();
 
         // Imposta la velocità di movimento e rotazione a next_v e next_omega
-        drv_velocita(next_v, next_omega);
+        drv_velocity(next_v, next_omega);
 
         // Crea un oggetto movement_position_data_t e riempilo con la funzione helper
         movement_position_data_t cur_pos_data = get_cur_pos_data_from_cur_state(&mov_state);
 
         // se la posizione è valida, manda la posizione al driver
-        if (cur_pos_data.valid) drv_posa(cur_pos_data.x, cur_pos_data.y, cur_pos_data.theta);
+        if (cur_pos_data.valid) drv_pose(cur_pos_data.x, cur_pos_data.y, cur_pos_data.theta);
 
         // Pubblica la nuova pos_data appena calcolata
-        scambio_scrivi(&double_buffer, &cur_pos_data);
+        exchange_write(&double_buffer, &cur_pos_data);
 
     }
     

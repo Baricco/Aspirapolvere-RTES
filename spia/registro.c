@@ -25,20 +25,20 @@ int reg_scrivi_intestazione(FILE *f, const reg_intestazione_t *h)
 	for (int i = 0; i < h->n_canali; i++) {
 		const reg_canale_t *c = &h->canali[i];
 		if (scrivi(f, &c->id, 1) || scrivi(f, &c->protocollo, 1) ||
-		    scrivi_stringa(f, c->nome) || scrivi_stringa(f, c->dispositivo))
+		    scrivi_stringa(f, c->name) || scrivi_stringa(f, c->dispositivo))
 			return -1;
 	}
 	return 0;
 }
 
-int reg_scrivi_record(FILE *f, int64_t tempo_ns, uint8_t canale, uint8_t direzione, const void *dati, uint16_t n)
+int reg_scrivi_record(FILE *f, int64_t tempo_ns, uint8_t canale, uint8_t direction, const void *data, uint16_t n)
 {
 	uint8_t testa[12];
 	memcpy(testa, &tempo_ns, 8);
 	testa[8] = canale;
-	testa[9] = direzione;
+	testa[9] = direction;
 	memcpy(testa + 10, &n, 2);
-	return scrivi(f, testa, sizeof testa) || scrivi(f, dati, n);
+	return scrivi(f, testa, sizeof testa) || scrivi(f, data, n);
 }
 
 static int leggi(FILE *f, void *p, size_t n)
@@ -46,13 +46,13 @@ static int leggi(FILE *f, void *p, size_t n)
 	return fread(p, 1, n, f) == n ? 0 : -1;
 }
 
-static int leggi_stringa(FILE *f, char *s, size_t dim)
+static int leggi_stringa(FILE *f, char *s, size_t size)
 {
 	uint8_t l;
 	char tmp[256];
 	if (leggi(f, &l, 1) || leggi(f, tmp, l))
 		return -1;
-	size_t k = l < dim - 1 ? l : dim - 1;
+	size_t k = l < size - 1 ? l : size - 1;
 	memcpy(s, tmp, k);
 	s[k] = 0;
 	return 0;
@@ -69,7 +69,7 @@ int reg_leggi_intestazione(FILE *f, reg_intestazione_t *h)
 	for (int i = 0; i < h->n_canali; i++) {
 		reg_canale_t *c = &h->canali[i];
 		if (leggi(f, &c->id, 1) || leggi(f, &c->protocollo, 1) ||
-		    leggi_stringa(f, c->nome, sizeof c->nome) ||
+		    leggi_stringa(f, c->name, sizeof c->name) ||
 		    leggi_stringa(f, c->dispositivo, sizeof c->dispositivo))
 			return -1;
 	}
@@ -86,9 +86,9 @@ int reg_leggi_record(FILE *f, reg_record_t *r)
 		return -1;
 	memcpy(&r->tempo_ns, testa, 8);
 	r->canale = testa[8];
-	r->direzione = testa[9];
+	r->direction = testa[9];
 	memcpy(&r->n, testa + 10, 2);
-	return leggi(f, r->dati, r->n) ? -1 : 1;
+	return leggi(f, r->data, r->n) ? -1 : 1;
 }
 
 const char *reg_nome_protocollo(uint8_t p)

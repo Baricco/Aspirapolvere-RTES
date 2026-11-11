@@ -85,23 +85,23 @@ long send_http_request(http_connection_t *connection, const char *method, const 
 	snprintf(ultimo_percorso, sizeof ultimo_percorso, "%s", path);
 	snprintf(ultimo_metodo, sizeof ultimo_metodo, "%s", method);
 	dimensione_ultimo_corpo = body_size;
-	unsigned base, versione;
-	char motivo[32];
-	if (sscanf(path, "/api/device/map/saved?reason=%31s", motivo) == 1) {
-		snprintf(ultimo_salvato, sizeof ultimo_salvato, "%s", motivo);
+	unsigned base, version;
+	char reason[32];
+	if (sscanf(path, "/api/device/map/saved?reason=%31s", reason) == 1) {
+		snprintf(ultimo_salvato, sizeof ultimo_salvato, "%s", reason);
 		dimensione_salvata = body_size;
 		return 200;
 	}
-	if (sscanf(path, "/api/device/map/patch?base_version=%u&version=%u", &base, &versione) == 2) {
+	if (sscanf(path, "/api/device/map/patch?base_version=%u&version=%u", &base, &version) == 2) {
 		if (versione_server != (long)base) return 409;
 		if (!decode_map_data(body, body_size, mappa_server)) return 400;
-		versione_server = versione;
+		versione_server = version;
 		return 200;
 	}
-	if (sscanf(path, "/api/device/map?version=%u", &versione) == 1) {
+	if (sscanf(path, "/api/device/map?version=%u", &version) == 1) {
 		memset(mappa_server, 0, sizeof mappa_server);
 		if (!decode_map_data(body, body_size, mappa_server)) return 400;
-		versione_server = versione;
+		versione_server = version;
 		return 200;
 	}
 	return 404;
@@ -464,7 +464,7 @@ int main(void)
 	if (!mkdtemp(cartella)) return 1;
 	setenv("RTES_MAPS", cartella, 1);       /* la cartella delle mappe del task aperiodico */
 	init_aperiodic();
-	sem_init(&aperiodic_task.sveglia, 0, 0);    /* il task non è avviato: le sveglie delle richieste restano lì */
+	sem_init(&aperiodic_task.wakeup, 0, 0);    /* il task non è avviato: le sveglie delle richieste restano lì */
 	ESEGUI(crc_standard);
 	ESEGUI(codifica_rtm1);
 	ESEGUI(codifica_e_decodifica);

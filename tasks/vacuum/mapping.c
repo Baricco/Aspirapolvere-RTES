@@ -5,7 +5,7 @@
 #include <stdio.h>
 
 #include "driver/driver.h"
-#include "driver/scambio.h"
+#include "driver/exchange.h"
 
 #include "mapping.h"
 #include "lidar.h"
@@ -101,12 +101,12 @@
 #define SEARCH_LEVEL_NEVER          7           // il blocco non lo contiene a nessun livello
 
 // canale di scambio del doppio buffer delle zone proibite
-static scambio_t double_buffer;
+static exchange_t double_buffer;
 // i due buffer
 static mapping_forbidden_zone_list_t buffer1, buffer2;
 
 // canale di scambio del doppio buffer per l'allineamento
-static scambio_t double_buffer_align;
+static exchange_t double_buffer_align;
 // i due buffer dell'allineamento 
 static mapping_correction_t buffer3, buffer4;
 
@@ -190,11 +190,11 @@ typedef struct {
     // numero di celle fini già viste per ogni cella della griglia di navigazione
     uint8_t num_observed_fine_cells[NAV_MAP_CELL_NUMBER * NAV_MAP_CELL_NUMBER];
 
-    // numero dell'ultima scansione del lidar (restituito da drv_giro)
+    // numero dell'ultima scansione del lidar (restituito da drv_scan)
     uint32_t last_scan_num;
 
     // ultima scansione del lidar
-    lidar_giro_t last_scan;
+    lidar_scan_t last_scan;
 
     // numero dell'ultimo evento dei sensori applicato
     uint32_t last_event;
@@ -223,7 +223,7 @@ typedef struct {
     uint32_t user_zones_version;    // versione delle zone volute già applicata
 
     // punti misurati dal lidar da usare per l'allineamento 
-    align_point_t lidar_point[LIDAR_GIRO_MAX_PUNTI];
+    align_point_t lidar_point[LIDAR_SCAN_MAX_POINTS];
 
     // storico delle pose dell'odometria, letto dal task movement a ogni job
     movement_odom_history_t odom_history;
@@ -286,11 +286,11 @@ static mapping_state_t map_state;
 static _Atomic bool started_on_base;
 
 // risultato della ricerca della posizione (doppio buffer: scrive il task aperiodico, legge la mappatura)
-static scambio_t double_buffer_search;
+static exchange_t double_buffer_search;
 static search_result_t search_buffer1, search_buffer2;
 
 // zone volute dall'utente (doppio buffer: scrive il task aperiodico, legge la mappatura) e versione applicata
-static scambio_t double_buffer_zones;
+static exchange_t double_buffer_zones;
 static mapping_user_zones_t zones_buffer1, zones_buffer2;
 static _Atomic uint32_t applied_zones_version;
 
@@ -496,7 +496,7 @@ int init_mapping(void) {
 
     // inizializza il doppio buffer passando i due buffer da usare
     // e la loro dimensione 
-    scambio_init(
+    exchange_init(
         &double_buffer,
         &buffer1,
         &buffer2, 
@@ -505,7 +505,7 @@ int init_mapping(void) {
 
     // inizializza il doppio buffer dell'allineamento passando i due buffer da usare
     // e la loro dimensione 
-    scambio_init(
+    exchange_init(
         &double_buffer_align,
         &buffer3,
         &buffer4, 
@@ -514,10 +514,10 @@ int init_mapping(void) {
 
 
     // inizializza il doppio buffer delle zone volute dall'utente
-    scambio_init(&double_buffer_zones, &zones_buffer1, &zones_buffer2, sizeof(mapping_user_zones_t));
+    exchange_init(&double_buffer_zones, &zones_buffer1, &zones_buffer2, sizeof(mapping_user_zones_t));
 
     // inizializza il doppio buffer del risultato della ricerca della posizione
-    scambio_init(&double_buffer_search, &search_buffer1, &search_buffer2, sizeof(search_result_t));
+    exchange_init(&double_buffer_search, &search_buffer1, &search_buffer2, sizeof(search_result_t));
 
     // Inizializza il mutex, salva il valore di ritorno per restituirlo alla fine
     int error_num = rt_mutex_init(&navigation_map_data.mutex);
@@ -558,7 +558,7 @@ mapping_forbidden_zone_list_t read_forbidden_zone_list(void) {
     mapping_forbidden_zone_list_t forbidden_zones = {0};
 
     // Copia il buffer pubblicato in forbidden_zones
-    scambio_leggi(&double_buffer, &forbidden_zones);
+    exchange_read(&double_buffer, &forbidden_zones);
 
     // ritorna forbidden_zones
     return forbidden_zones;
@@ -571,7 +571,7 @@ mapping_correction_t read_mapping_correction(void) {
     mapping_correction_t mapping_correction = {0};
 
     // Copia il buffer pubblicato in mapping_correction
-    scambio_leggi(&double_buffer_align, &mapping_correction);
+    exchange_read(&double_buffer_align, &mapping_correction);
 
     // ritorna mapping_correction
     return mapping_correction;
@@ -588,7 +588,7 @@ bool read_started_on_base(void) {
 void write_forbidden_zone_list(const mapping_forbidden_zone_list_t *forbidden_zones) {
 
     // Copia scrivi le zone proibite nel doppio buffer
-    scambio_scrivi(&double_buffer, forbidden_zones);
+    exchange_write(&double_buffer, forbidden_zones);
 
     return;
 }
@@ -747,57 +747,57 @@ static void odom_to_map(double *x, double *y, double *theta) {
 static bool apply_queued_events(void) {
         
     // Variabile che conterrà gli ultimi 32 eventi registrati dal driver
-    drv_contatti_t last_events = {0};
+    drv_contacts_t last_events = {0};
     
     // Leggi gli ultimi eventi
-    drv_contatti(&last_events);
+    drv_contacts(&last_events);
     
     bool hasChanged = false;
 
-    for (uint32_t i = map_state.last_event + 1; i <= last_events.ultimo; i++) {
+    for (uint32_t i = map_state.last_event + 1; i <= last_events.last; i++) {
 
         // Salva l'evento corrente 
-        drv_contatto_t cur_event = last_events.ev[i % CONTATTI_N];
+        drv_contact_t cur_event = last_events.events[i % CONTACTS_N];
 
         // l'evento che stiamo guardando è diverso da i, significa che sono avvenuti più di 32
         // eventi nell'utimo giro, saltiamo questo evento
-        if (cur_event.numero != i) continue;
+        if (cur_event.number != i) continue;
 
         // Se l'evento corrente non ha una posizione valida, saltalo
-        if (!cur_event.posa_valida) continue;
+        if (!cur_event.pose_valid) continue;
 
         // Se l'evento ha una posizione vecchia (>100ms), saltalo
-        if (cur_event.t_ns - cur_event.posa.t_ns > RT_MS(100)) continue;
+        if (cur_event.t_ns - cur_event.pose.t_ns > RT_MS(100)) continue;
 
         double dist = 0, angle = 0;
         int8_t event_value = 0;
 
         // Ricava di che evento si tratta
-        if (cur_event.sensore <= CONTATTO_VUOTO_DX_LAT) {       // se il sensore è uno di quelli di caduta
+        if (cur_event.sensor <= CONTACT_VOID_RIGHT_SIDE) {       // se il sensore è uno di quelli di caduta
             dist = CLIFF_SENSOR_DISTANCE;
-            angle = CLIFF_SENSOR_ANGLE(cur_event.sensore);
+            angle = CLIFF_SENSOR_ANGLE(cur_event.sensor);
             event_value = VOID_OBSTACLE;
-        } else if (cur_event.sensore == CONTATTO_INCASTRO) {                      // se il sensore è quello degli incastri
+        } else if (cur_event.sensor == CONTACT_STUCK) {                      // se il sensore è quello degli incastri
             dist = BUMPER_DISTANCE;
             angle = 0;
             event_value = LOW_OBSTACLE;
         } else {                            // se il sensore è il bumper
             dist = BUMPER_DISTANCE;
-            angle = cur_event.sensore == CONTATTO_BUMPER_DX ? BUMPER_DX_ANGLE : BUMPER_SX_ANGLE;
+            angle = cur_event.sensor == CONTACT_BUMPER_RIGHT ? BUMPER_DX_ANGLE : BUMPER_SX_ANGLE;
             event_value = LOW_OBSTACLE;
         }
 
         // calcola le coordinate della cella in cui è avvenuto l'evento
-        // la posizione dell'evento arriva da drv_posa, quindi è già nel sistema della mappa
-        double x = cur_event.posa.x + dist * cos(cur_event.posa.theta + angle);
-        double y = cur_event.posa.y + dist * sin(cur_event.posa.theta + angle);
+        // la posizione dell'evento arriva da drv_pose, quindi è già nel sistema della mappa
+        double x = cur_event.pose.x + dist * cos(cur_event.pose.theta + angle);
+        double y = cur_event.pose.y + dist * sin(cur_event.pose.theta + angle);
 
         set_fine_cell_special_value(coord_to_fine_index(x, y), event_value);
 
         hasChanged = true;
     }
 
-    map_state.last_event = last_events.ultimo;
+    map_state.last_event = last_events.last;
 
     return hasChanged;
 
@@ -1050,8 +1050,8 @@ static void pose_at_time(int64_t time_ns, double *x, double *y, double *theta) {
 // che il robot aveva nel suo istante, poi viene espresso rispetto a un'unica posizione, ref
 static int prepare_lidar_points(double ref_x, double ref_y, double ref_theta) {
 
-    const lidar_giro_t *scan = &map_state.last_scan;
-    int64_t scan_duration = scan->t_fine_ns - scan->t_inizio_ns;
+    const lidar_scan_t *scan = &map_state.last_scan;
+    int64_t scan_duration = scan->t_end_ns - scan->t_start_ns;
 
     // seno e coseno dell'angolo di riferimento
     double cos_ref = cos(ref_theta);
@@ -1062,16 +1062,16 @@ static int prepare_lidar_points(double ref_x, double ref_y, double ref_theta) {
     for (int i = 0; i < scan->n; i++) {
 
         // scarta i punti senza eco (che sono a 0) e quelli oltre LIDAR_MAPPING_MAX_RANGE
-        if (scan->p[i].distanza_mm == 0 || scan->p[i].distanza_mm > LIDAR_MAPPING_MAX_RANGE * 1000) continue;
+        if (scan->p[i].distance_mm == 0 || scan->p[i].distance_mm > LIDAR_MAPPING_MAX_RANGE * 1000) continue;
 
         // calcola la posizione del robot nell'istante in cui è stato misurato questo punto
-        int64_t point_time = scan->t_inizio_ns + (scan_duration * i) / scan->n;
+        int64_t point_time = scan->t_start_ns + (scan_duration * i) / scan->n;
         double robot_x, robot_y, robot_theta;
         pose_at_time(point_time, &robot_x, &robot_y, &robot_theta);
 
         // calcola le coordinate del punto rispetto al robot
         double rel_x, rel_y;
-        drv_punto_xy(&scan->p[i], &rel_x, &rel_y);
+        drv_point_xy(&scan->p[i], &rel_x, &rel_y);
 
         // calcola le coordinate del punto sulla mappa
         double cos_robot = cos(robot_theta);
@@ -1106,7 +1106,7 @@ static void publish_correction(bool is_stuck) {
         .state = map_state.state,
     };
 
-    scambio_scrivi(&double_buffer_align, &mapping_correction);
+    exchange_write(&double_buffer_align, &mapping_correction);
 }
 
 // funzione helper che corregge l'angolo della stima allineata con la direzione dei muri. I punti sono quelli preparati da
@@ -1123,11 +1123,11 @@ static void correct_theta_with_walls(int num_points) {
         hypot(map_state.aligned_x - map_state.wall_last_x, map_state.aligned_y - map_state.wall_last_y) < WALL_MIN_MOVE_M) return;
 
     // se il robot ruota troppo veloce i punti del giro sono deformati: niente correzione
-    const lidar_giro_t *scan = &map_state.last_scan;
-    double scan_seconds = (scan->t_fine_ns - scan->t_inizio_ns) / 1e9;
+    const lidar_scan_t *scan = &map_state.last_scan;
+    double scan_seconds = (scan->t_end_ns - scan->t_start_ns) / 1e9;
     double start_x, start_y, start_theta, end_x, end_y, end_theta;
-    pose_at_time(scan->t_inizio_ns, &start_x, &start_y, &start_theta);
-    pose_at_time(scan->t_fine_ns, &end_x, &end_y, &end_theta);
+    pose_at_time(scan->t_start_ns, &start_x, &start_y, &start_theta);
+    pose_at_time(scan->t_end_ns, &end_x, &end_y, &end_theta);
     if (scan_seconds <= 0 || fabs(wrap_angle(end_theta - start_theta)) / scan_seconds > WALL_MAX_OMEGA) return;
 
     // somme pesate di 4 volte l'angolo dei tratti (parte reale e immaginaria) e lunghezza totale dei tratti
@@ -1294,9 +1294,9 @@ static void restart_from_pose(double odom_x, double odom_y, double odom_theta, d
     map_state.last_mark.is_valid = false;
 
     // gli eventi dei sensori arrivati mentre il robot era in aria non valgono, salta direttamente all'ultimo
-    drv_contatti_t last_events = {0};
-    drv_contatti(&last_events);
-    map_state.last_event = last_events.ultimo;
+    drv_contacts_t last_events = {0};
+    drv_contacts(&last_events);
+    map_state.last_event = last_events.last;
 
     // da normale la mappa ricomincia a cambiare, quindi la griglia della ricerca andrà rifatta
     if (next_state == MAP_NORMAL) map_state.search.grid_ready = false;
@@ -1313,7 +1313,7 @@ static void give_up_search(void) {
 
     publish_correction(false);
 
-    drv_segnala_guasto(DRV_FAULT_POSITION_NOT_FOUND);
+    drv_report_fault(DRV_FAULT_POSITION_NOT_FOUND);
 }
 
 // funzione helper che conta un tentativo fallito (ricerca senza risultato o conferma non riuscita): se ne restano,
@@ -1329,7 +1329,7 @@ static void count_failed_attempt(void) {
 
     map_state.state = MAP_LOST;
     map_state.search.phase = SEARCH_WAIT_SCAN;
-    map_state.search.put_down_t = rt_adesso();
+    map_state.search.put_down_t = rt_now();
 
     publish_correction(false);
 }
@@ -1734,7 +1734,7 @@ void run_position_search(uint32_t request_num) {
     // annullata prima ancora di partire
     if (atomic_load(&search_cancel_num) == request_num) {
         result.outcome = SEARCH_ABORTED;
-        scambio_scrivi(&double_buffer_search, &result);
+        exchange_write(&double_buffer_search, &result);
         return;
     }
 
@@ -1744,7 +1744,7 @@ void run_position_search(uint32_t request_num) {
         // mappa vuota: non c'è niente in cui cercare
         if (!set_search_area()) {
             result.outcome = SEARCH_NO_AREA;
-            scambio_scrivi(&double_buffer_search, &result);
+            exchange_write(&double_buffer_search, &result);
             return;
         }
 
@@ -1753,7 +1753,7 @@ void run_position_search(uint32_t request_num) {
         while (!build_search_grid()) {
             if (atomic_load(&search_cancel_num) == request_num) {
                 result.outcome = SEARCH_ABORTED;
-                scambio_scrivi(&double_buffer_search, &result);
+                exchange_write(&double_buffer_search, &result);
                 return;
             }
         }
@@ -1770,7 +1770,7 @@ void run_position_search(uint32_t request_num) {
     while (!search_step()) {
         if (atomic_load(&search_cancel_num) == request_num) {
             result.outcome = SEARCH_ABORTED;
-            scambio_scrivi(&double_buffer_search, &result);
+            exchange_write(&double_buffer_search, &result);
             return;
         }
     }
@@ -1785,12 +1785,12 @@ void run_position_search(uint32_t request_num) {
     }
 
     // la mappa torna alla mappatura
-    scambio_scrivi(&double_buffer_search, &result);
+    exchange_write(&double_buffer_search, &result);
 }
 
 // funzione che cerca la posizione del robot dopo il riappoggio (stato MAP_LOST): prepara i punti, chiede la ricerca al
 // task aperiodico e ne usa il risultato
-static void relocate(const movement_position_data_t *cur_pos, const drv_stato_t *cur_drv_state, bool is_same_scan) {
+static void relocate(const movement_position_data_t *cur_pos, const drv_status_t *cur_drv_state, bool is_same_scan) {
 
     // un tasto premuto con la posizione persa (la navigazione fa l'aggancio alla cieca): la ricerca si annulla e si aspetta
     // che il robot sia sulla base. Se la ricerca sta girando, la mappa si riprende solo quando arriva il suo risultato
@@ -1811,7 +1811,7 @@ static void relocate(const movement_position_data_t *cur_pos, const drv_stato_t 
         case SEARCH_WAIT_SCAN: {
 
             // riappoggiato sulla base: è lì per forza, e la base è l'origine della mappa
-            if (read_started_on_base() && cur_drv_state->sulla_base) {
+            if (read_started_on_base() && cur_drv_state->on_base) {
                 restart_from_pose(cur_pos->odom_x, cur_pos->odom_y, cur_pos->odom_theta, 0, 0, 0, MAP_NORMAL);
                 return;
             }
@@ -1823,11 +1823,11 @@ static void relocate(const movement_position_data_t *cur_pos, const drv_stato_t 
             }
 
             // serve una scansione nuova, iniziata dopo il riappoggio (da sollevato il lidar è spento)
-            if (is_same_scan || map_state.last_scan.t_inizio_ns <= map_state.search.put_down_t) return;
+            if (is_same_scan || map_state.last_scan.t_start_ns <= map_state.search.put_down_t) return;
 
             // la posizione dell'odometria alla fine della scansione, e i punti rispetto a quella posizione
             read_odom_history(&map_state.odom_history);
-            pose_at_time(map_state.last_scan.t_fine_ns, &map_state.search.ref_x, &map_state.search.ref_y, &map_state.search.ref_theta);
+            pose_at_time(map_state.last_scan.t_end_ns, &map_state.search.ref_x, &map_state.search.ref_y, &map_state.search.ref_theta);
             prepare_search_points(prepare_lidar_points(map_state.search.ref_x, map_state.search.ref_y, map_state.search.ref_theta));
 
             // pochi punti (per esempio il robot è contro un mobile): aspetta la prossima scansione
@@ -1844,7 +1844,7 @@ static void relocate(const movement_position_data_t *cur_pos, const drv_stato_t 
 
             // il risultato di questa ricerca non è ancora arrivato: la mappa è ancora prestata
             search_result_t result = {0};
-            scambio_leggi(&double_buffer_search, &result);
+            exchange_read(&double_buffer_search, &result);
             if (result.request_num != map_state.search.request_num) break;
 
             // ricerca annullata (anche se ha fatto in tempo a finire): da un tasto si aspetta la base, da un sollevamento
@@ -1878,7 +1878,7 @@ static void relocate(const movement_position_data_t *cur_pos, const drv_stato_t 
         case SEARCH_CANCELLED: {
 
             // la navigazione porta il robot alla base con l'aggancio a infrarossi: sulla base la posizione è l'origine
-            if (read_started_on_base() && cur_drv_state->sulla_base) {
+            if (read_started_on_base() && cur_drv_state->on_base) {
                 restart_from_pose(cur_pos->odom_x, cur_pos->odom_y, cur_pos->odom_theta, 0, 0, 0, MAP_NORMAL);
             }
             break;
@@ -1896,7 +1896,7 @@ static void confirm_position(const movement_position_data_t *cur_pos, bool is_sa
 
     // allinea come sempre (pubblica anche la correzione)
     double ref_x, ref_y, ref_theta;
-    pose_at_time(map_state.last_scan.t_fine_ns, &ref_x, &ref_y, &ref_theta);
+    pose_at_time(map_state.last_scan.t_end_ns, &ref_x, &ref_y, &ref_theta);
     update_aligned_pose(ref_x, ref_y, ref_theta);
 
     // controlla la scansione con il punteggio della ricerca, nella posizione appena allineata. Se il robot ruota veloce la
@@ -2085,7 +2085,7 @@ static void publish_base_zone(void) {
 static void apply_user_zones(void) {
 
     mapping_user_zones_t wanted = {0};
-    scambio_leggi(&double_buffer_zones, &wanted);
+    exchange_read(&double_buffer_zones, &wanted);
 
     if (wanted.version == map_state.user_zones_version || !read_started_on_base()) return;
 
@@ -2106,13 +2106,13 @@ static void check_start_on_base(void) {
     // se il controllo è già finito esci
     if (map_state.base_check_jobs >= BASE_CHECK_JOBS) return;
 
-    drv_stato_t cur_drv_state = {0};
-    drv_stato(&cur_drv_state);
+    drv_status_t cur_drv_state = {0};
+    drv_status(&cur_drv_state);
 
-    // finché il driver non è pronto sulla_base non vale ancora niente
-    if (cur_drv_state.fase != DRV_PRONTO) return;
+    // finché il driver non è pronto on_base non vale ancora niente
+    if (cur_drv_state.phase != DRV_READY) return;
 
-    if (cur_drv_state.sulla_base) map_state.base_seen = true;
+    if (cur_drv_state.on_base) map_state.base_seen = true;
 
     map_state.base_check_jobs++;
 
@@ -2150,7 +2150,7 @@ bool copy_map_categories(uint8_t *categories, int rect_x, int rect_y, int rect_w
 
         // un job è in corso: aspetta un po' e riprova
         if (before & 1) {
-            rt_dormi_fino_a(rt_adesso() + MAP_COPY_RETRY_WAIT);
+            rt_sleep_until(rt_now() + MAP_COPY_RETRY_WAIT);
             continue;
         }
 
@@ -2179,7 +2179,7 @@ bool copy_map_categories(uint8_t *categories, int rect_x, int rect_y, int rect_w
 
 // funzione chiamata dal task aperiodico: scrive le zone volute dall'utente, che la mappatura applica nel suo job
 void write_user_zones(const mapping_user_zones_t *user_zones) {
-    scambio_scrivi(&double_buffer_zones, user_zones);
+    exchange_write(&double_buffer_zones, user_zones);
 }
 
 // funzione chiamata dal task aperiodico: versione delle zone volute che la mappatura ha già applicato
@@ -2273,13 +2273,13 @@ static bool read_map_file(FILE *f, int *x0, int *y0, int *width, int *height) {
 static void load_map_if_on_base(void) {
 
     // aspetta il driver pronto, poi guarda per un po' se il robot è sulla base (il bit può essere intermittente)
-    drv_stato_t drv_state = {0};
-    int64_t limit = rt_adesso() + LOAD_BASE_WAIT;
+    drv_status_t drv_state = {0};
+    int64_t limit = rt_now() + LOAD_BASE_WAIT;
     bool on_base = false;
-    while (rt_adesso() < limit && !on_base) {
-        drv_stato(&drv_state);
-        if (drv_state.fase == DRV_PRONTO && drv_state.sulla_base) on_base = true;
-        else rt_dormi_fino_a(rt_adesso() + RT_MS(50));
+    while (rt_now() < limit && !on_base) {
+        drv_status(&drv_state);
+        if (drv_state.phase == DRV_READY && drv_state.on_base) on_base = true;
+        else rt_sleep_until(rt_now() + RT_MS(50));
     }
     if (!on_base) {
         fprintf(stderr, "mappatura: il robot non è sulla base, la mappa non si carica\n");
@@ -2339,7 +2339,7 @@ static void job_mapping_body(void *arg) {
     (void)arg;
 
     // Leggi l'ultiima scansione del lidar
-    uint32_t cur_scan_num = drv_giro(&map_state.last_scan);
+    uint32_t cur_scan_num = drv_scan(&map_state.last_scan);
 
     // Salvati se il numero di scansione è uguale all'ultimo giro
     bool is_same_scan = cur_scan_num == map_state.last_scan_num;
@@ -2351,12 +2351,12 @@ static void job_mapping_body(void *arg) {
     movement_position_data_t cur_pos = read_movement();
 
     // Leggi lo stato del driver, serve a sapere se il robot è sollevato
-    drv_stato_t cur_drv_state = {0};
-    drv_stato(&cur_drv_state);
+    drv_status_t cur_drv_state = {0};
+    drv_status(&cur_drv_state);
 
     // se il robot è sollevato la sua posizione è persa: pubblicalo una volta sola ed esci,
     // da sollevato non si scrive niente sulla mappa
-    if (cur_drv_state.sollevato) {
+    if (cur_drv_state.lifted) {
         if (map_state.state != MAP_LOST) {
             map_state.state = MAP_LOST;
             map_state.search.attempts = 0;
@@ -2375,7 +2375,7 @@ static void job_mapping_body(void *arg) {
         } else if (map_state.search.phase != SEARCH_CANCELLED) {
             map_state.search.phase = SEARCH_WAIT_SCAN;
         }
-        map_state.search.put_down_t = rt_adesso();
+        map_state.search.put_down_t = rt_now();
         return;
     }
 
@@ -2388,11 +2388,11 @@ static void job_mapping_body(void *arg) {
     // posizione non ritrovata: il robot è in guasto e la mappa non si tocca. Quando il guasto viene azzerato (tasto premuto
     // o robot rimesso sulla base) si ricomincia a cercare da capo, e sulla base la posizione si ritrova subito
     if (map_state.state == MAP_NOT_FOUND) {
-        if (cur_drv_state.fase != DRV_GUASTO) {
+        if (cur_drv_state.phase != DRV_FAULT) {
             map_state.state = MAP_LOST;
             map_state.search.attempts = 0;
             map_state.search.phase = SEARCH_WAIT_SCAN;
-            map_state.search.put_down_t = rt_adesso();
+            map_state.search.put_down_t = rt_now();
             publish_correction(false);
         }
         return;
@@ -2460,12 +2460,12 @@ static void job_mapping_body(void *arg) {
 
         // Calcola inizio e durata della scansione, insieme alla velocità del robot serve 
         // per compensare la deformazione della scansione del lidar
-        int64_t scan_start_time = map_state.last_scan.t_inizio_ns;
-        int64_t scan_duration = map_state.last_scan.t_fine_ns - scan_start_time;
+        int64_t scan_start_time = map_state.last_scan.t_start_ns;
+        int64_t scan_duration = map_state.last_scan.t_end_ns - scan_start_time;
 
         // calcola la posizione di riferimento dell'allineamento: dove si trovava il robot alla fine della scansione
         double ref_x, ref_y, ref_theta;
-        pose_at_time(map_state.last_scan.t_fine_ns, &ref_x, &ref_y, &ref_theta);
+        pose_at_time(map_state.last_scan.t_end_ns, &ref_x, &ref_y, &ref_theta);
 
         // aggiorna la stima allineata, prima di scrivere la scansione nella mappa
         update_aligned_pose(ref_x, ref_y, ref_theta);
@@ -2478,7 +2478,7 @@ static void job_mapping_body(void *arg) {
         for (int i = 0; write_scan && i < map_state.last_scan.n; i++) {
             
             // se un punto ha distanza 0, non considerarlo
-            if (map_state.last_scan.p[i].distanza_mm == 0) continue;
+            if (map_state.last_scan.p[i].distance_mm == 0) continue;
             
             // calcola l'istante in cui è stato campionato questo punto
             int64_t cur_point_time = scan_start_time + (scan_duration * i) / map_state.last_scan.n;
@@ -2509,7 +2509,7 @@ static void job_mapping_body(void *arg) {
             double x_coord_rel = 0, y_coord_rel = 0;
 
             // calcola le coordinate x, y del punto scansionato rispetto al robot
-            drv_punto_xy(&map_state.last_scan.p[i], &x_coord_rel, &y_coord_rel);
+            drv_point_xy(&map_state.last_scan.p[i], &x_coord_rel, &y_coord_rel);
 
             // per ottenere le coordinate assolute, ruota i punti della rotazione del robot
             // e somma le coordinate del robot a x/y_coord

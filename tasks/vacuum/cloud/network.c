@@ -188,7 +188,7 @@ static void wait_before_retry(int *failures) {
     int delay = RECONNECT_DELAYS[*failures < RECONNECT_DELAYS_NUM ? *failures : RECONNECT_DELAYS_NUM - 1];
     if (*failures == 0) fprintf(stderr, "rete: server non raggiungibile, riprovo\n");
     (*failures)++;
-    rt_dormi_fino_a(rt_adesso() + RT_S(delay));
+    rt_sleep_until(rt_now() + RT_S(delay));
 }
 
 // funzione che l'interprete chiama per scaricare la mappa da selezionare nel file path
@@ -318,15 +318,15 @@ static void *state_loop(void *arg) {
     int failures = 0;
     int64_t retry_t = 0;            // con la rete giù non si riprova prima di questo istante
     int64_t next_map_t = 0;         // prossimo invio della mappa dal vivo
-    int64_t next_cycle_t = rt_adesso();
+    int64_t next_cycle_t = rt_now();
 
     while (!is_restart_requested()) {
 
         next_cycle_t += STATE_CYCLE;
-        int64_t now = rt_adesso();
+        int64_t now = rt_now();
         if (next_cycle_t < now) next_cycle_t = now;     // una richiesta lenta ha fatto saltare dei cicli: non si recuperano
-        rt_dormi_fino_a(next_cycle_t);
-        now = rt_adesso();
+        rt_sleep_until(next_cycle_t);
+        now = rt_now();
 
         // la posizione si segue sempre, anche con la rete giù: le celle perse partono all'invio dopo
         track_live_map_position();
@@ -361,7 +361,7 @@ static void *state_loop(void *arg) {
         if (is_network_ok) {
             failures = 0;
         } else {
-            retry_t = rt_adesso() + RT_S(RECONNECT_DELAYS[failures < RECONNECT_DELAYS_NUM ? failures : RECONNECT_DELAYS_NUM - 1]);
+            retry_t = rt_now() + RT_S(RECONNECT_DELAYS[failures < RECONNECT_DELAYS_NUM ? failures : RECONNECT_DELAYS_NUM - 1]);
             failures++;
         }
     }

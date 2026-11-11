@@ -1,11 +1,11 @@
 #include "driver/driver.h"
-#include "driver/scambio.h"
+#include "driver/exchange.h"
 #include <math.h>
 
 #include "lidar.h"
 
 // canale di scambio del doppio buffer
-static scambio_t double_buffer;
+static exchange_t double_buffer;
 // i due buffer
 static lidar_scan_data_t buffer1, buffer2;
 
@@ -24,7 +24,7 @@ static struct {
     double filtered_x;                  // x del punto rimuovendo il rumore del lidar
     double filtered_y;                  // y del punto rimuovendo il rumore del lidar
 
-} border_points[LIDAR_GIRO_MAX_PUNTI];
+} border_points[LIDAR_SCAN_MAX_POINTS];
 
 
 // funzione di inizializzazione del task
@@ -32,7 +32,7 @@ void init_lidar(void) {
 
     // inizializza il doppio buffer passando i due buffer da usare
     // e la loro dimensione 
-    scambio_init(
+    exchange_init(
         &double_buffer,
         &buffer1,
         &buffer2, 
@@ -67,14 +67,14 @@ lidar_scan_data_t read_lidar(void) {
     init_lidar_scan_data(&scan_data);
 
     // Copia il buffer pubblicato in scan_data
-    scambio_leggi(&double_buffer, &scan_data);
+    exchange_read(&double_buffer, &scan_data);
 
     // ritorna scan_data
     return scan_data;
 }
 
 // funzione che popola l'array di border_points, estraendo i valori partendo dalle misurazioni grezze del lidar
-static uint16_t collect_border_points(const lidar_giro_t *scan) {
+static uint16_t collect_border_points(const lidar_scan_t *scan) {
 
     int point_num = 0;
 
@@ -82,11 +82,11 @@ static uint16_t collect_border_points(const lidar_giro_t *scan) {
     for (int i = 0; i < scan->n; i++) {
 
         // scarta i punti senza eco
-        if (scan->p[i].distanza_mm == 0) continue;
+        if (scan->p[i].distance_mm == 0) continue;
 
         // converti il punto del lidar in coordinate x,y rispetto al centro del robot
         double x, y;
-        drv_punto_xy(&scan->p[i], &x, &y);
+        drv_point_xy(&scan->p[i], &x, &y);
 
         // salva distanza dal centro e angolo
         border_points[point_num].raw_distance = hypot(x, y);
@@ -188,7 +188,7 @@ static bool is_direction_clear(const double direction, const uint16_t point_num)
 }
 
 // funzione che calcola i dati per la pulizia dei bordi partendo dai punti della scansione
-static void calc_border_data(const lidar_giro_t *scan, lidar_scan_data_t *scan_data) {
+static void calc_border_data(const lidar_scan_t *scan, lidar_scan_data_t *scan_data) {
 
     // prendi i punti 
     const uint16_t point_num = collect_border_points(scan);
@@ -253,10 +253,10 @@ void job_lidar(void *arg) {
     
     (void)arg;
     
-    static lidar_giro_t cur_scan;
+    static lidar_scan_t cur_scan;
     
     // leggi la scansione lidar dal driver
-    uint32_t scan_num = drv_giro(&cur_scan);
+    uint32_t scan_num = drv_scan(&cur_scan);
 
     // confronta il numero di scansione dall'ultimo numero letto
     if (scan_num <= last_scan_num) return;  // se già letto ritorna
@@ -269,7 +269,7 @@ void job_lidar(void *arg) {
     cur_scan_data.num = scan_num;
 
     // copia il timestamp di fine lettura
-    cur_scan_data.scan_end_t = cur_scan.t_fine_ns;
+    cur_scan_data.scan_end_t = cur_scan.t_end_ns;
     
     // contatore dei punti validi (!= 0) letti nella scansione
     uint16_t valid_points_counter = 0;
@@ -278,7 +278,7 @@ void job_lidar(void *arg) {
     for (uint16_t i = 0; i < cur_scan.n; i++) {
 
         // scarta i punti a distanza 0mm
-        if (cur_scan.p[i].distanza_mm == 0) continue;
+        if (cur_scan.p[i].distance_mm == 0) continue;
 
         // se siamo arrivati qui il punto corrente è valido
         valid_points_counter++;
@@ -286,7 +286,7 @@ void job_lidar(void *arg) {
         // converti il punto del lidar in coordinate x,y
         // rispetto al centro del robot
         double x, y;
-        drv_punto_xy(&cur_scan.p[i], &x, &y);
+        drv_point_xy(&cur_scan.p[i], &x, &y);
         
         // calcola l'angolo da (x, y)
         double angle = atan2(y, x);
@@ -337,7 +337,7 @@ void job_lidar(void *arg) {
     cur_scan_data.valid = (valid_points_counter > cur_scan.n * RELIABILITY_FACTOR) ; 
 
     // Pubblica la nuova lettura (scan_data)
-    scambio_scrivi(&double_buffer, &cur_scan_data);
+    exchange_write(&double_buffer, &cur_scan_data);
 
     // Aggiorna last_scan_num
     last_scan_num = scan_num;

@@ -37,10 +37,10 @@ static void stanza_testo(void)
 {
 	char err[300];
 	CONTROLLA(mondo_leggi_testo(&m, STANZA, err, sizeof err) == 0);
-	CONTROLLA(m.n == 9 && fabs(m.larghezza - 3) < 1e-12 && !strcmp(m.nome, "prova"));
+	CONTROLLA(m.n == 9 && fabs(m.larghezza - 3) < 1e-12 && !strcmp(m.name, "prova"));
 	CONTROLLA(m.ha_base && fabs(m.base_dir - M_PI / 2) < 1e-9 && fabs(m.robot_x - 1.5) < 1e-12);
 	CONTROLLA(m.o[0].muro && fabs(m.o[0].larghezza - 3) < 1e-9 && fabs(m.o[0].quota_a - 2.5) < 1e-9);
-	CONTROLLA(m.o[4].forma == OGG_RETTANGOLO && !strcmp(m.o[4].gruppo, "g") && fabs(m.o[4].angolo - M_PI / 4) < 1e-9);
+	CONTROLLA(m.o[4].forma == OGG_RETTANGOLO && !strcmp(m.o[4].group, "g") && fabs(m.o[4].angle - M_PI / 4) < 1e-9);
 	CONTROLLA(m.o[5].forma == OGG_CERCHIO && m.o[8].forma == OGG_VUOTO && m.o[8].n_punti == 4);
 	/* andata e ritorno */
 	char *t = mondo_testo(&m);
@@ -49,8 +49,8 @@ static void stanza_testo(void)
 	CONTROLLA(m2.n == m.n);
 	for (int i = 0; i < m.n && i < m2.n; i++)
 		CONTROLLA(m2.o[i].forma == m.o[i].forma && fabs(m2.o[i].x - m.o[i].x) < 1e-4 && fabs(m2.o[i].y - m.o[i].y) < 1e-4 &&
-		          fabs(m2.o[i].angolo - m.o[i].angolo) < 1e-4 && fabs(m2.o[i].quota_a - m.o[i].quota_a) < 1e-4 &&
-		          !strcmp(m2.o[i].nome, m.o[i].nome) && !strcmp(m2.o[i].gruppo, m.o[i].gruppo));
+		          fabs(m2.o[i].angle - m.o[i].angle) < 1e-4 && fabs(m2.o[i].quota_a - m.o[i].quota_a) < 1e-4 &&
+		          !strcmp(m2.o[i].name, m.o[i].name) && !strcmp(m2.o[i].group, m.o[i].group));
 	free(t);
 	/* errori */
 	CONTROLLA(mondo_leggi_testo(&m2, "robot x=1 y=1\n", err, sizeof err) != 0 && strstr(err, "stanza"));
@@ -95,18 +95,18 @@ static void stanza_geometria(void)
 
 /* ---- GD32 simulato ---- */
 
-static void manda(gd32sim_t *g, uint8_t cmd, const void *dati, int n, double t)
+static void manda(gd32sim_t *g, uint8_t cmd, const void *data, int n, double t)
 {
-	gd32_frame_t f = { .cmd = cmd, .n_dati = (uint8_t)n };
+	gd32_frame_t f = { .cmd = cmd, .data_len = (uint8_t)n };
 	if (n)
-		memcpy(f.dati, dati, (size_t)n);
+		memcpy(f.data, data, (size_t)n);
 	gd32sim_ricevi(g, &f, t);
 }
 
 static void velocita(gd32sim_t *g, double v, double w, double t)
 {
 	int32_t b[2] = { (int32_t)lround(v * SCALA_V), (int32_t)lround(w * SCALA_W) };
-	manda(g, GD32_VELOCITA, b, 8, t);
+	manda(g, GD32_VELOCITY, b, 8, t);
 }
 
 /* Avanza a passi di 20 ms con heartbeat e keepalive (hb = 0: senza heartbeat); svuota la coda dei frame. */
@@ -133,7 +133,7 @@ static void nuovo_robot(double x, double y, double dir, int ritardi)
 	g.senza_ritardi = !ritardi;
 	gd32sim_init(&g, &m, 0);
 	uint8_t due = 2;
-	manda(&g, GD32_TIPO_CONTROLLO, &due, 1, 0);
+	manda(&g, GD32_CONTROL_TYPE, &due, 1, 0);
 	manda(&g, GD32_HEARTBEAT, NULL, 0, 0);
 }
 
@@ -174,14 +174,14 @@ static void gd32_dinamica(void)
 	/* senza heartbeat: dopo ~2 s motori senza potenza, le ruote si fermano per inerzia in ~0,5 s */
 	velocita(&g, 1656 / SCALA_V, 0, t);                         /* 1656 tick/s (~0,36 m/s) */
 	avanza(&g, &m, &t, t + 1.0, 1);
-	CONTROLLA(g.motori_alimentati && g.vel_sx > 1000);
+	CONTROLLA(g.motori_alimentati && g.v_measured > 1000);
 	double t_hb = t;
 	avanza(&g, &m, &t, t_hb + par.ruote_timeout_hb - 0.1, 0);
-	CONTROLLA(g.motori_alimentati && g.vel_sx > 1000);              /* ancora in moto */
+	CONTROLLA(g.motori_alimentati && g.v_measured > 1000);              /* ancora in moto */
 	avanza(&g, &m, &t, t_hb + par.ruote_timeout_hb + 0.2, 0);
-	CONTROLLA(!g.motori_alimentati && g.vel_sx > 1000 && g.vel_sx < 1500);  /* rallenta da solo: 1656 - 0,2 s x ~1880 */
+	CONTROLLA(!g.motori_alimentati && g.v_measured > 1000 && g.v_measured < 1500);  /* rallenta da solo: 1656 - 0,2 s x ~1880 */
 	avanza(&g, &m, &t, t_hb + par.ruote_timeout_hb + 1.0, 0);
-	CONTROLLA(fabs(g.vel_sx) < 1);
+	CONTROLLA(fabs(g.v_measured) < 1);
 }
 
 static void gd32_urti_e_base(void)
@@ -191,13 +191,13 @@ static void gd32_urti_e_base(void)
 	/* contro il muro: corpo, bumper tutti e due */
 	nuovo_robot(2.3, 1.5, 0, 0);
 	double t = 0;
-	int visto = 0;
+	int seen = 0;
 	velocita(&g, 0.2, 0, t);
 	for (int i = 0; i < 200; i++) {
 		avanza(&g, &m, &t, t + 0.02, 1);
-		visto |= g.bumper_sx && g.bumper_dx;
+		seen |= g.bumper_left && g.bumper_right;
 	}
-	CONTROLLA(visto && fabs(g.x - (2.9 - ROBOT_RAGGIO)) < 0.01);
+	CONTROLLA(seen && fabs(g.x - (2.9 - ROBOT_RAGGIO)) < 0.01);
 	/* sotto la credenza (da 9 cm): la torretta si incastra, NESSUN bumper */
 	nuovo_robot(1.0, 1.3, -M_PI / 2, 0);
 	t = 0;
@@ -205,7 +205,7 @@ static void gd32_urti_e_base(void)
 	velocita(&g, 0.1, 0, t);
 	for (int i = 0; i < 400; i++) {
 		avanza(&g, &m, &t, t + 0.02, 1);
-		bumper |= g.bumper_sx | g.bumper_dx;
+		bumper |= g.bumper_left | g.bumper_right;
 		incastrato |= g.incastrato;
 	}
 	printf("  sotto la credenza: y = %.3f, incastrato %d, bumper %d\n", g.y, incastrato, bumper);
@@ -214,7 +214,7 @@ static void gd32_urti_e_base(void)
 	/* vuoto: anti-caduta, il GD32 non va avanti */
 	nuovo_robot(1.8, 0.85, 0, 0);
 	uint8_t zero = 0;
-	manda(&g, GD32_CLIFF_RETROMARCIA, &zero, 1, 0);
+	manda(&g, GD32_CLIFF_BACKOFF, &zero, 1, 0);
 	t = 0;
 	velocita(&g, 0.1, 0, t);
 	avanza(&g, &m, &t, 6.0, 1);
@@ -223,7 +223,7 @@ static void gd32_urti_e_base(void)
 	nuovo_robot(0.5, 0.22 + ROBOT_RAGGIO + 0.001, M_PI / 2, 0);
 	t = 0;
 	avanza(&g, &m, &t, 13.0, 1);
-	CONTROLLA(g.contatto_base && g.in_carica && g.cliff == (g.sensori_accesi ? 0 : 0x0f));
+	CONTROLLA(g.contatto_base && g.charging && g.cliff == (g.sensori_accesi ? 0 : 0x0f));
 	nuovo_robot(0.5, 0.22 + ROBOT_RAGGIO + 0.001, -M_PI / 2, 0);      /* girato al contrario: niente contatto */
 	t = 0;
 	avanza(&g, &m, &t, 1.0, 1);
@@ -236,29 +236,29 @@ static void gd32_urti_e_base(void)
 		while (gd32sim_prossimo(&g, t))
 			;
 	}
-	CONTROLLA(g.reset == 1 && g.modo == 0);
+	CONTROLLA(g.reset == 1 && g.mode == 0);
 }
 
 typedef struct {
-	int versione, funzioni, zero, sensori;
-	double ultimo, min_iv, max_iv;
+	int version, funzioni, zero, sensori;
+	double last, min_iv, max_iv;
 } risposte_t;
 
-static void conta(const gd32_frame_t *fr, void *ctx)
+static void count(const gd32_frame_t *fr, void *ctx)
 {
 	risposte_t *r = ctx;
-	if (fr->cmd == GD32_VERSIONE && fr->n_dati == 32 && !memcmp(fr->dati, "2.0.1_19082727", 14)) r->versione = 1;
-	if (fr->cmd == GD32_FUNZIONI_MACCHINA && fr->n_dati == 8 && fr->dati[4] == 0x3f) r->funzioni = 1;
-	if (fr->cmd == GD32_IMU_ZERO && fr->n_dati == 1 && fr->dati[0] == 1) r->zero = 1;
-	if (fr->cmd == GD32_SENSORI && fr->n_dati == 96) r->sensori++;
+	if (fr->cmd == GD32_VERSION && fr->data_len == 32 && !memcmp(fr->data, "2.0.1_19082727", 14)) r->version = 1;
+	if (fr->cmd == GD32_MACHINE_FUNCTIONS && fr->data_len == 8 && fr->data[4] == 0x3f) r->funzioni = 1;
+	if (fr->cmd == GD32_IMU_ZERO && fr->data_len == 1 && fr->data[0] == 1) r->zero = 1;
+	if (fr->cmd == GD32_SENSORS && fr->data_len == 96) r->sensori++;
 }
 
 static void gd32_consegna(void)
 {
 	mondo_nuovo(&m, 3, 3);
 	nuovo_robot(1.5, 1.5, 0, 1);
-	manda(&g, GD32_VERSIONE, NULL, 0, 0);
-	manda(&g, GD32_FUNZIONI_MACCHINA, NULL, 0, 0);
+	manda(&g, GD32_VERSION, NULL, 0, 0);
+	manda(&g, GD32_MACHINE_FUNCTIONS, NULL, 0, 0);
 	manda(&g, GD32_IMU_ZERO, NULL, 0, 0);
 	gd32_deframer_t d;
 	gd32_deframer_init(&d);
@@ -269,7 +269,7 @@ static void gd32_consegna(void)
 		const sim_uscita_t *u;
 		while ((u = gd32sim_prossimo(&g, t))) {
 			int prima = r.sensori;
-			gd32_deframer_scrivi(&d, u->b, u->n, conta, &r);
+			gd32_deframer_feed(&d, u->b, u->n, count, &r);
 			if (r.sensori > prima) {
 				if (prec >= 0) {
 					double iv = u->t - prec;
@@ -283,7 +283,7 @@ static void gd32_consegna(void)
 			manda(&g, GD32_KEEPALIVE, NULL, 0, t);
 	}
 	printf("  %d frame dei sensori in 120 s, intervalli da %.2f a %.2f ms\n", r.sensori, r.min_iv * 1000, r.max_iv * 1000);
-	CONTROLLA(r.versione && r.funzioni && r.zero && d.checksum_errati == 0);
+	CONTROLLA(r.version && r.funzioni && r.zero && d.bad_checksums == 0);
 	CONTROLLA(abs(r.sensori - 6000) <= 2);
 	CONTROLLA(r.min_iv > 0.0145 && r.max_iv < 0.0252 && r.max_iv > 0.0203);       /* variano come sul robot */
 }
@@ -292,10 +292,10 @@ static void gd32_consegna(void)
 static int pacchetti_ad, punti, punti_davanti;
 static double vel_letta, somma_d, somma_d2;
 
-static void cb_lidar(const lidar_pacchetto_t *p, void *ctx)
+static void cb_lidar(const lidar_packet_t *p, void *ctx)
 {
 	(void)ctx;
-	if (p->cmd != LIDAR_SCANSIONE_NUOVA)
+	if (p->cmd != LIDAR_SCAN_NEW)
 		return;
 	pacchetti_ad++;
 	vel_letta = p->param[0] * 0.05;
@@ -327,14 +327,14 @@ static void lidar_simulato(void)
 		lidarsim_avanza(&l, &m, t, 1, 68, 1.5, 1.5, 0);
 		const lidarsim_uscita_t *u;
 		while ((u = lidarsim_prossimo(&l, t)))
-			lidar_deframer_scrivi(&d, u->b, u->n, cb_lidar, NULL);
+			lidar_deframer_feed(&d, u->b, u->n, cb_lidar, NULL);
 	}
 	double media = somma_d / punti_davanti, dev = sqrt(somma_d2 / punti_davanti - media * media);
 	printf("  %d pacchetti, %.2f giri/s, davanti %.4f m +- %.1f mm (%d punti)\n", pacchetti_ad, vel_letta, media,
 	       dev * 1000, punti_davanti);
 	CONTROLLA(fabs(vel_letta - (par.lidar_a * 68 + par.lidar_b)) < 0.1);
 	CONTROLLA(fabs(media - (1.4 - LIDAR_X)) < 0.005 && dev > 0.003 && dev < 0.012);   /* rumore ~7 mm come il vero */
-	CONTROLLA(d.checksum_errati == 0);
+	CONTROLLA(d.bad_checksums == 0);
 }
 
 int main(void)

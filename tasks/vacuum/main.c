@@ -20,7 +20,7 @@ static volatile sig_atomic_t fine;
 static void a_fine(int sig) { (void)sig; fine = 1; }
 
 // stampa lo stato del driver con tutti i suoi campi
-void printDrvState(drv_stato_t *drv_state) {
+void printDrvState(drv_status_t *drv_state) {
 	printf("t_ns: %lld\n"
        "fase: %d\n"
        "guasto: %s\n"
@@ -60,22 +60,22 @@ void printDrvState(drv_stato_t *drv_state) {
        "lavoro_max_ns: %lld\n"
        "risvegli: %llu\n"
        "senza_rt: %d\n\n",
-       (long long)drv_state->t_ns, drv_state->fase, drv_state->guasto, drv_state->versione_gd32,
-       drv_state->volt, drv_state->percentuale, drv_state->batteria,
-       drv_state->in_carica, drv_state->sulla_base, drv_state->temperatura_c,
-       drv_state->v, drv_state->w, drv_state->limiti,
-       drv_state->spazzola_laterale, drv_state->spazzola_centrale, drv_state->aspirazione_giri, drv_state->led,
-       drv_state->aspirazione_limiti,
-       drv_state->lidar_acceso, drv_state->lidar_potenza, drv_state->lidar_ok,
-       drv_state->lidar_giri_s, (unsigned)drv_state->lidar_giri,
-       (unsigned long long)drv_state->frame_sensori, (unsigned long long)drv_state->frame_errati,
-       (unsigned long long)drv_state->byte_scartati, (unsigned long long)drv_state->frame_gd32_altri,
-       (unsigned long long)drv_state->heartbeat_gd32, (unsigned long long)drv_state->keepalive,
-       (unsigned long long)drv_state->heartbeat, (unsigned long long)drv_state->errori_scrittura,
-       drv_state->sensori_hz, (long long)drv_state->eta_sensori_ns,
-       (long long)drv_state->tick_ritardo_max_ns, (long long)drv_state->intervallo_sensori_max_ns,
-       (long long)drv_state->intervallo_sensori_min_ns, (long long)drv_state->lavoro_max_ns,
-       (unsigned long long)drv_state->risvegli, drv_state->senza_rt);
+       (long long)drv_state->t_ns, drv_state->phase, drv_state->fault, drv_state->gd32_version,
+       drv_state->volts, drv_state->percentage, drv_state->battery,
+       drv_state->charging, drv_state->on_base, drv_state->temperature_c,
+       drv_state->v, drv_state->w, drv_state->limits,
+       drv_state->side_brush, drv_state->main_brush, drv_state->suction_rpm, drv_state->led,
+       drv_state->suction_limits,
+       drv_state->lidar_on, drv_state->lidar_power, drv_state->lidar_ok,
+       drv_state->lidar_rev_s, (unsigned)drv_state->lidar_revolutions,
+       (unsigned long long)drv_state->sensor_frames, (unsigned long long)drv_state->bad_frames,
+       (unsigned long long)drv_state->discarded_bytes, (unsigned long long)drv_state->other_gd32_frames,
+       (unsigned long long)drv_state->gd32_heartbeats, (unsigned long long)drv_state->keepalives,
+       (unsigned long long)drv_state->heartbeats, (unsigned long long)drv_state->write_errors,
+       drv_state->sensors_hz, (long long)drv_state->sensors_age_ns,
+       (long long)drv_state->tick_delay_max_ns, (long long)drv_state->sensors_interval_max_ns,
+       (long long)drv_state->sensors_interval_min_ns, (long long)drv_state->work_max_ns,
+       (unsigned long long)drv_state->wakeups_done, drv_state->without_rt);
 }
 
 int main(void) {
@@ -92,9 +92,9 @@ int main(void) {
 	drv_config_t c;
 	
        drv_config_default(&c);
-	if (drv_avvia(&c)) return 1;
+	if (drv_start(&c)) return 1;
 
-	rt_consenti_senza_privilegi(c.senza_rt);   /* sul PC senza permessi per SCHED_FIFO i task partono lo stesso */
+	rt_allow_without_privileges(c.without_rt);   /* sul PC senza permessi per SCHED_FIFO i task partono lo stesso */
 
 
 	// Avvia i task
@@ -107,51 +107,51 @@ int main(void) {
        // se mapping fallisce nell'inizializzazione del mutex, 
        // chiudi il driver e ferma tutto
        if (init_mapping() != 0) {
-              drv_ferma();
+              drv_stop();
               return 1;
        }
 
        // Task del lidar
 	rt_task_cfg_t task_cfg_lidar = {
-              .nome = "task_lidar",              // nome del task
+              .name = "task_lidar",              // nome del task
               .cpu = 1,                          // su quale core gira
-              .sporadico = 0,                    // task periodico
-              .periodo_ns = RT_MS(200),          // periodo in ms
+              .sporadic = 0,                    // task periodico
+              .period_ns = RT_MS(200),          // periodo in ms
               .job = job_lidar,                  // job da eseguire
        };
 
        // Task del movimento
        rt_task_cfg_t task_cfg_movement = {
-              .nome = "task_movement",
+              .name = "task_movement",
               .cpu = 1,
-              .sporadico = 1,
-              .periodo_ns = RT_MS(15),
+              .sporadic = 1,
+              .period_ns = RT_MS(15),
               .job = job_movement,
        };
 
        // Task della safety
        rt_task_cfg_t task_cfg_safety = {
-              .nome = "task_safety",
+              .name = "task_safety",
               .cpu = 1,
-              .sporadico = 1,
-              .periodo_ns = RT_MS(15),
+              .sporadic = 1,
+              .period_ns = RT_MS(15),
               .job = job_safety,
        };
 
        rt_task_cfg_t task_cfg_navigation = {
-              .nome = "task_navigation",
+              .name = "task_navigation",
               .cpu = 2,
-              .sporadico = 0,
-              .periodo_ns = RT_MS(100),
+              .sporadic = 0,
+              .period_ns = RT_MS(100),
               .job = job_navigation,
        };
        
        // Task della mappatura
        rt_task_cfg_t task_cfg_mapping = {
-              .nome = "task_mapping",
+              .name = "task_mapping",
               .cpu = 2,
-              .sporadico = 0,
-              .periodo_ns = RT_MS(200),
+              .sporadic = 0,
+              .period_ns = RT_MS(200),
               .job = job_mapping,
        };
 
@@ -166,85 +166,85 @@ int main(void) {
 
        // Assegna le priorità corrispondenti ai task in base al
        // periodo di ciascun task
-       if (rt_priorita_rm(task_cfgs, task_number, RT_PRIO_TASK_MAX)) {
+       if (rt_priority_rm(task_cfgs, task_number, RT_PRIO_TASK_MAX)) {
               // In caso di problemi (task_number < 0 o > 64)
               // ferma tutto e ritorna 1
-              drv_ferma();
+              drv_stop();
               return 1;
        }
 
        // salvati il timestamp attuale per poter far partire tutti 
        // i task contemporaneamente
-       int64_t now_time = rt_adesso(); 
+       int64_t now_time = rt_now(); 
 
        // Dopo aver creato i task, avviali
 
        // Avvia il task lidar
-	if (rt_task_avvia(&lidar_task, &task_cfg_lidar, now_time)) {
+	if (rt_task_start(&lidar_task, &task_cfg_lidar, now_time)) {
               // in caso di problemi (permessi mancanti o errore di creazione del thread)
               // ferma tutto e ritorna 1
-              drv_ferma();
+              drv_stop();
 		return 1;
 	}
 
        // Avvia il task movement
-       if (rt_task_avvia(&movement_task, &task_cfg_movement, now_time)) {
+       if (rt_task_start(&movement_task, &task_cfg_movement, now_time)) {
               // in caso di problemi ferma tutto, inclusi i task
               // avviati prima e ritorna 1
-              rt_task_ferma(&lidar_task);
-              drv_ferma();
+              rt_task_stop(&lidar_task);
+              drv_stop();
               return 1;
        }
 
        // Avvia il task safety
-       if (rt_task_avvia(&safety_task, &task_cfg_safety, now_time)) {
+       if (rt_task_start(&safety_task, &task_cfg_safety, now_time)) {
               // in caso di problemi ferma tutto, inclusi i task
               // avviati prima e ritorna 1
-              rt_task_ferma(&lidar_task);
-              rt_task_ferma(&movement_task);
-              drv_ferma();
+              rt_task_stop(&lidar_task);
+              rt_task_stop(&movement_task);
+              drv_stop();
               return 1;
        }
 
        // Avvia il task navigation
-       if (rt_task_avvia(&navigation_task, &task_cfg_navigation, now_time)) {
+       if (rt_task_start(&navigation_task, &task_cfg_navigation, now_time)) {
               // in caso di problemi ferma tutto, inclusi i task
               // avviati prima e ritorna 1
-              rt_task_ferma(&lidar_task);
-              rt_task_ferma(&movement_task);
-              rt_task_ferma(&safety_task);
-              drv_ferma();
+              rt_task_stop(&lidar_task);
+              rt_task_stop(&movement_task);
+              rt_task_stop(&safety_task);
+              drv_stop();
               return 1;
        }
 
        // Avvia il task mapping
-       if (rt_task_avvia(&mapping_task, &task_cfg_mapping, now_time)) {
+       if (rt_task_start(&mapping_task, &task_cfg_mapping, now_time)) {
               // in caso di problemi ferma tutto, inclusi i task
               // avviati prima e ritorna 1
-              rt_task_ferma(&lidar_task);
-              rt_task_ferma(&movement_task);
-              rt_task_ferma(&safety_task);
-              rt_task_ferma(&navigation_task);
-              drv_ferma();
+              rt_task_stop(&lidar_task);
+              rt_task_stop(&movement_task);
+              rt_task_stop(&safety_task);
+              rt_task_stop(&navigation_task);
+              drv_stop();
               return 1;
        }
 
        // Task aperiodico: da solo sul core 3, scheduling normale, fuori da Rate Monotonic e dalla sorveglianza del
        // driver. Esegue le richieste dei task, per ora il salvataggio della mappa
-       rt_aperiodico_cfg_t task_cfg_aperiodic = {
-              .nome = "task_aperiodic",
+       rt_aperiodic_cfg_t task_cfg_aperiodic = {
+              .name = "task_aperiodic",
               .cpu = APERIODIC_CPU,
               .job = job_aperiodic,
        };
 
        // Avvia il task aperiodico
-       if (rt_aperiodico_avvia(&aperiodic_task, &task_cfg_aperiodic)) {
-              rt_task_ferma(&lidar_task);
-              rt_task_ferma(&movement_task);
-              rt_task_ferma(&safety_task);
-              rt_task_ferma(&navigation_task);
-              rt_task_ferma(&mapping_task);
-              drv_ferma();
+       if (rt_aperiodic_start(&aperiodic_task, &task_cfg_aperiodic)) {
+              rt_task_stop(&lidar_task);
+              rt_task_stop(&movement_task);
+              rt_task_stop(&safety_task);
+              rt_task_stop(&navigation_task);
+              rt_task_stop(&mapping_task);
+              drv_stop();
               return 1;
        }
 
@@ -256,19 +256,19 @@ int main(void) {
        start_network();
 
        // sveglia il task del moto con l'arrivo del frame dai sensori
-       drv_sveglia_ai_sensori(&movement_task);
+       drv_wake_on_sensors(&movement_task);
 
        // sveglia il task della safety con l'arrivo del frame dai sensori
-       drv_sveglia_ai_sensori(&safety_task);
+       drv_wake_on_sensors(&safety_task);
 
 
        // attiva il watchdog dei task, questa verifica che non vengano missati più di 1 periodi
        // tutti i task sono critici, quindi un job che non finisce mai non conta come scadenza mancata
-       drv_sorveglia(&lidar_task, 1, 0);
-       drv_sorveglia(&movement_task, 1, 0);
-       drv_sorveglia(&safety_task, 1, 0);
-       drv_sorveglia(&navigation_task, 1, 0);
-       drv_sorveglia(&mapping_task, 1, 0);
+       drv_watch(&lidar_task, 1, 0);
+       drv_watch(&movement_task, 1, 0);
+       drv_watch(&safety_task, 1, 0);
+       drv_watch(&navigation_task, 1, 0);
+       drv_watch(&mapping_task, 1, 0);
 
 
 	// ciclo di esecuzione main loop:
@@ -280,32 +280,32 @@ int main(void) {
        }
 
        // Spegni il Watchdog dei task
-       drv_dimentica(&lidar_task);               // lidar
-       drv_dimentica(&movement_task);            // movimento
-       drv_dimentica(&safety_task);              // safety
-       drv_dimentica(&navigation_task);          // navigazione
-       drv_dimentica(&mapping_task);             // mappatura
+       drv_forget(&lidar_task);               // lidar
+       drv_forget(&movement_task);            // movimento
+       drv_forget(&safety_task);              // safety
+       drv_forget(&navigation_task);          // navigazione
+       drv_forget(&mapping_task);             // mappatura
 
 
        // ferma i task
-       rt_task_ferma(&lidar_task);               // lidar
-       rt_task_ferma(&movement_task);            // movimento
-       rt_task_ferma(&safety_task);              // safety
-       rt_task_ferma(&navigation_task);          // navigazione
-       rt_task_ferma(&mapping_task);             // mappatura
-       rt_aperiodico_ferma(&aperiodic_task);     // aperiodico
+       rt_task_stop(&lidar_task);               // lidar
+       rt_task_stop(&movement_task);            // movimento
+       rt_task_stop(&safety_task);              // safety
+       rt_task_stop(&navigation_task);          // navigazione
+       rt_task_stop(&mapping_task);             // mappatura
+       rt_aperiodic_stop(&aperiodic_task);     // aperiodico
 
 	// ferma il driver 
-       drv_ferma();
+       drv_stop();
 
        // Alla fine stampa le statistiche dei task
        // cioè job eseguiti, deadline miss e tempi di esecuzione
-       rt_stats_stampa(&lidar_task);      // lidar
-       rt_stats_stampa(&movement_task);   // movimento
-       rt_stats_stampa(&safety_task);     // safety
-       rt_stats_stampa(&navigation_task); // navigazione
-       rt_stats_stampa(&mapping_task);    // mappatura
-       rt_aperiodico_stampa(&aperiodic_task);    // aperiodico
+       rt_stats_print(&lidar_task);      // lidar
+       rt_stats_print(&movement_task);   // movimento
+       rt_stats_print(&safety_task);     // safety
+       rt_stats_print(&navigation_task); // navigazione
+       rt_stats_print(&mapping_task);    // mappatura
+       rt_aperiodic_print(&aperiodic_task);    // aperiodico
 
        // dopo un cambio di mappa chi ha avviato il programma lo rilancia: la mappa nuova si carica solo
        // prima che partano i task

@@ -19,7 +19,7 @@ sim_parametri_t par = {
 	.corrente_ruota_base = 64, .corrente_ruota_picchi = 290, .corrente_ruota_avvio = 772,
 	.imu_deriva_gradi_s = -0.000083, .imu_scala = 0.9723, .imu_rumore_velocita = 0.5, .imu_beccheggio = -55, .imu_rollio = 38,
 	.corrente_riposo_laterale = 2, .corrente_riposo_centrale = 58, .corrente_riposo_aspirazione = 14, .byte84 = 2,
-	.temperatura_c = 33,
+	.temperature_c = 33,
 	.corrente_centrale_accesa = 202, .corrente_centrale_sblocco = 617,
 	.aspirazione_giri_per_pwm = 219, .aspirazione_corrente_max = 1878, .aspirazione_giri_max = 18200,
 	.aspirazione_esponente = 2.27,
@@ -75,8 +75,8 @@ int parametri_leggi(const char *percorso)
 		const char *v = uguale + 1;
 		double x[PAR_MAX_QUANTILI];
 		int n = numeri(v, x, PAR_MAX_QUANTILI);
-#define UNO(nome, campo) else if (!strcmp(chiave, nome) && n >= 1) par.campo = x[0]
-#define DUE(nome, c1, c2) else if (!strcmp(chiave, nome) && n >= 2) { par.c1 = x[0]; par.c2 = x[1]; }
+#define UNO(name, campo) else if (!strcmp(chiave, name) && n >= 1) par.campo = x[0]
+#define DUE(name, c1, c2) else if (!strcmp(chiave, name) && n >= 2) { par.c1 = x[0]; par.c2 = x[1]; }
 		if (!strcmp(chiave, "arrivo_probabilita") && n >= 2) {
 			for (int i = 0; i < n; i++)
 				par.arrivo_prob[i] = x[i];
@@ -116,7 +116,7 @@ int parametri_leggi(const char *percorso)
 		UNO("corrente_riposo_centrale_ma", corrente_riposo_centrale);
 		UNO("corrente_riposo_aspirazione_ma", corrente_riposo_aspirazione);
 		UNO("byte84_riposo", byte84);
-		UNO("temperatura_c", temperatura_c);
+		UNO("temperatura_c", temperature_c);
 		UNO("centrale_corrente_accesa_ma", corrente_centrale_accesa);
 		UNO("centrale_corrente_sblocco_ma", corrente_centrale_sblocco);
 		UNO("aspirazione_giri_per_pwm", aspirazione_giri_per_pwm);

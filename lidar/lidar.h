@@ -25,32 +25,32 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#define LIDAR_INTESTAZIONE 0xAA
+#define LIDAR_HEADER 0xAA
 #define LIDAR_LEN_MIN      6
 #define LIDAR_LEN_MAX      100
-#define LIDAR_MAX_PACCHETTO (LIDAR_LEN_MAX + 2)
-#define LIDAR_MAX_PARAMETRI (LIDAR_LEN_MAX - 8)
+#define LIDAR_MAX_PACKET (LIDAR_LEN_MAX + 2)
+#define LIDAR_MAX_PARAMS (LIDAR_LEN_MAX - 8)
 
 /* Codici cmd (C3iroboticsLidar::analysisPacket in AuxCtrl). */
 enum {
-	LIDAR_SCANSIONE        = 0xA9,  /* analysisToothScan: un settore di misure, formato vecchio */
-	LIDAR_SALUTE           = 0xAB,  /* analysisHealthInfo */
-	LIDAR_VERSIONE         = 0xAC,  /* analysisLidarVersion: testo ASCII, es. "...LDS3_NOR_1805041536" */
-	LIDAR_SCANSIONE_NUOVA  = 0xAD,  /* analysisNewToothScan: un settore di misure, formato nuovo */
-	LIDAR_VELOCITA         = 0xAE,  /* analysisLidarSpeed: velocità di rotazione */
+	LIDAR_SCAN        = 0xA9,  /* analysisToothScan: un settore di misure, formato vecchio */
+	LIDAR_HEALTH           = 0xAB,  /* analysisHealthInfo */
+	LIDAR_VERSION         = 0xAC,  /* analysisLidarVersion: testo ASCII, es. "...LDS3_NOR_1805041536" */
+	LIDAR_SCAN_NEW  = 0xAD,  /* analysisNewToothScan: un settore di misure, formato nuovo */
+	LIDAR_SPEED         = 0xAE,  /* analysisLidarSpeed: velocità di rotazione */
 };
 
 typedef struct {
-	uint8_t indirizzo;
-	uint8_t tipo;
+	uint8_t address;
+	uint8_t type;
 	uint8_t cmd;
 	uint16_t n_param;        /* byte di parametri presenti davvero: len - 8 */
-	uint16_t n_dichiarato;   /* il campo n del pacchetto; AuxCtrl non controlla che sia uguale a n_param */
-	uint8_t param[LIDAR_MAX_PARAMETRI];
-} lidar_pacchetto_t;
+	uint16_t n_declared;   /* il campo n del pacchetto; AuxCtrl non controlla che sia uguale a n_param */
+	uint8_t param[LIDAR_MAX_PARAMS];
+} lidar_packet_t;
 
 /* Somma dei byte modulo 2^16. */
-uint16_t lidar_somma(const uint8_t *b, size_t n);
+uint16_t lidar_sum(const uint8_t *b, size_t n);
 
 /* CRC-16/MODBUS: polinomio 0xA001 riflesso, valore iniziale 0xFFFF. */
 uint16_t lidar_crc16(const uint8_t *b, size_t n);
@@ -59,27 +59,27 @@ uint16_t lidar_crc16(const uint8_t *b, size_t n);
  * Costruisce un pacchetto completo. Ritorna la sua lunghezza (n + 10) oppure 0 se i parametri non ci stanno.
  * Serve ai test e al simulatore: il robot vero non manda pacchetti al lidar.
  */
-size_t lidar_componi(uint8_t indirizzo, uint8_t tipo, uint8_t cmd, const void *param, size_t n,
-                     uint8_t *out, size_t out_dim);
+size_t lidar_build_packet(uint8_t address, uint8_t type, uint8_t cmd, const void *param, size_t n,
+                     uint8_t *out, size_t out_size);
 
-const char *lidar_nome_cmd(uint8_t cmd);
+const char *lidar_cmd_name(uint8_t cmd);
 
 /* Deframer con la stessa logica di gd32_deframer_t: blocchi qualsiasi, risincronizzazione dopo un errore. */
 typedef struct {
-	uint8_t buf[LIDAR_MAX_PACCHETTO];
+	uint8_t buf[LIDAR_MAX_PACKET];
 	size_t n;
-	uint8_t attesa[LIDAR_MAX_PACCHETTO];
-	size_t attesa_n, attesa_i;
+	uint8_t pending[LIDAR_MAX_PACKET];
+	size_t pending_n, pending_i;
 
-	uint64_t pacchetti_ok;
-	uint64_t checksum_errati;
-	uint64_t len_errati;           /* len_hi diverso da 0 o len_lo fuori da 6..100 */
-	uint64_t byte_scartati;        /* anche il testo di avvio finisce qui */
+	uint64_t packets_ok;
+	uint64_t bad_checksums;
+	uint64_t bad_lengths;           /* len_hi diverso da 0 o len_lo fuori da 6..100 */
+	uint64_t discarded_bytes;        /* anche il testo di avvio finisce qui */
 } lidar_deframer_t;
 
-typedef void (*lidar_pacchetto_cb)(const lidar_pacchetto_t *p, void *ctx);
+typedef void (*lidar_packet_cb)(const lidar_packet_t *p, void *ctx);
 
 void lidar_deframer_init(lidar_deframer_t *d);
-size_t lidar_deframer_scrivi(lidar_deframer_t *d, const uint8_t *b, size_t n, lidar_pacchetto_cb cb, void *ctx);
+size_t lidar_deframer_feed(lidar_deframer_t *d, const uint8_t *b, size_t n, lidar_packet_cb cb, void *ctx);
 
 #endif /* LIDAR_H */

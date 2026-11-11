@@ -10,7 +10,7 @@
  *     led N              modo del LED (0x8d)
  *     lidar 0|1 [G]      spegne / accende il lidar (G giri/s, default 6)
  *     esci_base 0|1      permette di muoversi piano anche sulla base
- *     guasto N           fault asked by a task, N = drv_task_fault_t (drv_segnala_guasto)
+ *     guasto N           fault asked by a task, N = drv_task_fault_t (drv_report_fault)
  *     azzera             prova a uscire dallo stato di guasto
  *     suono NOME         es. suono sound_beep_beep
  *     blocca             il task di prova (--task-prova) si blocca: il watchdog deve mandare il driver in guasto
@@ -25,9 +25,9 @@
  *   --cpu N                  core del driver (default 0)
  *   --senza-motori           rifiuta qualunque comando ai motori (ruote, spazzole, aspirazione)
  *   --aspirazione            permette l'aspirazione (di default è vietata)
- *   --banco [--cliff-atteso X]   banco di prova: motori solo con il robot sollevato (gd32/sicurezza.h)
+ *   --banco [--cliff-atteso X]   banco di prova: motori solo con il robot sollevato (gd32/interlock.h)
  *   --lidar-giri G           velocità del lidar (default 6)
- *   --scarto-lidar CDEG      scarto dello 0 del lidar in centesimi di grado (default 1450, driver/lidar_giro.h)
+ *   --scarto-lidar CDEG      scarto dello 0 del lidar in centesimi di grado (default 1450, driver/lidar_scan.h)
  *   --task-prova             avvia un task sporadico (svegliato dai sensori, CPU 1, priorità 90) e uno periodico
  *                            da 200 ms (CPU 2) che leggono i dati del driver; entrambi sorvegliati, critici
  *   --durata S               esce dopo S secondi
@@ -53,107 +53,107 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
-#include "../gd32/sicurezza.h"
+#include "../gd32/interlock.h"
 #include "driver.h"
 
-static volatile sig_atomic_t fermati;
-static void al_segnale(int s) { (void)s; fermati = 1; }
+static volatile sig_atomic_t stop_requested;
+static void on_signal(int s) { (void)s; stop_requested = 1; }
 
 /* ---- task di prova ---- */
-static rt_task_t t_sensori, t_lidar;
-static atomic_int blocca, sfora;
-static drv_sensori_t ultimo_s;
-static uint32_t visti_lidar, punti_lidar;
+static rt_task_t t_sensors, t_lidar;
+static atomic_int block, overrun;
+static drv_sensors_t last_s;
+static uint32_t seen_scans, scan_points;
 
-static void job_sensori(void *arg)
+static void job_sensors(void *arg)
 {
 	(void)arg;
-	drv_sensori(&ultimo_s);
-	while (atomic_load(&blocca) && !atomic_load(&t_sensori.stop))
+	drv_sensors(&last_s);
+	while (atomic_load(&block) && !atomic_load(&t_sensors.stop))
 		usleep(10000);                   /* "si blocca": per esempio un mutex mai rilasciato */
-	if (atomic_exchange(&sfora, 0))
-		for (int64_t fine = rt_adesso() + RT_MS(60); rt_adesso() < fine;)
+	if (atomic_exchange(&overrun, 0))
+		for (int64_t end = rt_now() + RT_MS(60); rt_now() < end;)
 			;                        /* calcola per 60 ms: esecuzione e CPU devono coincidere */
 }
 
 static void job_lidar(void *arg)
 {
 	(void)arg;
-	static lidar_giro_t g;
-	if (drv_giro(&g)) {
-		visti_lidar = g.numero;
-		punti_lidar = g.n;
+	static lidar_scan_t g;
+	if (drv_scan(&g)) {
+		seen_scans = g.number;
+		scan_points = g.n;
 	}
 }
 
 /* ---- comandi ---- */
-static int esegui(const char *riga)
+static int run_command(const char *line)
 {
 	double a, b;
 	int i, j;
-	char nome[100];
-	while (*riga == ' ' || *riga == '\t')
-		riga++;
-	if (!*riga || *riga == '#')
+	char name[100];
+	while (*line == ' ' || *line == '\t')
+		line++;
+	if (!*line || *line == '#')
 		return 0;
-	if (sscanf(riga, "v %lf %lf", &a, &b) == 2)
-		drv_velocita(a, b);
-	else if (!strncmp(riga, "stop", 4))
-		drv_velocita(0, 0);
-	else if (sscanf(riga, "spazzole %d %d", &i, &j) == 2)
-		drv_spazzole(i, j);
-	else if (sscanf(riga, "aspirazione %d", &i) == 1)
-		drv_aspirazione(i);
-	else if (sscanf(riga, "led %d", &i) == 1)
+	if (sscanf(line, "v %lf %lf", &a, &b) == 2)
+		drv_velocity(a, b);
+	else if (!strncmp(line, "stop", 4))
+		drv_velocity(0, 0);
+	else if (sscanf(line, "spazzole %d %d", &i, &j) == 2)
+		drv_brushes(i, j);
+	else if (sscanf(line, "aspirazione %d", &i) == 1)
+		drv_suction(i);
+	else if (sscanf(line, "led %d", &i) == 1)
 		drv_led(i);
-	else if (sscanf(riga, "lidar %d %lf", &i, &a) == 2)
+	else if (sscanf(line, "lidar %d %lf", &i, &a) == 2)
 		drv_lidar(i, a);
-	else if (sscanf(riga, "lidar %d", &i) == 1)
+	else if (sscanf(line, "lidar %d", &i) == 1)
 		drv_lidar(i, 0);
-	else if (sscanf(riga, "aggancia %d", &i) == 1)
-		drv_aggancia(i);
-	else if (sscanf(riga, "esci_base %d", &i) == 1)
-		drv_esci_dalla_base(i);
-	else if (sscanf(riga, "guasto %d", &i) == 1)
-		drv_segnala_guasto((drv_task_fault_t)i);
-	else if (!strncmp(riga, "azzera", 6))
-		printf("azzera guasto: %s\n", drv_azzera_guasto() ? "NO, la causa c'è ancora" : "ok");
-	else if (sscanf(riga, "suono %99s", nome) == 1) {
+	else if (sscanf(line, "aggancia %d", &i) == 1)
+		drv_dock(i);
+	else if (sscanf(line, "esci_base %d", &i) == 1)
+		drv_leave_base(i);
+	else if (sscanf(line, "guasto %d", &i) == 1)
+		drv_report_fault((drv_task_fault_t)i);
+	else if (!strncmp(line, "azzera", 6))
+		printf("azzera guasto: %s\n", drv_clear_fault() ? "NO, la causa c'è ancora" : "ok");
+	else if (sscanf(line, "suono %99s", name) == 1) {
 		static char s[100];
-		snprintf(s, sizeof s, "%s", nome);
-		drv_suono(s);
-	} else if (sscanf(riga, "salva_giro %99s", nome) == 1) {
-		static lidar_giro_t g;
-		FILE *f = drv_giro(&g) ? fopen(nome, "w") : NULL;
+		snprintf(s, sizeof s, "%s", name);
+		drv_sound(s);
+	} else if (sscanf(line, "salva_giro %99s", name) == 1) {
+		static lidar_scan_t g;
+		FILE *f = drv_scan(&g) ? fopen(name, "w") : NULL;
 		if (!f) {
-			printf("nessun giro del lidar, o non riesco a scrivere %s\n", nome);
+			printf("nessun giro del lidar, o non riesco a scrivere %s\n", name);
 			return -1;
 		}
 		fprintf(f, "angolo_gradi,x_m,y_m,distanza_mm,intensita\n");
 		for (int k = 0; k < g.n; k++) {
 			double x, y;
-			drv_punto_xy(&g.p[k], &x, &y);
-			fprintf(f, "%.2f,%.4f,%.4f,%u,%u\n", g.p[k].angolo_cdeg / 100.0, x, y, g.p[k].distanza_mm, g.p[k].intensita);
+			drv_point_xy(&g.p[k], &x, &y);
+			fprintf(f, "%.2f,%.4f,%.4f,%u,%u\n", g.p[k].angle_cdeg / 100.0, x, y, g.p[k].distance_mm, g.p[k].intensity);
 		}
 		fclose(f);
-		printf("giro %u (%u punti, %.2f giri/s) salvato in %s\n", g.numero, g.n, g.giri_s, nome);
-	} else if (!strncmp(riga, "blocca", 6))
-		atomic_store(&blocca, 1);
-	else if (!strncmp(riga, "sfora", 5))
-		atomic_store(&sfora, 1);
-	else if (!strncmp(riga, "fine", 4))
-		fermati = 1;
+		printf("giro %u (%u punti, %.2f giri/s) salvato in %s\n", g.number, g.n, g.rev_s, name);
+	} else if (!strncmp(line, "blocca", 6))
+		atomic_store(&block, 1);
+	else if (!strncmp(line, "sfora", 5))
+		atomic_store(&overrun, 1);
+	else if (!strncmp(line, "fine", 4))
+		stop_requested = 1;
 	else {
-		printf("comando non valido: %s\n", riga);
+		printf("comando non valido: %s\n", line);
 		return -1;
 	}
 	return 0;
 }
 
 /* Legge righe da fd e le esegue. Ritorna -1 a fine file. */
-static int leggi_comandi(int fd, char *buf, size_t *n, size_t dim)
+static int read_command_lines(int fd, char *buf, size_t *n, size_t size)
 {
-	ssize_t k = read(fd, buf + *n, dim - 1 - *n);
+	ssize_t k = read(fd, buf + *n, size - 1 - *n);
 	if (k == 0)
 		return -1;
 	if (k < 0)
@@ -162,69 +162,69 @@ static int leggi_comandi(int fd, char *buf, size_t *n, size_t dim)
 	char *nl;
 	while ((nl = memchr(buf, '\n', *n))) {
 		*nl = 0;
-		esegui(buf);
+		run_command(buf);
 		fflush(stdout);
-		size_t usati = (size_t)(nl - buf) + 1;
-		memmove(buf, nl + 1, *n - usati);
-		*n -= usati;
+		size_t used_bytes = (size_t)(nl - buf) + 1;
+		memmove(buf, nl + 1, *n - used_bytes);
+		*n -= used_bytes;
 	}
-	if (*n == dim - 1)
+	if (*n == size - 1)
 		*n = 0;
 	return 0;
 }
 
-static const char *nome_fase(int f)
+static const char *phase_name(int f)
 {
 	static const char *n[] = { "AVVIO", "pronto", "GUASTO", "fine" };
 	return f >= 0 && f <= 3 ? n[f] : "?";
 }
 
-static void limiti_testo(int l, char *out, size_t dim)
+static void limits_text(int l, char *out, size_t size)
 {
-	static const struct { int bit; const char *nome; } nomi[] = {
-		{ SIC_LIM_SOLLEVATO, "sollevato" }, { SIC_LIM_BASE, "base" }, { SIC_LIM_SENSORI, "sensori-spenti" },
-		{ SIC_LIM_BUMPER, "bumper" }, { SIC_LIM_CLIFF, "vuoto" }, { DRV_LIM_DISABILITATI, "motori-vietati" },
-		{ DRV_LIM_NON_PRONTO, "avvio" }, { DRV_LIM_GUASTO, "guasto" }, { DRV_LIM_SENSORI_VECCHI, "sensori-vecchi" },
-		{ DRV_LIM_BATTERIA, "batteria" }, { DRV_LIM_BANCO, "banco" }, { DRV_LIM_CASSETTO, "senza-cassetto" },
-		{ DRV_LIM_VIETATA, "vietata" },
+	static const struct { int bit; const char *name; } names[] = {
+		{ INTERLOCK_LIM_LIFTED, "sollevato" }, { INTERLOCK_LIM_BASE, "base" }, { INTERLOCK_LIM_SENSORS, "sensori-spenti" },
+		{ INTERLOCK_LIM_BUMPER, "bumper" }, { INTERLOCK_LIM_CLIFF, "vuoto" }, { DRV_LIM_DISABLED, "motori-vietati" },
+		{ DRV_LIM_NOT_READY, "avvio" }, { DRV_LIM_FAULT, "guasto" }, { DRV_LIM_OLD_SENSORS, "sensori-vecchi" },
+		{ DRV_LIM_BATTERY, "batteria" }, { DRV_LIM_BENCH, "banco" }, { DRV_LIM_NO_DUSTBIN, "senza-cassetto" },
+		{ DRV_LIM_FORBIDDEN, "vietata" },
 	};
 	out[0] = 0;
-	for (size_t i = 0; i < sizeof nomi / sizeof nomi[0]; i++)
-		if (l & nomi[i].bit) {
+	for (size_t i = 0; i < sizeof names / sizeof names[0]; i++)
+		if (l & names[i].bit) {
 			size_t k = strlen(out);
-			snprintf(out + k, dim - k, "%s%s", k ? "," : "", nomi[i].nome);
+			snprintf(out + k, size - k, "%s%s", k ? "," : "", names[i].name);
 		}
 	if (!out[0])
-		snprintf(out, dim, "-");
+		snprintf(out, size, "-");
 }
 
-static void riga_stato(double t, const drv_stato_t *st, const drv_sensori_t *s, int task)
+static void status_line(double t, const drv_status_t *st, const drv_sensors_t *s, int task)
 {
-	char lim[160], asp[180] = "";
-	limiti_testo(st->limiti, lim, sizeof lim);
-	if (st->aspirazione_limiti) {
-		snprintf(asp, sizeof asp, " (ferma: ");
-		limiti_testo(st->aspirazione_limiti, asp + strlen(asp), sizeof asp - strlen(asp) - 1);
-		strcat(asp, ")");
+	char lim[160], suction_now[180] = "";
+	limits_text(st->limits, lim, sizeof lim);
+	if (st->suction_limits) {
+		snprintf(suction_now, sizeof suction_now, " (ferma: ");
+		limits_text(st->suction_limits, suction_now + strlen(suction_now), sizeof suction_now - strlen(suction_now) - 1);
+		strcat(suction_now, ")");
 	}
 	printf("%7.1f %-6s %5.2f V %3d%%%s%s | bump %d%d vuoto %x | sens %2.0f Hz | v %+.2f w %+.2f lim %s"
 	       " (misurate v %+.3f w %+.3f, imbardata %+.1f°) | cassetto %d ir %x/%x ventola %d%s | spazz %d/%d led %d |"
 	       " lidar %s %.2f g/s p%d giri %u | tick+%.0f lav %.0f us | tasti %u/%u",
-	       t, nome_fase(st->fase), st->volt, st->percentuale,
-	       st->carica_completa ? " carica completa" : st->in_carica ? " carica" : "",
-	       st->sulla_base ? " BASE" : "", s->s.bumper_sx, s->s.bumper_dx,
-	       s->s.cliff[0] | s->s.cliff[1] << 1 | s->s.cliff[2] << 2 | s->s.cliff[3] << 3, st->sensori_hz, st->v, st->w,
-	       lim, s->s.vel_sx / GD32_SCALA_V, s->s.vel_dx / GD32_SCALA_W, s->s.angolo[0] / 100.0,
-	       s->s.cassetto, s->s.ir_base_a, s->s.ir_base_b, s->s.byte69_x100, asp, st->spazzola_laterale, st->spazzola_centrale, st->led, st->lidar_acceso ? (st->lidar_ok ? "ok" : "MUTO") : "off",
-	       st->lidar_giri_s, st->lidar_potenza, st->lidar_giri, st->tick_ritardo_max_ns / 1e3, st->lavoro_max_ns / 1e3,
-	       st->pressioni_accensione, st->pressioni_casa);
+	       t, phase_name(st->phase), st->volts, st->percentage,
+	       st->charge_complete ? " carica completa" : st->charging ? " carica" : "",
+	       st->on_base ? " BASE" : "", s->s.bumper_left, s->s.bumper_right,
+	       s->s.cliff[0] | s->s.cliff[1] << 1 | s->s.cliff[2] << 2 | s->s.cliff[3] << 3, st->sensors_hz, st->v, st->w,
+	       lim, s->s.v_measured / GD32_SCALE_V, s->s.w_measured / GD32_SCALE_W, s->s.angle[0] / 100.0,
+	       s->s.dustbin, s->s.ir_dock_right, s->s.ir_dock_left, s->s.fan_rpm, suction_now, st->side_brush, st->main_brush, st->led, st->lidar_on ? (st->lidar_ok ? "ok" : "MUTO") : "off",
+	       st->lidar_rev_s, st->lidar_power, st->lidar_revolutions, st->tick_delay_max_ns / 1e3, st->work_max_ns / 1e3,
+	       st->power_presses, st->home_presses);
 	if (task)
 		printf(" | task: sens %llu job lat %.0f esec %.0f us, persi %llu; lidar %llu job, giro %u da %u punti",
-		       (unsigned long long)t_sensori.stats.job, t_sensori.stats.latenza_max_ns / 1e3,
-		       t_sensori.stats.esec_max_ns / 1e3, (unsigned long long)atomic_load(&t_sensori.attivazioni_perse),
-		       (unsigned long long)t_lidar.stats.job, visti_lidar, punti_lidar);
-	if (st->fase == DRV_GUASTO)
-		printf(" | GUASTO: %s", st->guasto);
+		       (unsigned long long)t_sensors.stats.job, t_sensors.stats.latency_max_ns / 1e3,
+		       t_sensors.stats.exec_max_ns / 1e3, (unsigned long long)atomic_load(&t_sensors.lost_activations),
+		       (unsigned long long)t_lidar.stats.job, seen_scans, scan_points);
+	if (st->phase == DRV_FAULT)
+		printf(" | GUASTO: %s", st->fault);
 	putchar('\n');
 	fflush(stdout);
 }
@@ -232,10 +232,10 @@ static void riga_stato(double t, const drv_stato_t *st, const drv_sensori_t *s, 
 int main(int argc, char **argv)
 {
 	drv_config_t c;
-	drv_config_prova(&c);
-	int durata = 0, task = 0, silenzioso = 0, ogni_ms = 1000;
-	const char *fifo = NULL, *file_csv = NULL;
-	static const struct option opz[] = {
+	drv_config_test(&c);
+	int duration = 0, task = 0, quiet = 0, every_ms = 1000;
+	const char *fifo = NULL, *csv_file = NULL;
+	static const struct option options[] = {
 		{ "gd32", required_argument, 0, 'g' }, { "lidar", required_argument, 0, 'l' },
 		{ "senza-lidar", no_argument, 0, 'L' }, { "cpu", required_argument, 0, 'c' },
 		{ "senza-motori", no_argument, 0, 'M' }, { "aspirazione", no_argument, 0, 'a' },
@@ -248,34 +248,34 @@ int main(int argc, char **argv)
 		{ "registra", required_argument, 0, 'r' }, { 0, 0, 0, 0 },
 	};
 	int o;
-	while ((o = getopt_long(argc, argv, "", opz, NULL)) != -1) {
+	while ((o = getopt_long(argc, argv, "", options, NULL)) != -1) {
 		switch (o) {
 		case 'g': c.dev_gd32 = optarg; break;
 		case 'l': c.dev_lidar = optarg; break;
 		case 'L': c.dev_lidar = NULL; break;
 		case 'c': c.cpu = atoi(optarg); break;
-		case 'M': c.motori = 0; break;
-		case 'a': c.aspirazione = 1; break;
-		case 'b': c.banco = 1; break;
-		case 'A': c.cliff_atteso = (int)strtol(optarg, NULL, 0) & 0x0f; break;
-		case 'G': c.lidar_giri_s = atof(optarg); break;
-		case 's': c.scarto_lidar_cdeg = atoi(optarg); break;
+		case 'M': c.motors = 0; break;
+		case 'a': c.suction = 1; break;
+		case 'b': c.bench = 1; break;
+		case 'A': c.expected_cliff = (int)strtol(optarg, NULL, 0) & 0x0f; break;
+		case 'G': c.lidar_rev_s = atof(optarg); break;
+		case 's': c.lidar_offset_cdeg = atoi(optarg); break;
 		case 'T': task = 1; break;
-		case 't': durata = atoi(optarg); break;
+		case 't': duration = atoi(optarg); break;
 		case 'C': fifo = optarg; break;
-		case 'v': file_csv = optarg; break;
-		case 'q': silenzioso = 1; break;
-		case 'R': c.senza_rt = 1; break;
-		case 'F': c.forza = 1; break;
-		case 'r': c.registra = optarg; break;
-		case 'o': ogni_ms = atoi(optarg) > 0 ? atoi(optarg) : 1000; break;
+		case 'v': csv_file = optarg; break;
+		case 'q': quiet = 1; break;
+		case 'R': c.without_rt = 1; break;
+		case 'F': c.force = 1; break;
+		case 'r': c.record = optarg; break;
+		case 'o': every_ms = atoi(optarg) > 0 ? atoi(optarg) : 1000; break;
 		default:
 			fprintf(stderr, "opzioni: vedi l'inizio di driver/rtes-driver.c\n");
 			return 1;
 		}
 	}
-	rt_consenti_senza_privilegi(c.senza_rt);
-	struct sigaction sa = { .sa_handler = al_segnale };
+	rt_allow_without_privileges(c.without_rt);
+	struct sigaction sa = { .sa_handler = on_signal };
 	sigaction(SIGINT, &sa, NULL);
 	sigaction(SIGTERM, &sa, NULL);
 	sigaction(SIGHUP, &sa, NULL);
@@ -290,97 +290,97 @@ int main(int argc, char **argv)
 		}
 		fd_fifo = open(fifo, O_RDWR | O_NONBLOCK);   /* lettura e scrittura: niente fine file quando chi scrive chiude */
 	}
-	FILE *csv = file_csv ? fopen(file_csv, "w") : NULL;
+	FILE *csv = csv_file ? fopen(csv_file, "w") : NULL;
 	if (csv)
 		fprintf(csv, "t_s,fase,volt,percentuale,in_carica,sulla_base,sensori_hz,eta_sensori_ms,tick_ritardo_max_us,"
 		             "lavoro_max_us,intervallo_sensori_max_ms,intervallo_sensori_min_ms,lidar_giri_s,lidar_potenza,lidar_giri,frame_errati,errori_scrittura,keepalive,"
 		             "v,w,limiti,task_lat_max_us,task_esec_max_us,task_persi,task_mancate,carica_completa\n");
 
-	if (drv_avvia(&c))
+	if (drv_start(&c))
 		return 1;
 	if (task) {
-		int64_t t0 = rt_adesso() + RT_MS(200);
-		rt_task_cfg_t a = { .nome = "prova-sensori", .cpu = 1, .sporadico = 1, .periodo_ns = RT_MS(20),
-		                    .job = job_sensori };
-		rt_task_cfg_t b = { .nome = "prova-lidar", .cpu = 2, .periodo_ns = RT_MS(200), .job = job_lidar };
+		int64_t t0 = rt_now() + RT_MS(200);
+		rt_task_cfg_t a = { .name = "prova-sensori", .cpu = 1, .sporadic = 1, .period_ns = RT_MS(20),
+		                    .job = job_sensors };
+		rt_task_cfg_t b = { .name = "prova-lidar", .cpu = 2, .period_ns = RT_MS(200), .job = job_lidar };
 		rt_task_cfg_t *v[] = { &a, &b };
-		rt_priorita_rm(v, 2, RT_PRIO_TASK_MAX);
-		if (rt_task_avvia(&t_sensori, &a, t0) || rt_task_avvia(&t_lidar, &b, t0)) {
+		rt_priority_rm(v, 2, RT_PRIO_TASK_MAX);
+		if (rt_task_start(&t_sensors, &a, t0) || rt_task_start(&t_lidar, &b, t0)) {
 			fprintf(stderr, "rtes-driver: non riesco ad avviare i task di prova\n");
-			drv_ferma();
+			drv_stop();
 			return 1;
 		}
-		drv_sveglia_ai_sensori(&t_sensori);
-		drv_sorveglia(&t_sensori, 1, RT_MS(100));
-		drv_sorveglia(&t_lidar, 1, 0);
-		printf("task di prova: %s prio %d (CPU 1, sveglia ai sensori), %s prio %d (CPU 2, 200 ms)\n", a.nome,
-		       a.priorita, b.nome, b.priorita);
+		drv_wake_on_sensors(&t_sensors);
+		drv_watch(&t_sensors, 1, RT_MS(100));
+		drv_watch(&t_lidar, 1, 0);
+		printf("task di prova: %s prio %d (CPU 1, sveglia ai sensori), %s prio %d (CPU 2, 200 ms)\n", a.name,
+		       a.priority, b.name, b.priority);
 	}
 
-	int64_t t0 = rt_adesso(), prossima = t0 + RT_MS(ogni_ms);
-	int stdin_ok = 1, guasto_visto = 0;
+	int64_t t0 = rt_now(), next_print = t0 + RT_MS(every_ms);
+	int stdin_ok = 1, fault_seen = 0;
 	static char b_in[1024], b_fifo[1024];
 	size_t n_in = 0, n_fifo = 0;
 	fcntl(0, F_SETFL, fcntl(0, F_GETFL) | O_NONBLOCK);
-	while (!fermati) {
-		int64_t ora = rt_adesso();
-		if (durata > 0 && ora - t0 >= RT_S(durata))
+	while (!stop_requested) {
+		int64_t t_now = rt_now();
+		if (duration > 0 && t_now - t0 >= RT_S(duration))
 			break;
 		struct pollfd p[2] = { { .fd = stdin_ok ? 0 : -1, .events = POLLIN }, { .fd = fd_fifo, .events = POLLIN } };
-		int attesa = (int)((prossima - ora) / RT_NS_PER_MS);
-		poll(p, 2, attesa > 0 ? attesa : 0);
+		int pending = (int)((next_print - t_now) / RT_NS_PER_MS);
+		poll(p, 2, pending > 0 ? pending : 0);
 		if (p[0].revents & (POLLIN | POLLHUP))
-			if (leggi_comandi(0, b_in, &n_in, sizeof b_in) < 0)
+			if (read_command_lines(0, b_in, &n_in, sizeof b_in) < 0)
 				stdin_ok = 0;
 		if (p[1].revents & POLLIN)
-			leggi_comandi(fd_fifo, b_fifo, &n_fifo, sizeof b_fifo);
-		ora = rt_adesso();
-		if (ora >= prossima) {
-			drv_stato_t st;
-			drv_sensori_t s = { 0 };
-			drv_stato(&st);
-			drv_sensori(&s);
-			if (st.fase == DRV_GUASTO)
-				guasto_visto = 1;
-			double t = (double)(ora - t0) / RT_NS_PER_S;
-			if (!silenzioso)
-				riga_stato(t, &st, &s, task);
+			read_command_lines(fd_fifo, b_fifo, &n_fifo, sizeof b_fifo);
+		t_now = rt_now();
+		if (t_now >= next_print) {
+			drv_status_t st;
+			drv_sensors_t s = { 0 };
+			drv_status(&st);
+			drv_sensors(&s);
+			if (st.phase == DRV_FAULT)
+				fault_seen = 1;
+			double t = (double)(t_now - t0) / RT_NS_PER_S;
+			if (!quiet)
+				status_line(t, &st, &s, task);
 			if (csv) {
 				fprintf(csv, "%.1f,%d,%.2f,%d,%d,%d,%.0f,%.1f,%.1f,%.1f,%.3f,%.3f,%.2f,%d,%u,%llu,%llu,%llu,%.3f,%.3f,%d,%.1f,%.1f,%llu,%llu,%d\n",
-				        t, st.fase, st.volt, st.percentuale, st.in_carica, st.sulla_base, st.sensori_hz,
-				        st.eta_sensori_ns / 1e6, st.tick_ritardo_max_ns / 1e3, st.lavoro_max_ns / 1e3,
-				        st.intervallo_sensori_max_ns / 1e6, st.intervallo_sensori_min_ns / 1e6, st.lidar_giri_s,
-				        st.lidar_potenza, st.lidar_giri, (unsigned long long)st.frame_errati,
-				        (unsigned long long)st.errori_scrittura, (unsigned long long)st.keepalive, st.v, st.w, st.limiti,
-				        task ? t_sensori.stats.latenza_max_ns / 1e3 : 0, task ? t_sensori.stats.esec_max_ns / 1e3 : 0,
-				        task ? (unsigned long long)atomic_load(&t_sensori.attivazioni_perse) : 0ULL,
-				        task ? (unsigned long long)atomic_load(&t_sensori.mancate_totali) : 0ULL, st.carica_completa);
+				        t, st.phase, st.volts, st.percentage, st.charging, st.on_base, st.sensors_hz,
+				        st.sensors_age_ns / 1e6, st.tick_delay_max_ns / 1e3, st.work_max_ns / 1e3,
+				        st.sensors_interval_max_ns / 1e6, st.sensors_interval_min_ns / 1e6, st.lidar_rev_s,
+				        st.lidar_power, st.lidar_revolutions, (unsigned long long)st.bad_frames,
+				        (unsigned long long)st.write_errors, (unsigned long long)st.keepalives, st.v, st.w, st.limits,
+				        task ? t_sensors.stats.latency_max_ns / 1e3 : 0, task ? t_sensors.stats.exec_max_ns / 1e3 : 0,
+				        task ? (unsigned long long)atomic_load(&t_sensors.lost_activations) : 0ULL,
+				        task ? (unsigned long long)atomic_load(&t_sensors.total_misses) : 0ULL, st.charge_complete);
 				fflush(csv);
 			}
-			prossima += RT_MS(ogni_ms);
+			next_print += RT_MS(every_ms);
 		}
 	}
 	if (task) {
-		atomic_store(&blocca, 0);
-		drv_dimentica(&t_sensori);
-		drv_dimentica(&t_lidar);
-		rt_task_ferma(&t_sensori);
-		rt_task_ferma(&t_lidar);
+		atomic_store(&block, 0);
+		drv_forget(&t_sensors);
+		drv_forget(&t_lidar);
+		rt_task_stop(&t_sensors);
+		rt_task_stop(&t_lidar);
 	}
-	drv_stato_t st;
-	drv_ferma();
-	drv_stato(&st);
+	drv_status_t st;
+	drv_stop();
+	drv_status(&st);
 	if (csv)
 		fclose(csv);
 	printf("fine: %llu frame dei sensori, %llu errati, %llu keepalive, %llu heartbeat, ritardo max del ciclo %.1f us, "
 	       "lavoro max %.1f us, intervallo fra due frame da %.2f a %.2f ms, giri del lidar %u%s\n",
-	       (unsigned long long)st.frame_sensori, (unsigned long long)st.frame_errati, (unsigned long long)st.keepalive,
-	       (unsigned long long)st.heartbeat, st.tick_ritardo_max_ns / 1e3, st.lavoro_max_ns / 1e3,
-	       st.intervallo_sensori_min_ns / 1e6, st.intervallo_sensori_max_ns / 1e6, st.lidar_giri,
-	       guasto_visto ? ", GUASTO durante la prova" : "");
+	       (unsigned long long)st.sensor_frames, (unsigned long long)st.bad_frames, (unsigned long long)st.keepalives,
+	       (unsigned long long)st.heartbeats, st.tick_delay_max_ns / 1e3, st.work_max_ns / 1e3,
+	       st.sensors_interval_min_ns / 1e6, st.sensors_interval_max_ns / 1e6, st.lidar_revolutions,
+	       fault_seen ? ", GUASTO durante la prova" : "");
 	if (task) {
-		rt_stats_stampa(&t_sensori);
-		rt_stats_stampa(&t_lidar);
+		rt_stats_print(&t_sensors);
+		rt_stats_print(&t_lidar);
 	}
-	return guasto_visto ? 4 : 0;
+	return fault_seen ? 4 : 0;
 }

@@ -28,8 +28,8 @@ typedef struct {
 	int32_t lunghezza;
 	int32_t campo12;
 	uint64_t tempo;
-	uint32_t n_dati;                     /* byte conservati in dati[] (<= EVEREST_MAX_DATI) */
-	uint8_t dati[EVEREST_MAX_DATI];
+	uint32_t data_len;                     /* byte conservati in dati[] (<= EVEREST_MAX_DATI) */
+	uint8_t data[EVEREST_MAX_DATI];
 } everest_msg_t;
 
 typedef struct {
@@ -37,7 +37,7 @@ typedef struct {
 	size_t n_testa;
 	everest_msg_t msg;
 	size_t ricevuti;                     /* byte di dati ricevuti del messaggio in corso */
-	uint64_t messaggi_ok, testate_errate, byte_scartati;
+	uint64_t messaggi_ok, testate_errate, discarded_bytes;
 } everest_deframer_t;
 
 typedef void (*everest_msg_cb)(const everest_msg_t *m, void *ctx);

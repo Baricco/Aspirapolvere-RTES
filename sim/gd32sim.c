@@ -59,14 +59,14 @@ static double tensione_a_vuoto(double soc)
 }
 
 /* ---- uscita: coda con l'istante di consegna (ritardo misurato) ---- */
-static void manda(gd32sim_t *g, double t, uint8_t cmd, const void *dati, size_t n)
+static void manda(gd32sim_t *g, double t, uint8_t cmd, const void *data, size_t n)
 {
 	if (g->quanti == SIM_CODA) {
 		g->persi++;
 		return;
 	}
 	sim_uscita_t *u = &g->coda[(g->testa + g->quanti) % SIM_CODA];
-	size_t k = gd32_componi(cmd, dati, n, u->b, sizeof u->b);
+	size_t k = gd32_build_frame(cmd, data, n, u->b, sizeof u->b);
 	if (!k)
 		return;
 	double tc = t + (g->senza_ritardi ? 0 : parametri_ritardo_arrivo(sim_caso(&g->seme)));
@@ -100,19 +100,19 @@ static void avvisa(gd32sim_t *g, double t, const char *testo)
 
 static void stato_firmware_iniziale(gd32sim_t *g)
 {
-	g->modo = 0;
+	g->mode = 0;
 	g->cmd_v = g->cmd_w = 0;
 	g->cmd_ruote[0] = g->cmd_ruote[1] = 0;
 	g->n_coda_cmd = 0;
 	g->spazzola_lat = g->spazzola_cen = g->eco_lat = g->eco_cen = 0;
 	g->fine_sblocco = 0;
-	g->aspirazione_giri = g->aspirazione_pwm = 0;
+	g->suction_rpm = g->aspirazione_pwm = 0;
 	g->led = 12;                  /* azzurro che respira, come all'accensione */
 	g->sensori_accesi = 1;
 	g->cliff_retromarcia = 0;
 	g->cliff_ir = 0;
 	g->lidar_alimentato = 0;
-	g->lidar_potenza = 0;
+	g->lidar_power = 0;
 	g->sospeso = g->risveglio = 0;
 	g->ultimo_hb = -100;
 	g->motori_alimentati = 0;
@@ -143,11 +143,11 @@ void gd32sim_init(gd32sim_t *g, const mondo_t *m, double t)
 	}
 	g->soc = 0.90;
 	g->tensione = tensione_a_vuoto(g->soc);
-	g->cassetto = 1;
+	g->dustbin = 1;
 	g->tasto_da[0] = g->tasto_da[1] = -1;
 	g->t_contatto = -1;
 	g->t_urto = g->t_incastro = -1;
-	g->acceso = 1;
+	g->on = 1;
 	if (!par.frame_riposo[88])
 		parametri_frame_default();
 	stato_firmware_iniziale(g);
@@ -171,9 +171,9 @@ void gd32sim_sposta(gd32sim_t *g, double x, double y, double dir)
 
 void gd32sim_velocita(const gd32sim_t *g, double *v, double *w)
 {
-	int fermo = g->sollevato || g->caduto;
-	*v = fermo ? 0 : (g->vel_sx + g->vel_dx) / 2 * TICK_M;
-	*w = fermo ? 0 : (g->vel_dx - g->vel_sx) * TICK_M / CARREGGIATA;
+	int fermo = g->lifted || g->caduto;
+	*v = fermo ? 0 : (g->v_measured + g->w_measured) / 2 * TICK_M;
+	*w = fermo ? 0 : (g->w_measured - g->v_measured) * TICK_M / CARREGGIATA;
 }
 
 /* ---- comandi dal SoC ---- */
@@ -183,39 +183,39 @@ static void storia(gd32sim_t *g, const gd32_frame_t *f, double t)
 {
 	if (f->cmd == GD32_HEARTBEAT || f->cmd == GD32_KEEPALIVE)
 		return;
-	if (f->cmd == GD32_VELOCITA && g->n_storia) {
+	if (f->cmd == GD32_VELOCITY && g->n_storia) {
 		const sim_cmd_log_t *u = &g->storia[(g->i_storia + SIM_STORIA - 1) % SIM_STORIA];
-		if (u->cmd == f->cmd && !memcmp(u->dati, f->dati, 8))
+		if (u->cmd == f->cmd && !memcmp(u->data, f->data, 8))
 			return;
 	}
 	sim_cmd_log_t *s = &g->storia[g->i_storia];
 	s->t = t;
 	s->cmd = f->cmd;
-	s->n = f->n_dati;
-	memcpy(s->dati, f->dati, f->n_dati < sizeof s->dati ? f->n_dati : sizeof s->dati);
+	s->n = f->data_len;
+	memcpy(s->data, f->data, f->data_len < sizeof s->data ? f->data_len : sizeof s->data);
 	g->i_storia = (g->i_storia + 1) % SIM_STORIA;
 	if (g->n_storia < SIM_STORIA)
 		g->n_storia++;
 }
 
 /* I comandi dei motori valgono dopo il ritardo misurato (il GD32 li applica al suo ciclo di controllo). */
-static void accoda_motore(gd32sim_t *g, double t, int modo, int32_t a, int32_t b)
+static void accoda_motore(gd32sim_t *g, double t, int mode, int32_t a, int32_t b)
 {
 	if (g->n_coda_cmd == SIM_COMANDI) {
 		memmove(g->coda_cmd, g->coda_cmd + 1, sizeof g->coda_cmd[0] * (SIM_COMANDI - 1));
 		g->n_coda_cmd--;
 	}
-	g->coda_cmd[g->n_coda_cmd++] = (sim_comando_t){ t + par.ruote_ritardo_ms / 1000, modo, a, b };
+	g->coda_cmd[g->n_coda_cmd++] = (sim_comando_t){ t + par.ruote_ritardo_ms / 1000, mode, a, b };
 }
 
 void gd32sim_ricevi(gd32sim_t *g, const gd32_frame_t *f, double t)
 {
-	const uint8_t *d = f->dati;
-	int n = f->n_dati;
+	const uint8_t *d = f->data;
+	int n = f->data_len;
 	g->frame_ricevuti++;
 	g->rx_per_cmd[f->cmd]++;
 	storia(g, f, t);
-	if (!g->acceso)
+	if (!g->on)
 		return;
 	if (g->sospeso && f->cmd != GD32_WAKEUP_ACK && f->cmd != GD32_KEEPALIVE)
 		return;
@@ -223,7 +223,7 @@ void gd32sim_ricevi(gd32sim_t *g, const gd32_frame_t *f, double t)
 	case GD32_SLEEP:
 		manda(g, t, GD32_SLEEP, NULL, 0);
 		g->sospeso = 1;
-		g->modo = 0;
+		g->mode = 0;
 		avvisa(g, t, "il GD32 è in sospensione (0x04): si sveglia con il tasto di accensione");
 		break;
 	case GD32_WAKEUP_ACK:
@@ -236,97 +236,97 @@ void gd32sim_ricevi(gd32sim_t *g, const gd32_frame_t *f, double t)
 	case GD32_HEARTBEAT:
 		g->ultimo_hb = t;
 		break;
-	case GD32_VERSIONE: {
+	case GD32_VERSION: {
 		uint8_t v[32] = { 0 };
 		memcpy(v, "2.0.1_19082727", 14);
 		v[20] = 1;
-		manda(g, t, GD32_VERSIONE, v, sizeof v);
+		manda(g, t, GD32_VERSION, v, sizeof v);
 		break;
 	}
 	case GD32_IMU_ZERO:
 		g->imbardata = 0;
 		g->risposta_08 = t + 0.2;
 		break;
-	case GD32_SORVEGLIA_SOC:
-		manda(g, t, GD32_SORVEGLIA_SOC, d, n > 0 ? 1 : 0);
+	case GD32_SOC_WATCHDOG:
+		manda(g, t, GD32_SOC_WATCHDOG, d, n > 0 ? 1 : 0);
 		break;
 	case GD32_KEEPALIVE:
 		g->ultimo_ka = t;
 		break;
-	case GD32_IMU_GREZZA: {
+	case GD32_IMU_RAW: {
 		uint8_t uno = 1;
-		manda(g, t, GD32_IMU_GREZZA, &uno, 1);
+		manda(g, t, GD32_IMU_RAW, &uno, 1);
 		break;
 	}
-	case GD32_FUNZIONI_MACCHINA: {
+	case GD32_MACHINE_FUNCTIONS: {
 		static const uint8_t r[8] = { 4, 0, 0, 0, 0x3f, 0, 0, 0 };
-		manda(g, t, GD32_FUNZIONI_MACCHINA, r, sizeof r);
+		manda(g, t, GD32_MACHINE_FUNCTIONS, r, sizeof r);
 		break;
 	}
-	case GD32_CLIFF_RETROMARCIA:
+	case GD32_CLIFF_BACKOFF:
 		if (n >= 1) g->cliff_retromarcia = d[0] != 0;
 		break;
-	case GD32_TIPO_CONTROLLO:
+	case GD32_CONTROL_TYPE:
 		if (n >= 1) accoda_motore(g, t, d[0], 0, 0);
 		break;
-	case GD32_VELOCITA:
+	case GD32_VELOCITY:
 		if (n >= 8) accoda_motore(g, t, -1, i32(d), i32(d + 4));
 		break;
-	case GD32_VELOCITA_RUOTE:
+	case GD32_WHEEL_SPEED:
 		if (n >= 8) accoda_motore(g, t, -2, i32(d), i32(d + 4));
 		break;
-	case GD32_ASPIRAZIONE:
+	case GD32_SUCTION:
 		if (n >= 2) {
-			g->aspirazione_giri = (int16_t)(d[0] | d[1] << 8) * 10;
+			g->suction_rpm = (int16_t)(d[0] | d[1] << 8) * 10;
 			g->aspirazione_pwm = 0;
 		}
 		break;
-	case GD32_ASPIRAZIONE_PWM:
-	case GD32_ASPIRAZIONE_PWM_BAT:
+	case GD32_SUCTION_PWM:
+	case GD32_SUCTION_PWM_BATTERY:
 		if (n >= 1) {
 			g->aspirazione_pwm = d[0] > 100 ? 100 : d[0];
-			g->aspirazione_giri = 0;
+			g->suction_rpm = 0;
 		}
 		break;
-	case GD32_SPAZZOLA_LATERALE:
+	case GD32_SIDE_BRUSH:
 		if (n >= 1) g->spazzola_lat = (int8_t)d[0];
 		break;
-	case GD32_SPAZZOLA_CENTRALE:
+	case GD32_MAIN_BRUSH:
 		if (n >= 1) {
 			g->spazzola_cen = (int8_t)d[0];
 			if (g->spazzola_cen < 0)
 				g->fine_sblocco = t + 4.2;
 		}
 		break;
-	case GD32_POMPA_ACQUA:
+	case GD32_WATER_PUMP:
 		if (n >= 1 && d[0])
 			avvisa(g, t, "ATTENZIONE: comando alla pompa dell'acqua (0x6b), che sul robot non c'è");
 		break;
-	case GD32_MOTORE_LIDAR:
+	case GD32_LIDAR_MOTOR:
 		if (n >= 4) {
 			int32_t p = i32(d);
-			g->lidar_potenza = p < 0 ? 0 : p > 100 ? 100 : p;
+			g->lidar_power = p < 0 ? 0 : p > 100 ? 100 : p;
 		}
 		break;
 	case GD32_CLIFF_IR:
 		if (n >= 1) g->cliff_ir = d[0] != 0;
 		break;
-	case GD32_LED_TASTO:
+	case GD32_BUTTON_LED:
 		if (n >= 1) g->led = d[0];
 		break;
-	case GD32_ALIMENTAZIONE_LIDAR:
+	case GD32_LIDAR_POWER:
 		if (n >= 1) g->lidar_alimentato = d[0] != 0;
 		break;
-	case GD32_ALIMENTAZIONE_SOC:
-	case GD32_RIAVVIA_SOC:
+	case GD32_SOC_POWER:
+	case GD32_SOC_RESTART:
 		avvisa(g, t, "PERICOLO: comando di alimentazione/riavvio del SoC (0x99/0x9a): sul robot vero è vietato");
 		break;
-	case GD32_ALIMENTAZIONE_SENSORI:
+	case GD32_SENSOR_POWER:
 		if (n >= 1) g->sensori_accesi = d[0] != 0;
 		break;
-	case GD32_IMU_STATO_CALIBRA: {
+	case GD32_IMU_CALIBRATION_STATE: {
 		uint8_t zero = 0;
-		manda(g, t, GD32_IMU_STATO_CALIBRA, &zero, 1);
+		manda(g, t, GD32_IMU_CALIBRATION_STATE, &zero, 1);
 		break;
 	}
 	default:
@@ -407,18 +407,18 @@ void gd32sim_dati_sensori(const gd32sim_t *g, double t, uint8_t d[96])
 	uint32_t seme = g->seme ^ (uint32_t)(t * 1000);   /* rumore del frame: non tocca il generatore della fisica */
 	memcpy(d, par.frame_riposo, 96);
 	d[0] = 1;
-	d[1] = g->sensori_accesi ? (uint8_t)((g->bumper_sx ? 0x04 : 0) | (g->bumper_dx ? 0x02 : 0)) : 0x06;
+	d[1] = g->sensori_accesi ? (uint8_t)((g->bumper_left ? 0x04 : 0) | (g->bumper_right ? 0x02 : 0)) : 0x06;
 	d[3] = g->sensori_accesi ? g->cliff : 0;
-	d[4] = (uint8_t)((d[4] & ~0x04) | (g->cassetto ? 0x04 : 0));
+	d[4] = (uint8_t)((d[4] & ~0x04) | (g->dustbin ? 0x04 : 0));
 	d[6] = g->ir_base;
-	d[7] = (uint8_t)((g->contatto_base ? 2 : 0) | (g->in_carica ? 1 : 0));
+	d[7] = (uint8_t)((g->contatto_base ? 2 : 0) | (g->charging ? 1 : 0));
 	double v10 = g->tensione * 10;
 	d[8] = (uint8_t)(v10 < 0 ? 0 : v10 > 255 ? 255 : lround(v10));
-	d[9] = (uint8_t)(int8_t)lround(par.temperatura_c + fabs(g->corrente) * 0.5);
+	d[9] = (uint8_t)(int8_t)lround(par.temperature_c + fabs(g->current) * 0.5);
 	metti32(d + 16, g->enc_sx);
 	metti32(d + 24, g->enc_dx);
 	int32_t vm = 0, wm = 0;
-	if (g->modo == 2)
+	if (g->mode == 2)
 		velocita_misurata(g, &vm, &wm);
 	metti32(d + 32, vm);
 	metti32(d + 36, wm);
@@ -437,14 +437,14 @@ void gd32sim_dati_sensori(const gd32sim_t *g, double t, uint8_t d[96])
 			ms = (int)fmin(65535, (t - g->tasto_da[k]) * 100);
 		metti16(d + (k ? 62 : 58), ms);
 	}
-	d[64] = (uint8_t)(0x42 | (g->sensori_accesi ? 0x20 : 0) | (g->lidar_alimentato && g->acceso ? 0x80 : 0));
+	d[64] = (uint8_t)(0x42 | (g->sensori_accesi ? 0x20 : 0) | (g->lidar_alimentato && g->on ? 0x80 : 0));
 	d[65] = g->led;
 	d[67] = (uint8_t)(int8_t)g->eco_lat;
 	d[68] = (uint8_t)g->eco_cen;
 	double vg = g->ventola_giri / 100;
 	d[69] = (uint8_t)(vg > 255 ? 255 : lround(vg));
 	/* correnti (mA): 74 ruota sx, 76 ruota dx, 78 spazzola laterale, 80 spazzola centrale, 82 aspirazione */
-	double vr[2] = { g->vel_sx, g->vel_dx };
+	double vr[2] = { g->v_measured, g->w_measured };
 	for (int k = 0; k < 2; k++) {
 		double i = 0;
 		if (fabs(vr[k]) > 5) {
@@ -477,18 +477,18 @@ void gd32sim_dati_sensori(const gd32sim_t *g, double t, uint8_t d[96])
 static void reset_gd32(gd32sim_t *g, double t)
 {
 	g->reset++;
-	g->acceso = 0;
+	g->on = 0;
 	g->t_riaccensione = t + 5;
 	stato_firmware_iniziale(g);
 	avvisa(g, t, "RESET DEL GD32: troppo tempo senza keepalive 0x0d. Sul robot vero si riavvia TUTTO, anche Linux");
 }
 
 /* Avvicina att a obiettivo con le rampe misurate (su = accelerando, giù = rallentando o invertendo). */
-static double rampa(double att, double obiettivo, double su, double giu, double dt)
+static double rampa(double att, double target, double su, double giu, double dt)
 {
-	double r = (att * obiettivo >= 0 && fabs(obiettivo) > fabs(att)) ? su : giu;
-	double diff = obiettivo - att, passo = r * dt;
-	return fabs(diff) <= passo ? obiettivo : att + (diff > 0 ? passo : -passo);
+	double r = (att * target >= 0 && fabs(target) > fabs(att)) ? su : giu;
+	double diff = target - att, passo = r * dt;
+	return fabs(diff) <= passo ? target : att + (diff > 0 ? passo : -passo);
 }
 
 static double satura(double v, double m) { return v > m ? m : v < -m ? -m : v; }
@@ -496,35 +496,35 @@ static double satura(double v, double m) { return v > m ? m : v < -m ? -m : v; }
 static void passo(gd32sim_t *g, const mondo_t *m, double t, double dt)
 {
 	/* firmware: reset, sorveglianze, comandi arrivati */
-	if (!g->acceso && t >= g->t_riaccensione && g->soc > -0.2) {
-		g->acceso = 1;
+	if (!g->on && t >= g->t_riaccensione && g->soc > -0.2) {
+		g->on = 1;
 		g->ultimo_ka = t;
 		g->prossimo_sensori = t + par.gd32_periodo_ms / 1000;
 		g->prossimo_hb_gd32 = t + 2.0;
 	}
-	if (g->acceso && t - g->ultimo_ka > g->timeout_keepalive)
+	if (g->on && t - g->ultimo_ka > g->timeout_keepalive)
 		reset_gd32(g, t);
-	g->motori_alimentati = g->acceso && !g->sospeso && t - g->ultimo_hb < par.ruote_timeout_hb;
+	g->motori_alimentati = g->on && !g->sospeso && t - g->ultimo_hb < par.ruote_timeout_hb;
 	if (g->spazzola_cen < 0 && t >= g->fine_sblocco)
 		g->spazzola_cen = 0;
 	while (g->n_coda_cmd && g->coda_cmd[0].t <= t) {
 		sim_comando_t c = g->coda_cmd[0];
 		memmove(g->coda_cmd, g->coda_cmd + 1, sizeof g->coda_cmd[0] * (size_t)(g->n_coda_cmd - 1));
 		g->n_coda_cmd--;
-		if (c.modo == -1) { g->cmd_v = c.a; g->cmd_w = c.b; }
-		else if (c.modo == -2) { g->cmd_ruote[0] = c.a; g->cmd_ruote[1] = c.b; }
-		else g->modo = c.modo;
+		if (c.mode == -1) { g->cmd_v = c.a; g->cmd_w = c.b; }
+		else if (c.mode == -2) { g->cmd_ruote[0] = c.a; g->cmd_ruote[1] = c.b; }
+		else g->mode = c.mode;
 	}
 
 	/* anti-caduta e base sulla posizione attuale */
 	uint8_t cliff = 0;
 	for (int k = 0; k < 4; k++) {
 		double a = g->dir + CLIFF_ANGOLI[k];
-		if (g->sollevato || g->caduto || mondo_vuoto(m, g->x + CLIFF_DISTANZA * cos(a), g->y + CLIFF_DISTANZA * sin(a)))
+		if (g->lifted || g->caduto || mondo_vuoto(m, g->x + CLIFF_DISTANZA * cos(a), g->y + CLIFF_DISTANZA * sin(a)))
 			cliff |= (uint8_t)(1 << k);
 	}
 	int contatto = 0;
-	if (m->ha_base && !g->sollevato) {
+	if (m->ha_base && !g->lifted) {
 		/* contatti dietro: il punto più arretrato del robot sul lato dei contatti della base, robot che le dà le spalle */
 		double dc = g->dir + (CONTATTI_DIETRO ? M_PI : 0);
 		double cx = g->x + ROBOT_RAGGIO * cos(dc), cy = g->y + ROBOT_RAGGIO * sin(dc);
@@ -537,57 +537,57 @@ static void passo(gd32sim_t *g, const mondo_t *m, double t, double dt)
 	if (contatto)
 		cliff = g->sensori_accesi ? 0 : 0x0f;   /* spenti leggono 0f (fase 2, C5); accesi vedono il pavimento (prova o2) */
 	g->cliff = cliff;
-	g->ir_base = g->acceso ? calcola_ir_base(g, m) : 0;
-	g->in_carica = contatto && g->acceso && t - g->t_contatto > 12 && g->soc < 1.0;
+	g->ir_base = g->on ? calcola_ir_base(g, m) : 0;
+	g->charging = contatto && g->on && t - g->t_contatto > 12 && g->soc < 1.0;
 
 	/* ruote: obiettivi in tick/s per ruota, poi le rampe misurate */
 	double tv = 0, tw = 0, tsx = 0, tdx = 0;
 	int per_ruota = 0;
-	if (g->motori_alimentati && g->modo == 2) {
+	if (g->motori_alimentati && g->mode == 2) {
 		tv = satura(g->cmd_v, V_MAX_TICK);
 		tw = satura(g->cmd_w, W_MAX_TICK);
 		/* con i sensori spenti (0x9d 00, come sulla base) gli anti-caduta non contano: è così che everest esce dalla
 		 * base, dove leggono 0f [?: da verificare sul robot] */
 		if ((cliff & 0x06) && tv > 0 && g->sensori_accesi)
 			tv = g->cliff_retromarcia ? -tv / 2 : 0;
-	} else if (g->motori_alimentati && g->modo == 1) {
+	} else if (g->motori_alimentati && g->mode == 1) {
 		per_ruota = 1;
 		tsx = satura(g->cmd_ruote[0], V_MAX_TICK);
 		tdx = satura(g->cmd_ruote[1], V_MAX_TICK);
 	}
-	double prima = fabs(g->vel_sx) + fabs(g->vel_dx);
+	double prima = fabs(g->v_measured) + fabs(g->w_measured);
 	if (per_ruota) {
-		g->vel_sx = rampa(g->vel_sx, tsx, par.rampa_v_su, par.rampa_v_giu, dt);
-		g->vel_dx = rampa(g->vel_dx, tdx, par.rampa_v_su, par.rampa_v_giu, dt);
-		g->v_cmd = (g->vel_sx + g->vel_dx) / 2;
-		g->w_cmd = (g->vel_dx - g->vel_sx) / 2;
-	} else if (g->motori_alimentati && g->modo == 2 && !g->sollevato && !g->caduto) {
+		g->v_measured = rampa(g->v_measured, tsx, par.rampa_v_su, par.rampa_v_giu, dt);
+		g->w_measured = rampa(g->w_measured, tdx, par.rampa_v_su, par.rampa_v_giu, dt);
+		g->v_cmd = (g->v_measured + g->w_measured) / 2;
+		g->w_cmd = (g->w_measured - g->v_measured) / 2;
+	} else if (g->motori_alimentati && g->mode == 2 && !g->lifted && !g->caduto) {
 		/* a terra il GD32 regola v e omega con una risposta del primo ordine (val1, fase 3: dal 10 al 90% in
 		 * ~220 ms per v e ~160 ms per omega, qualunque sia il gradino) */
 		g->v_cmd += (tv - g->v_cmd) * (1 - exp(-dt / par.tau_v_terra));
 		g->w_cmd += (tw - g->w_cmd) * (1 - exp(-dt / par.tau_w_terra));
-		g->vel_sx = g->v_cmd - g->w_cmd;
-		g->vel_dx = g->v_cmd + g->w_cmd;
-	} else if (g->motori_alimentati && g->modo == 2) {
+		g->v_measured = g->v_cmd - g->w_cmd;
+		g->w_measured = g->v_cmd + g->w_cmd;
+	} else if (g->motori_alimentati && g->mode == 2) {
 		/* sollevato: rampe ad accelerazione costante (c2, c2b) */
 		g->v_cmd = rampa(g->v_cmd, tv, par.rampa_v_su, par.rampa_v_giu, dt);
 		g->w_cmd = rampa(g->w_cmd, tw, par.rampa_w_su, par.rampa_w_giu, dt);
-		g->vel_sx = g->v_cmd - g->w_cmd;
-		g->vel_dx = g->v_cmd + g->w_cmd;
+		g->v_measured = g->v_cmd - g->w_cmd;
+		g->w_measured = g->v_cmd + g->w_cmd;
 	} else {
 		/* senza potenza (heartbeat mancante) o in modalità 00: le ruote si fermano da sole, per inerzia */
 		g->v_cmd = rampa(g->v_cmd, 0, par.ruote_inerzia, par.ruote_inerzia, dt);
 		g->w_cmd = rampa(g->w_cmd, 0, par.ruote_inerzia, par.ruote_inerzia, dt);
-		g->vel_sx = g->v_cmd - g->w_cmd;
-		g->vel_dx = g->v_cmd + g->w_cmd;
+		g->v_measured = g->v_cmd - g->w_cmd;
+		g->w_measured = g->v_cmd + g->w_cmd;
 	}
-	if (prima < 5 && fabs(g->vel_sx) + fabs(g->vel_dx) >= 5)
+	if (prima < 5 && fabs(g->v_measured) + fabs(g->w_measured) >= 5)
 		g->t_avvio_ruote = t;
 
 	/* movimento */
-	double v = (g->vel_sx + g->vel_dx) / 2 * TICK_M, w = (g->vel_dx - g->vel_sx) * TICK_M / CARREGGIATA;
+	double v = (g->v_measured + g->w_measured) / 2 * TICK_M, w = (g->w_measured - g->v_measured) * TICK_M / CARREGGIATA;
 	double slitta = 1.0;
-	if (!g->sollevato && !g->caduto) {
+	if (!g->lifted && !g->caduto) {
 		double dm = g->dir + w * dt / 2;
 		double nx = g->x + v * cos(dm) * dt, ny = g->y + v * sin(dm) * dt, ang;
 		double lx = nx + LIDAR_X * cos(g->dir) - LIDAR_Y * sin(g->dir), ly = ny + LIDAR_X * sin(g->dir) + LIDAR_Y * cos(g->dir);
@@ -611,8 +611,8 @@ static void passo(gd32sim_t *g, const mondo_t *m, double t, double dt)
 			avvisa(g, t, "il robot è CADUTO nel vuoto: spostalo a mano dalla pagina");
 		}
 	}
-	g->dist_sx += g->vel_sx * dt * slitta;
-	g->dist_dx += g->vel_dx * dt * slitta;
+	g->dist_sx += g->v_measured * dt * slitta;
+	g->dist_dx += g->w_measured * dt * slitta;
 	g->enc_sx = (int32_t)floor(g->dist_sx);
 	g->enc_dx = (int32_t)floor(g->dist_dx);
 	g->bloccato = g->t_urto >= 0 && t - g->t_urto < 0.05;
@@ -629,38 +629,38 @@ static void passo(gd32sim_t *g, const mondo_t *m, double t, double dt)
 
 	/* bumper: urto del CORPO davanti negli ultimi 50 ms (la torretta non ha interruttori) */
 	int urto = g->t_urto >= 0 && t - g->t_urto < 0.05 && fabs(g->ang_urto) < BUMPER_MEZZO_ARCO;
-	g->bumper_sx = urto && g->ang_urto > -BUMPER_CENTRO;
-	g->bumper_dx = urto && g->ang_urto < BUMPER_CENTRO;
+	g->bumper_left = urto && g->ang_urto > -BUMPER_CENTRO;
+	g->bumper_right = urto && g->ang_urto < BUMPER_CENTRO;
 
 	/* IMU: il GD32 integra la velocità angolare, con la deriva misurata */
-	double w_vera = (g->sollevato || g->caduto) ? 0 : w;
+	double w_vera = (g->lifted || g->caduto) ? 0 : w;
 	g->vel_imbardata = w_vera * par.imu_scala;
 	g->imbardata += (w_vera * par.imu_scala + par.imu_deriva_gradi_s * M_PI / 180) * dt;
 
 	/* spazzole e aspirazione */
 	g->eco_lat = g->motori_alimentati ? g->spazzola_lat : 0;
 	g->eco_cen = !g->motori_alimentati ? 0 : g->spazzola_cen < 0 ? 100 : g->spazzola_cen;
-	double giri = 0;
+	double revolutions = 0;
 	if (g->motori_alimentati)
-		giri = g->aspirazione_giri ? g->aspirazione_giri : g->aspirazione_pwm * par.aspirazione_giri_per_pwm;
-	g->ventola_giri += (giri - g->ventola_giri) * (1 - exp(-dt / 0.5));   /* [?] costante di tempo della ventola */
+		revolutions = g->suction_rpm ? g->suction_rpm : g->aspirazione_pwm * par.aspirazione_giri_per_pwm;
+	g->ventola_giri += (revolutions - g->ventola_giri) * (1 - exp(-dt / 0.5));   /* [?] costante di tempo della ventola */
 
 	/* batteria: corrente stimata dai consumi */
 	double i = 0.35                                            /* [?] SoC acceso */
-	         + (g->lidar_alimentato ? 0.0015 * g->lidar_potenza : 0)
-	         + (fabs(g->vel_sx) + fabs(g->vel_dx) > 5 ? 2 * par.corrente_ruota_base / 1000 : 0)
+	         + (g->lidar_alimentato ? 0.0015 * g->lidar_power : 0)
+	         + (fabs(g->v_measured) + fabs(g->w_measured) > 5 ? 2 * par.corrente_ruota_base / 1000 : 0)
 	         + (g->eco_cen ? par.corrente_centrale_accesa / 1000 : 0)
 	         + (par.aspirazione_corrente_max / 1000) * pow(fmax(0, g->ventola_giri) / par.aspirazione_giri_max,
 	                                                       par.aspirazione_esponente);
-	if (g->in_carica)
+	if (g->charging)
 		i -= 1.0;                                              /* [?] corrente di carica */
-	g->corrente = i;
+	g->current = i;
 	g->soc -= i * dt / 3600 / par.batteria_utile_ah * g->velocita_batteria;
 	if (g->soc > 1)
 		g->soc = 1;
 	g->tensione = tensione_a_vuoto(g->soc) - (i > 0 ? i * 0.12 : i * 0.05);
-	if (g->acceso && g->tensione < 12.0) {
-		g->acceso = 0;
+	if (g->on && g->tensione < 12.0) {
+		g->on = 0;
 		g->t_riaccensione = t + 10;
 		stato_firmware_iniziale(g);
 		avvisa(g, t, "batteria esaurita: protezione, il robot si spegne");
@@ -674,37 +674,37 @@ static void passo(gd32sim_t *g, const mondo_t *m, double t, double dt)
 
 void gd32sim_avanza(gd32sim_t *g, const mondo_t *m, double t)
 {
-	double ultimo = g->t_simulato;
-	if (t < ultimo)
-		ultimo = t;
-	for (; ultimo < t - 1e-9; g->t_simulato = ultimo) {
-		double dt = fmin(0.002, t - ultimo);
-		ultimo += dt;
-		passo(g, m, ultimo, dt);
-		if (!g->acceso)
+	double last = g->t_simulato;
+	if (t < last)
+		last = t;
+	for (; last < t - 1e-9; g->t_simulato = last) {
+		double dt = fmin(0.002, t - last);
+		last += dt;
+		passo(g, m, last, dt);
+		if (!g->on)
 			continue;
-		if (g->risposta_08 > 0 && ultimo >= g->risposta_08) {
+		if (g->risposta_08 > 0 && last >= g->risposta_08) {
 			uint8_t uno = 1;
 			manda(g, g->risposta_08, GD32_IMU_ZERO, &uno, 1);
 			g->risposta_08 = 0;
 		}
 		if (g->sospeso) {
-			if (g->risveglio && ultimo >= g->prossimo_05) {
+			if (g->risveglio && last >= g->prossimo_05) {
 				manda(g, g->prossimo_05, GD32_WAKEUP_ACK, NULL, 0);
-				g->prossimo_05 = ultimo + 0.1;
+				g->prossimo_05 = last + 0.1;
 			}
 			continue;
 		}
-		if (ultimo >= g->prossimo_sensori) {
+		if (last >= g->prossimo_sensori) {
 			uint8_t d[96];
 			gd32sim_dati_sensori(g, g->prossimo_sensori, d);
-			manda(g, g->prossimo_sensori, GD32_SENSORI, d, sizeof d);
-			g->frame_sensori++;
+			manda(g, g->prossimo_sensori, GD32_SENSORS, d, sizeof d);
+			g->sensor_frames++;
 			g->prossimo_sensori += par.gd32_periodo_ms / 1000;
-			if (g->prossimo_sensori < ultimo)
-				g->prossimo_sensori = ultimo + par.gd32_periodo_ms / 1000;
+			if (g->prossimo_sensori < last)
+				g->prossimo_sensori = last + par.gd32_periodo_ms / 1000;
 		}
-		if (ultimo >= g->prossimo_hb_gd32) {
+		if (last >= g->prossimo_hb_gd32) {
 			manda(g, g->prossimo_hb_gd32, GD32_HEARTBEAT, NULL, 0);
 			g->prossimo_hb_gd32 += 2.0;
 		}

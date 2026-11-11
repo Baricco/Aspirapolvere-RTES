@@ -14,64 +14,64 @@ uint16_t gd32_checksum(const uint8_t *b, size_t n)
 	return ck;
 }
 
-size_t gd32_componi(uint8_t cmd, const void *dati, size_t n, uint8_t *out, size_t out_dim)
+size_t gd32_build_frame(uint8_t cmd, const void *data, size_t n, uint8_t *out, size_t out_size)
 {
-	if (n > GD32_MAX_DATI || out_dim < n + 6)
+	if (n > GD32_MAX_DATA || out_size < n + 6)
 		return 0;
-	out[0] = GD32_INTESTAZIONE_1;
-	out[1] = GD32_INTESTAZIONE_2;
+	out[0] = GD32_HEADER_1;
+	out[1] = GD32_HEADER_2;
 	out[2] = (uint8_t)(n + 3);
 	out[3] = cmd;
 	if (n)
-		memcpy(out + 4, dati, n);
+		memcpy(out + 4, data, n);
 	uint16_t ck = gd32_checksum(out + 3, n + 1);
 	out[4 + n] = (uint8_t)(ck >> 8);
 	out[5 + n] = (uint8_t)ck;
 	return n + 6;
 }
 
-const char *gd32_nome_cmd(uint8_t cmd)
+const char *gd32_cmd_name(uint8_t cmd)
 {
 	switch (cmd) {
-	case GD32_CODICE_ERRORE:        return "codice_errore";
+	case GD32_ERROR_CODE:        return "codice_errore";
 	case GD32_SLEEP:                return "sleep";
 	case GD32_WAKEUP_ACK:           return "wakeup_ack";
 	case GD32_HEARTBEAT:            return "heartbeat";
-	case GD32_VERSIONE:             return "versione";
+	case GD32_VERSION:             return "versione";
 	case GD32_IMU_ZERO:             return "imu_zero";
-	case GD32_RESET_ERRORI:         return "reset_errori";
-	case GD32_SORVEGLIA_SOC:        return "sorveglia_soc";
+	case GD32_RESET_ERRORS:         return "reset_errori";
+	case GD32_SOC_WATCHDOG:        return "sorveglia_soc";
 	case GD32_KEEPALIVE:            return "keepalive";
-	case GD32_SENSORI:              return "sensori";
-	case GD32_IMU_GREZZA:           return "imu_grezza";
-	case GD32_FUNZIONI_MACCHINA:    return "funzioni_macchina";
-	case GD32_CLIFF_RETROMARCIA:    return "cliff_retromarcia";
-	case GD32_TIPO_CONTROLLO:       return "tipo_controllo";
-	case GD32_VELOCITA:             return "velocita";
-	case GD32_VELOCITA_RUOTE:       return "velocita_ruote";
-	case GD32_ASPIRAZIONE:          return "aspirazione";
-	case GD32_SPAZZOLA_LATERALE:    return "spazzola_laterale";
-	case GD32_SPAZZOLA_CENTRALE:    return "spazzola_centrale";
-	case GD32_POMPA_ACQUA:          return "pompa_acqua";
-	case GD32_MOTORE_LIDAR:         return "motore_lidar";
+	case GD32_SENSORS:              return "sensori";
+	case GD32_IMU_RAW:           return "imu_grezza";
+	case GD32_MACHINE_FUNCTIONS:    return "funzioni_macchina";
+	case GD32_CLIFF_BACKOFF:    return "cliff_retromarcia";
+	case GD32_CONTROL_TYPE:       return "tipo_controllo";
+	case GD32_VELOCITY:             return "velocita";
+	case GD32_WHEEL_SPEED:       return "velocita_ruote";
+	case GD32_SUCTION:          return "aspirazione";
+	case GD32_SIDE_BRUSH:    return "spazzola_laterale";
+	case GD32_MAIN_BRUSH:    return "spazzola_centrale";
+	case GD32_WATER_PUMP:          return "pompa_acqua";
+	case GD32_LIDAR_MOTOR:         return "motore_lidar";
 	case GD32_CLIFF_IR:             return "cliff_ir";
-	case GD32_CLIFF_IR_DIREZIONE:   return "cliff_ir_direzione";
-	case GD32_PARAMETRI_AUTONOMI:   return "parametri_autonomi";
-	case GD32_MASCHERA_SENSORI:     return "maschera_sensori";
-	case GD32_BUMPER_MORBIDO:       return "bumper_morbido";
-	case GD32_ASPIRAZIONE_MODO:     return "aspirazione_modo";
-	case GD32_ASPIRAZIONE_PWM:      return "aspirazione_pwm";
-	case GD32_ASPIRAZIONE_PWM_BAT:  return "aspirazione_pwm_bat";
-	case GD32_LED_TASTO:            return "led_tasto";
-	case GD32_ALIMENTAZIONE_LIDAR:  return "alimentazione_lidar";
-	case GD32_ALIMENTAZIONE_SOC:    return "alimentazione_soc";
-	case GD32_RIAVVIA_SOC:          return "riavvia_soc";
-	case GD32_CARICATORE:           return "caricatore";
-	case GD32_ALIMENTAZIONE_SENSORI: return "alimentazione_sensori";
-	case GD32_IMU_CALIBRA:          return "imu_calibra";
-	case GD32_IMU_STATO_CALIBRA:    return "imu_stato_calibra";
-	case GD32_MAGNETOMETRO_CALIBRA: return "magnetometro_calibra";
-	case GD32_MAGNETOMETRO_STATO:   return "magnetometro_stato";
+	case GD32_CLIFF_IR_DIRECTION:   return "cliff_ir_direzione";
+	case GD32_SELF_CONTROL_PARAMS:   return "parametri_autonomi";
+	case GD32_SENSOR_MASK:     return "maschera_sensori";
+	case GD32_BUMPER_SMOOTH:       return "bumper_morbido";
+	case GD32_SUCTION_MODE:     return "aspirazione_modo";
+	case GD32_SUCTION_PWM:      return "aspirazione_pwm";
+	case GD32_SUCTION_PWM_BATTERY:  return "aspirazione_pwm_bat";
+	case GD32_BUTTON_LED:            return "led_tasto";
+	case GD32_LIDAR_POWER:  return "alimentazione_lidar";
+	case GD32_SOC_POWER:    return "alimentazione_soc";
+	case GD32_SOC_RESTART:          return "riavvia_soc";
+	case GD32_CHARGER_POWER:           return "caricatore";
+	case GD32_SENSOR_POWER: return "alimentazione_sensori";
+	case GD32_IMU_CALIBRATE:          return "imu_calibra";
+	case GD32_IMU_CALIBRATION_STATE:    return "imu_stato_calibra";
+	case GD32_MAGNETOMETER_CALIBRATE: return "magnetometro_calibra";
+	case GD32_MAGNETOMETER_STATE:   return "magnetometro_stato";
 	case GD32_DEBUG:                return "debug";
 	default:                        return NULL;
 	}
@@ -87,45 +87,45 @@ void gd32_deframer_init(gd32_deframer_t *d)
  * essere rianalizzati, davanti a quelli che erano già in attesa.
  *
  * Perché la coda basta: i byte nuovi si leggono solo a coda vuota, quindi in ogni momento
- * n + (attesa_n - attesa_i) <= GD32_MAX_FRAME. Un errore sposta n-1 byte da buf alla coda e la somma scende.
+ * n + (pending_n - pending_i) <= GD32_MAX_FRAME. Un errore sposta n-1 byte da buf alla coda e la somma scende.
  */
-static void errore(gd32_deframer_t *d)
+static void frame_error(gd32_deframer_t *d)
 {
 	uint8_t tmp[GD32_MAX_FRAME];
-	size_t resto = d->attesa_n - d->attesa_i;
+	size_t rest = d->pending_n - d->pending_i;
 	size_t k = d->n - 1;
 
 	memcpy(tmp, d->buf + 1, k);
-	memcpy(tmp + k, d->attesa + d->attesa_i, resto);
-	memcpy(d->attesa, tmp, k + resto);
-	d->attesa_n = k + resto;
-	d->attesa_i = 0;
+	memcpy(tmp + k, d->pending + d->pending_i, rest);
+	memcpy(d->pending, tmp, k + rest);
+	d->pending_n = k + rest;
+	d->pending_i = 0;
 	d->n = 0;
-	d->byte_scartati++;
+	d->discarded_bytes++;
 }
 
 /* Aggiunge un byte al frame in costruzione. Ritorna 1 se ha completato un frame valido (in *f). */
 static int byte(gd32_deframer_t *d, uint8_t b, gd32_frame_t *f)
 {
 	if (d->n == 0) {
-		if (b == GD32_INTESTAZIONE_1)
+		if (b == GD32_HEADER_1)
 			d->buf[d->n++] = b;
 		else
-			d->byte_scartati++;
+			d->discarded_bytes++;
 		return 0;
 	}
 
 	d->buf[d->n++] = b;
 
 	if (d->n == 2) {
-		if (b != GD32_INTESTAZIONE_2)
-			errore(d);      /* FA non seguito da FB: si scarta l'FA e si rianalizza b */
+		if (b != GD32_HEADER_2)
+			frame_error(d);      /* FA non seguito da FB: si scarta l'FA e si rianalizza b */
 		return 0;
 	}
 	if (d->n == 3) {
 		if (b < 3) {
-			d->len_errati++;
-			errore(d);
+			d->bad_lengths++;
+			frame_error(d);
 		}
 		return 0;
 	}
@@ -135,94 +135,94 @@ static int byte(gd32_deframer_t *d, uint8_t b, gd32_frame_t *f)
 		return 0;
 
 	/* frame completo: buf[3] = cmd, poi i dati, poi 2 byte di checksum */
-	size_t n_corpo = len - 2;
-	uint16_t atteso = (uint16_t)(d->buf[3 + n_corpo] << 8 | d->buf[4 + n_corpo]);
-	if (gd32_checksum(d->buf + 3, n_corpo) != atteso) {
-		d->checksum_errati++;
-		errore(d);
+	size_t body_len = len - 2;
+	uint16_t expected = (uint16_t)(d->buf[3 + body_len] << 8 | d->buf[4 + body_len]);
+	if (gd32_checksum(d->buf + 3, body_len) != expected) {
+		d->bad_checksums++;
+		frame_error(d);
 		return 0;
 	}
 	f->cmd = d->buf[3];
-	f->n_dati = (uint8_t)(n_corpo - 1);
-	memcpy(f->dati, d->buf + 4, f->n_dati);
+	f->data_len = (uint8_t)(body_len - 1);
+	memcpy(f->data, d->buf + 4, f->data_len);
 	d->n = 0;
-	d->frame_ok++;
+	d->frames_ok++;
 	return 1;
 }
 
-size_t gd32_deframer_scrivi(gd32_deframer_t *d, const uint8_t *b, size_t n, gd32_frame_cb cb, void *ctx)
+size_t gd32_deframer_feed(gd32_deframer_t *d, const uint8_t *b, size_t n, gd32_frame_cb cb, void *ctx)
 {
 	gd32_frame_t f;
-	size_t trovati = 0, i = 0;
+	size_t found = 0, i = 0;
 
 	for (;;) {
 		uint8_t c;
-		if (d->attesa_i < d->attesa_n)
-			c = d->attesa[d->attesa_i++];
+		if (d->pending_i < d->pending_n)
+			c = d->pending[d->pending_i++];
 		else if (i < n)
 			c = b[i++];
 		else
 			break;
-		if (d->attesa_i == d->attesa_n)
-			d->attesa_i = d->attesa_n = 0;
+		if (d->pending_i == d->pending_n)
+			d->pending_i = d->pending_n = 0;
 		if (byte(d, c, &f)) {
-			trovati++;
+			found++;
 			if (cb)
 				cb(&f, ctx);
 		}
 	}
-	return trovati;
+	return found;
 }
 
 /* Campi little-endian dentro i dati */
 static uint16_t u16(const uint8_t *b) { return (uint16_t)(b[0] | b[1] << 8); }
 static int32_t i32(const uint8_t *b) { return (int32_t)((uint32_t)b[0] | (uint32_t)b[1] << 8 | (uint32_t)b[2] << 16 | (uint32_t)b[3] << 24); }
 
-int gd32_leggi_sensori(const gd32_frame_t *f, gd32_sensori_t *o)
+int gd32_read_sensors(const gd32_frame_t *f, gd32_sensors_t *o)
 {
-	const uint8_t *d = f->dati;
-	if (f->cmd != GD32_SENSORI || f->n_dati < 96)
+	const uint8_t *d = f->data;
+	if (f->cmd != GD32_SENSORS || f->data_len < 96)
 		return -1;
 	memset(o, 0, sizeof(*o));
-	o->stato = d[0];
-	o->bumper_bit = d[1];
-	o->bumper_sx = (d[1] >> 2 | d[1] >> 3) & 1;
-	o->bumper_dx = (d[1] >> 1 | d[1]) & 1;
+	o->status = d[0];
+	o->bumper_raw = d[1];
+	o->bumper_left = (d[1] >> 2 | d[1] >> 3) & 1;
+	o->bumper_right = (d[1] >> 1 | d[1]) & 1;
 	o->byte2 = d[2];
 	for (int i = 0; i < 4; i++)
 		o->cliff[i] = (d[3] >> i) & 1;
-	o->cassetto = (d[4] >> 2) & 1;
-	o->byte4_altri = d[4] & 3;
+	o->dustbin = (d[4] >> 2) & 1;
+	o->byte4_other = d[4] & 3;
 	o->byte5 = d[5];
-	o->ir_base_a = d[6] >> 4;
-	o->ir_base_b = d[6] & 0x0f;
-	o->in_carica = d[7] & 1;
-	o->sulla_base = (d[7] | d[7] >> 1) & 1;
-	o->tensione_dv = d[8];
-	o->temperatura_c = (int8_t)d[9];
-	o->encoder_sx = i32(d + 16);
-	o->encoder_dx = i32(d + 24);
-	o->vel_sx = i32(d + 32);
-	o->vel_dx = i32(d + 36);
+	o->ir_dock_right = d[6] >> 4;
+	o->ir_dock_left = d[6] & 0x0f;
+	o->charging = d[7] & 1;
+	o->on_base = (d[7] | d[7] >> 1) & 1;
+	o->voltage_dv = d[8];
+	o->temperature_c = (int8_t)d[9];
+	o->encoder_left = i32(d + 16);
+	o->encoder_right = i32(d + 24);
+	o->v_measured = i32(d + 32);
+	o->w_measured = i32(d + 36);
 	for (int i = 0; i < 3; i++) {
-		o->vel_angolare[i] = (int16_t)u16(d + 40 + 4 * i);
-		o->angolo[i] = (int16_t)u16(d + 42 + 4 * i);
-		o->gravita[i] = (int16_t)u16(d + 52 + 2 * i);
-		o->magnetico[i] = (int16_t)u16(d + 90 + 2 * i);
+		o->angular_velocity[i] = (int16_t)u16(d + 40 + 4 * i);
+		o->angle[i] = (int16_t)u16(d + 42 + 4 * i);
+		o->gravity[i] = (int16_t)u16(d + 52 + 2 * i);
+		o->magnetic[i] = (int16_t)u16(d + 90 + 2 * i);
 	}
-	o->tasto_accensione_ms = u16(d + 58) * 10;
-	o->tasto_punto_ms = u16(d + 60) * 10;
-	o->tasto_casa_ms = u16(d + 62) * 10;
-	o->controllo = d[64];
+	o->power_button_ms = u16(d + 58) * 10;
+	o->spot_button_ms = u16(d + 60) * 10;
+	o->home_button_ms = u16(d + 62) * 10;
+	o->control = d[64];
 	o->led = d[65];
 	o->byte66 = d[66] & 0x0f;
 	o->byte67 = (int8_t)d[67];
 	o->byte68 = d[68];
-	o->byte69_x100 = d[69] * 100;
-	o->acqua = d[70];
-	o->grezzo72 = u16(d + 72);
+	o->fan_rpm = d[69] * 100;
+	o->water = d[70];
+	o->raw72 = u16(d + 72);
 	for (int i = 0; i < 6; i++)
-		o->correnti[i] = u16(d + 74 + 2 * i);
+		o->currents[i] = u16(d + 74 + 2 * i);
 	o->byte88 = (int16_t)u16(d + 88);
 	return 0;
 }

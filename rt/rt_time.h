@@ -1,5 +1,5 @@
 /*
- * rt_tempo.h - Gestione del tempo per i task real-time.
+ * rt_time.h - Gestione del tempo per i task real-time.
  *
  * Nel progetto il tempo si rappresenta come un intero a 64 bit di nanosecondi
  * (int64_t), misurato su CLOCK_MONOTONIC: un orologio che parte dall'accensione,
@@ -11,8 +11,8 @@
  * Le API POSIX usano invece struct timespec { tv_sec, tv_nsec }: le funzioni
  * qui sotto convertono tra le due rappresentazioni.
  */
-#ifndef RT_TEMPO_H
-#define RT_TEMPO_H
+#ifndef RT_TIME_H
+#define RT_TIME_H
 
 #include <errno.h>
 #include <stdint.h>
@@ -27,14 +27,14 @@
 #define RT_MS(x) ((int64_t)(x) * RT_NS_PER_MS)
 #define RT_S(x)  ((int64_t)(x) * RT_NS_PER_S)
 
-static inline int64_t rt_timespec_a_ns(const struct timespec *ts)
+static inline int64_t rt_timespec_to_ns(const struct timespec *ts)
 {
 	return (int64_t)ts->tv_sec * RT_NS_PER_S + ts->tv_nsec;
 }
 
 /* tv_nsec deve sempre stare in [0, 1e9): per i valori negativi la divisione
  * del C tronca verso zero, quindi il resto va riportato nell'intervallo. */
-static inline struct timespec rt_ns_a_timespec(int64_t ns)
+static inline struct timespec rt_ns_to_timespec(int64_t ns)
 {
 	struct timespec ts;
 	ts.tv_sec = (time_t)(ns / RT_NS_PER_S);
@@ -47,24 +47,24 @@ static inline struct timespec rt_ns_a_timespec(int64_t ns)
 }
 
 /* Istante attuale in ns su CLOCK_MONOTONIC. */
-static inline int64_t rt_adesso(void)
+static inline int64_t rt_now(void)
 {
 	struct timespec ts;
 	clock_gettime(CLOCK_MONOTONIC, &ts);
-	return rt_timespec_a_ns(&ts);
+	return rt_timespec_to_ns(&ts);
 }
 
 /*
- * Dorme fino all'istante assoluto `istante_ns` (non "per" un certo tempo).
+ * Dorme fino all'istante assoluto `time_ns` (non "per" un certo tempo).
  * È l'equivalente di vTaskDelayUntil() di FreeRTOS: usando istanti assoluti
  * l'errore non si accumula tra un periodo e l'altro (niente deriva).
  * Ritenta se il sonno viene interrotto da un segnale (EINTR).
  */
-static inline void rt_dormi_fino_a(int64_t istante_ns)
+static inline void rt_sleep_until(int64_t time_ns)
 {
-	struct timespec ts = rt_ns_a_timespec(istante_ns);
+	struct timespec ts = rt_ns_to_timespec(time_ns);
 	while (clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &ts, NULL) == EINTR)
 		;
 }
 
-#endif /* RT_TEMPO_H */
+#endif /* RT_TIME_H */

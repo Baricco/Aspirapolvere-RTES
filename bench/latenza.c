@@ -28,8 +28,8 @@ static void job_carico(void *arg)
 	int64_t durata = *(int64_t *)arg;
 	if (durata <= 0)
 		return;
-	int64_t fine = rt_adesso() + durata;
-	while (rt_adesso() < fine)
+	int64_t fine = rt_now() + durata;
+	while (rt_now() < fine)
 		;
 }
 
@@ -64,7 +64,7 @@ static void stampa_sistema(void)
 int main(int argc, char **argv)
 {
 	int64_t periodo_us = 1000, esecuzione_us = 0;
-	int durata_s = 10, priorita = 80, cpu = RT_CPU_QUALSIASI, avanzamento_s = 0;
+	int durata_s = 10, priority = 80, cpu = RT_CPU_ANY, avanzamento_s = 0;
 	const char *file_csv = NULL;
 
 	int o;
@@ -72,7 +72,7 @@ int main(int argc, char **argv)
 		switch (o) {
 		case 'p': periodo_us = atoll(optarg); break;
 		case 'd': durata_s = atoi(optarg); break;
-		case 'P': priorita = atoi(optarg); break;
+		case 'P': priority = atoi(optarg); break;
 		case 'c': cpu = atoi(optarg); break;
 		case 'e': esecuzione_us = atoll(optarg); break;
 		case 'o': file_csv = optarg; break;
@@ -93,38 +93,38 @@ int main(int argc, char **argv)
 			strerror(r));
 
 	uint64_t n_job = (uint64_t)durata_s * 1000000 / periodo_us;
-	int64_t esecuzione_ns = RT_US(esecuzione_us);
+	int64_t execution_ns = RT_US(esecuzione_us);
 
 	/* Il buffer dei campioni si alloca e si "tocca" prima di avviare il task:
 	 * con mlockall le pagine restano in RAM e il ciclo RT non alloca niente. */
-	rt_campione_t *campioni = NULL;
+	rt_sample_t *samples = NULL;
 	if (file_csv) {
-		campioni = calloc(n_job, sizeof(*campioni));
-		if (!campioni) {
+		samples = calloc(n_job, sizeof(*samples));
+		if (!samples) {
 			fprintf(stderr, "memoria insufficiente per %llu campioni\n", (unsigned long long)n_job);
 			return 1;
 		}
 	}
 
 	rt_task_cfg_t cfg = {
-		.nome = "latenza",
-		.priorita = priorita,
+		.name = "latenza",
+		.priority = priority,
 		.cpu = cpu,
-		.periodo_ns = RT_US(periodo_us),
+		.period_ns = RT_US(periodo_us),
 		.job = job_carico,
-		.arg = &esecuzione_ns,
+		.arg = &execution_ns,
 		.max_job = n_job,
-		.campioni = campioni,
-		.max_campioni = campioni ? n_job : 0,
+		.samples = samples,
+		.max_samples = samples ? n_job : 0,
 	};
 
 	printf("misura: periodo %lld us, %llu job (~%d s), priorità %d, cpu %d, esecuzione %lld us\n",
-	       (long long)periodo_us, (unsigned long long)n_job, durata_s, priorita, cpu,
+	       (long long)periodo_us, (unsigned long long)n_job, durata_s, priority, cpu,
 	       (long long)esecuzione_us);
 	fflush(stdout);
 
 	rt_task_t t;
-	r = rt_task_avvia(&t, &cfg, rt_adesso() + RT_MS(100));
+	r = rt_task_start(&t, &cfg, rt_now() + RT_MS(100));
 	if (r != 0) {
 		fprintf(stderr, "impossibile avviare il task: %s%s\n", strerror(r),
 			r == EPERM ? " (servono root o un limite rtprio: ulimit -r)" : "");
@@ -140,11 +140,11 @@ int main(int argc, char **argv)
 		rt_stats_t s = t.stats;
 		printf("avanzamento: %d s, job %llu/%llu, deadline mancate %llu, latenza max %.1f us\n",
 		       trascorsi + avanzamento_s, (unsigned long long)s.job, (unsigned long long)n_job,
-		       (unsigned long long)s.deadline_mancate, s.latenza_max_ns / 1000.0);
+		       (unsigned long long)s.missed_deadlines, s.latency_max_ns / 1000.0);
 		fflush(stdout);
 	}
-	rt_task_attendi(&t);
-	rt_stats_stampa(&t);
+	rt_task_join(&t);
+	rt_stats_print(&t);
 
 	if (file_csv) {
 		FILE *f = fopen(file_csv, "w");
@@ -153,12 +153,12 @@ int main(int argc, char **argv)
 			return 1;
 		}
 		fprintf(f, "latenza_ns,esecuzione_ns\n");
-		for (size_t i = 0; i < t.stats.n_campioni; i++)
-			fprintf(f, "%lld,%lld\n", (long long)campioni[i].latenza_ns,
-				(long long)campioni[i].esecuzione_ns);
+		for (size_t i = 0; i < t.stats.n_samples; i++)
+			fprintf(f, "%lld,%lld\n", (long long)samples[i].latency_ns,
+				(long long)samples[i].execution_ns);
 		fclose(f);
-		printf("campioni salvati in %s (%zu righe)\n", file_csv, t.stats.n_campioni);
+		printf("campioni salvati in %s (%zu righe)\n", file_csv, t.stats.n_samples);
 	}
-	free(campioni);
+	free(samples);
 	return 0;
 }

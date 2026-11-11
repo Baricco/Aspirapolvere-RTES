@@ -83,7 +83,7 @@ static void run_navigation_command(navigation_command_t command, app_command_res
 
     send_navigation_command(&command);
 
-    int64_t limit = rt_adesso() + COMMAND_RESULT_TIMEOUT;
+    int64_t limit = rt_now() + COMMAND_RESULT_TIMEOUT;
     for (;;) {
         navigation_status_t status = read_navigation_status();
         if (status.last_command_num == command.num) {
@@ -91,24 +91,24 @@ static void run_navigation_command(navigation_command_t command, app_command_res
             if (reason != NULL) refuse(result, reason);
             return;
         }
-        if (rt_adesso() > limit) {
+        if (rt_now() > limit) {
             refuse(result, "no_answer");
             return;
         }
-        rt_dormi_fino_a(rt_adesso() + COMMAND_RESULT_POLL);
+        rt_sleep_until(rt_now() + COMMAND_RESULT_POLL);
     }
 }
 
 // funzione helper che, se il driver è in guasto, prova ad azzerarlo. Ritorna false se la causa c'è ancora.
-// drv_azzera_guasto aspetta fino a 50 ms: per questo la chiama l'interprete e non un task real-time
+// drv_clear_fault aspetta fino a 50 ms: per questo la chiama l'interprete e non un task real-time
 static bool clear_fault_if_any(void) {
 
-    drv_stato_t drv_state = {0};
-    drv_stato(&drv_state);
+    drv_status_t drv_state = {0};
+    drv_status(&drv_state);
 
-    if (drv_state.fase != DRV_GUASTO) return true;
+    if (drv_state.phase != DRV_FAULT) return true;
 
-    return drv_azzera_guasto() == 0;
+    return drv_clear_fault() == 0;
 }
 
 // funzione helper che legge un numero da un campo del comando. Ritorna false se manca o non è un numero finito
@@ -174,13 +174,13 @@ static void run_zones_command(const cJSON *command, app_command_result_t *result
     uint32_t request_num = request_user_zones(zones, num_zones);
 
     // la mappatura le applica nel suo job (ogni 200 ms); poi il task aperiodico salva la mappa
-    int64_t limit = rt_adesso() + ZONES_RESULT_TIMEOUT;
+    int64_t limit = rt_now() + ZONES_RESULT_TIMEOUT;
     while (read_applied_user_zones_version() != request_num) {
-        if (rt_adesso() > limit) {
+        if (rt_now() > limit) {
             refuse(result, "no_answer");
             return;
         }
-        rt_dormi_fino_a(rt_adesso() + COMMAND_RESULT_POLL);
+        rt_sleep_until(rt_now() + COMMAND_RESULT_POLL);
     }
 }
 
@@ -188,10 +188,10 @@ static void run_zones_command(const cJSON *command, app_command_result_t *result
 // i task avviati: il file viene sostituito (o cancellato) dal task aperiodico, poi il programma si riavvia
 static void run_map_command(const cJSON *command, bool is_select, app_map_download_t download_map, app_command_result_t *result) {
 
-    drv_stato_t drv_state = {0};
-    drv_stato(&drv_state);
+    drv_status_t drv_state = {0};
+    drv_status(&drv_state);
 
-    if (read_navigation_status().state != NAV_STATE_SLEEP || !drv_state.sulla_base) {
+    if (read_navigation_status().state != NAV_STATE_SLEEP || !drv_state.on_base) {
         refuse(result, "not_resting");
         return;
     }
@@ -220,13 +220,13 @@ static void run_map_command(const cJSON *command, bool is_select, app_map_downlo
 
     // aspetta che il task aperiodico abbia fatto la rinomina o la cancellazione
     bool is_done_ok = false;
-    int64_t limit = rt_adesso() + MAP_FILE_RESULT_TIMEOUT;
+    int64_t limit = rt_now() + MAP_FILE_RESULT_TIMEOUT;
     while (!read_map_file_request_result(request_num, &is_done_ok)) {
-        if (rt_adesso() > limit) {
+        if (rt_now() > limit) {
             refuse(result, "no_answer");
             return;
         }
-        rt_dormi_fino_a(rt_adesso() + COMMAND_RESULT_POLL);
+        rt_sleep_until(rt_now() + COMMAND_RESULT_POLL);
     }
 
     if (!is_done_ok) {
@@ -252,11 +252,11 @@ static void run_parsed_command(const cJSON *command, app_map_download_t download
 
     if (strcmp(type, "fault_reset") == 0) {
 
-        drv_stato_t drv_state = {0};
-        drv_stato(&drv_state);
+        drv_status_t drv_state = {0};
+        drv_status(&drv_state);
 
-        if (drv_state.fase != DRV_GUASTO) refuse(result, "not_in_fault");
-        else if (drv_azzera_guasto() != 0) refuse(result, "cause_still_present");
+        if (drv_state.phase != DRV_FAULT) refuse(result, "not_in_fault");
+        else if (drv_clear_fault() != 0) refuse(result, "cause_still_present");
 
     } else if (strcmp(type, "start") == 0 || strcmp(type, "resume") == 0 || strcmp(type, "home") == 0) {
 
@@ -309,9 +309,9 @@ static void run_parsed_command(const cJSON *command, app_map_download_t download
 
         // senza il cassetto della polvere l'aspirazione non parte: il telecomando si prende lo stesso, come con ogni
         // comando del telecomando, ma spazzole e aspirazione restano come sono
-        drv_sensori_t sensors = {0};
-        drv_sensori(&sensors);
-        if (navigation_command.suction && !sensors.s.cassetto) {
+        drv_sensors_t sensors = {0};
+        drv_sensors(&sensors);
+        if (navigation_command.suction && !sensors.s.dustbin) {
             navigation_command.type = NAV_COMMAND_REMOTE_KEEPALIVE;
             run_navigation_command(navigation_command, result);
             if (result->ok) refuse(result, "dustbin_missing");

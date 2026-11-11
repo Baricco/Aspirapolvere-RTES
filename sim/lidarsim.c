@@ -11,11 +11,11 @@
 #define MAX_PUNTI_SETTORE 29          /* 5 + 3 x 29 = 92 byte di parametri: il massimo che ci sta */
 #define DIST_MIN 0.11
 
-double lidarsim_giri_per_potenza(int potenza)
+double lidarsim_giri_per_potenza(int power)
 {
-	if (potenza < 15)
+	if (power < 15)
 		return 0;
-	return par.lidar_a * potenza + par.lidar_b;
+	return par.lidar_a * power + par.lidar_b;
 }
 
 static void accoda(lidarsim_t *l, double t, const void *b, size_t n)
@@ -36,8 +36,8 @@ static void accoda(lidarsim_t *l, double t, const void *b, size_t n)
 
 static void manda(lidarsim_t *l, double t, uint8_t cmd, const void *param, size_t n)
 {
-	uint8_t p[LIDAR_MAX_PACCHETTO];
-	size_t k = lidar_componi(1, 0x61, cmd, param, n, p, sizeof p);
+	uint8_t p[LIDAR_MAX_PACKET];
+	size_t k = lidar_build_packet(1, 0x61, cmd, param, n, p, sizeof p);
 	if (k) {
 		accoda(l, t, p, k);
 		l->pacchetti++;
@@ -84,11 +84,11 @@ static double rumore(double d)
 /* Un settore completo: n punti a partire dall'angolo `s` x 22,5°. */
 static void settore(lidarsim_t *l, const mondo_t *m, double t, int s, double x, double y, double dir)
 {
-	int n = (int)lround(par.lidar_misure_s / (16 * l->giri_s));
+	int n = (int)lround(par.lidar_misure_s / (16 * l->rev_s));
 	if (n > MAX_PUNTI_SETTORE) n = MAX_PUNTI_SETTORE;
 	if (n < 1) n = 1;
 	uint8_t p[5 + 3 * MAX_PUNTI_SETTORE];
-	int vel = (int)lround(l->giri_s / 0.05);
+	int vel = (int)lround(l->rev_s / 0.05);
 	p[0] = (uint8_t)(vel > 255 ? 255 : vel);
 	p[1] = 0;
 	p[2] = 82;                                   /* il campo misterioso "0,82" del lidar vero */
@@ -102,37 +102,37 @@ static void settore(lidarsim_t *l, const mondo_t *m, double t, int s, double x, 
 		/* triangolatore: il raggio misurato parte LIDAR_OTTICO a destra del centro di rotazione */
 		double ox = lx + LIDAR_OTTICO * sin(ang), oy = ly - LIDAR_OTTICO * cos(ang);
 		double d = mondo_raggio(m, ox, oy, ang, LIDAR_ALTEZZA, par.lidar_portata);
-		int intensita = 0, quarti = 0;
+		int intensity = 0, quarti = 0;
 		int eco = d >= DIST_MIN && d <= par.lidar_portata;
 		if (eco && d < 2.0 && sim_caso(&l->seme) < par.lidar_buchi)
 			eco = 0;                                                    /* punto isolato senza eco */
 		if (eco) {
 			d += rumore(d) * sim_gauss(&l->seme);
 			quarti = (int)lround(d * 4000);
-			intensita = (int)lround(par.lidar_intensita + par.lidar_intensita_dev * sim_gauss(&l->seme));
-			if (intensita < 10) intensita = 10;
-			if (intensita > 255) intensita = 255;
+			intensity = (int)lround(par.lidar_intensita + par.lidar_intensita_dev * sim_gauss(&l->seme));
+			if (intensity < 10) intensity = 10;
+			if (intensity > 255) intensity = 255;
 			if (l->n_corrente < LIDARSIM_MAX_PUNTI) {
 				l->cor_x[l->n_corrente] = (float)(ox + d * cos(ang));
 				l->cor_y[l->n_corrente] = (float)(oy + d * sin(ang));
 				l->n_corrente++;
 			}
 		}
-		p[5 + 3 * i] = (uint8_t)intensita;
+		p[5 + 3 * i] = (uint8_t)intensity;
 		p[6 + 3 * i] = (uint8_t)(quarti >> 8);
 		p[7 + 3 * i] = (uint8_t)quarti;
 	}
-	manda(l, t, LIDAR_SCANSIONE_NUOVA, p, 5 + 3 * (size_t)n);
+	manda(l, t, LIDAR_SCAN_NEW, p, 5 + 3 * (size_t)n);
 	if (s == 15) {
 		memcpy(l->giro_x, l->cor_x, sizeof(float) * (size_t)l->n_corrente);
 		memcpy(l->giro_y, l->cor_y, sizeof(float) * (size_t)l->n_corrente);
 		l->n_giro = l->n_corrente;
 		l->n_corrente = 0;
-		l->giri++;
+		l->revolutions++;
 	}
 }
 
-void lidarsim_avanza(lidarsim_t *l, const mondo_t *m, double t, int alimentato, int potenza,
+void lidarsim_avanza(lidarsim_t *l, const mondo_t *m, double t, int alimentato, int power,
                      double x, double y, double dir)
 {
 	if (alimentato && !l->alimentato) {
@@ -144,45 +144,45 @@ void lidarsim_avanza(lidarsim_t *l, const mondo_t *m, double t, int alimentato, 
 		l->n_giro = 0;
 	}
 	l->alimentato = alimentato;
-	double ultimo = l->t_simulato;
-	if (t < ultimo)
-		ultimo = t;
-	while (ultimo < t - 1e-9) {
-		double dt = fmin(0.001, t - ultimo);
-		ultimo += dt;
-		double obiettivo = alimentato ? lidarsim_giri_per_potenza(potenza) : 0;
-		double tau = obiettivo <= 0 ? par.lidar_tau_spento : obiettivo > l->giri_s ? par.lidar_tau_su : par.lidar_tau_giu;
-		l->giri_s += (obiettivo - l->giri_s) * (1 - exp(-dt / tau));
+	double last = l->t_simulato;
+	if (t < last)
+		last = t;
+	while (last < t - 1e-9) {
+		double dt = fmin(0.001, t - last);
+		last += dt;
+		double target = alimentato ? lidarsim_giri_per_potenza(power) : 0;
+		double tau = target <= 0 ? par.lidar_tau_spento : target > l->rev_s ? par.lidar_tau_su : par.lidar_tau_giu;
+		l->rev_s += (target - l->rev_s) * (1 - exp(-dt / tau));
 		if (!alimentato)
 			continue;
-		if (l->stato_avvio == 1 && ultimo - l->t_accensione > 0.3) {
+		if (l->stato_avvio == 1 && last - l->t_accensione > 0.3) {
 			static const char testo[] = "LDS3 lidar (simulato): avvio\r\n";
-			accoda(l, ultimo, testo, sizeof testo - 1);
+			accoda(l, last, testo, sizeof testo - 1);
 			l->stato_avvio = 2;
 		}
-		if (l->stato_avvio == 2 && ultimo - l->t_accensione > 0.5) {
-			static const char versione[] = "2030313958425713002F0024LDS3_NOR_1805041536";
-			manda(l, ultimo, LIDAR_VERSIONE, versione, sizeof versione - 1);
+		if (l->stato_avvio == 2 && last - l->t_accensione > 0.5) {
+			static const char version[] = "2030313958425713002F0024LDS3_NOR_1805041536";
+			manda(l, last, LIDAR_VERSION, version, sizeof version - 1);
 			l->stato_avvio = 3;
 		}
 		if (l->stato_avvio < 3)
 			continue;
-		if (l->giri_s < 4.0) {
+		if (l->rev_s < 4.0) {
 			l->n_corrente = 0;
-			if (ultimo >= l->prossimo_ae) {
-				uint8_t v = (uint8_t)lround(l->giri_s / 0.05);
-				manda(l, ultimo, LIDAR_VELOCITA, &v, 1);
-				l->prossimo_ae = ultimo + 0.1;
+			if (last >= l->prossimo_ae) {
+				uint8_t v = (uint8_t)lround(l->rev_s / 0.05);
+				manda(l, last, LIDAR_SPEED, &v, 1);
+				l->prossimo_ae = last + 0.1;
 			}
 			continue;
 		}
-		int prima = (int)(l->angolo / 22.5);
-		l->angolo += l->giri_s * 360 * dt;
-		if (l->angolo >= 360)
-			l->angolo -= 360;
-		int dopo = (int)(l->angolo / 22.5);
+		int prima = (int)(l->angle / 22.5);
+		l->angle += l->rev_s * 360 * dt;
+		if (l->angle >= 360)
+			l->angle -= 360;
+		int dopo = (int)(l->angle / 22.5);
 		if (dopo != prima)
-			settore(l, m, ultimo, prima, x, y, dir);
+			settore(l, m, last, prima, x, y, dir);
 	}
-	l->t_simulato = ultimo;
+	l->t_simulato = last;
 }

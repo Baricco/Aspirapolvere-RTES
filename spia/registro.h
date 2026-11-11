@@ -33,7 +33,7 @@ enum { REG_PROTO_GREZZO = 0, REG_PROTO_GD32 = 1, REG_PROTO_LIDAR = 2, REG_PROTO_
 typedef struct {
 	uint8_t id;
 	uint8_t protocollo;
-	char nome[REG_MAX_NOME];
+	char name[REG_MAX_NOME];
 	char dispositivo[REG_MAX_NOME * 2];
 } reg_canale_t;
 
@@ -45,14 +45,14 @@ typedef struct {
 typedef struct {
 	int64_t tempo_ns;
 	uint8_t canale;
-	uint8_t direzione;
+	uint8_t direction;
 	uint16_t n;
-	uint8_t dati[REG_MAX_BLOCCO];
+	uint8_t data[REG_MAX_BLOCCO];
 } reg_record_t;
 
 /* Scrittura. Ritornano 0 oppure -1 (errore di scrittura, vedi errno). */
 int reg_scrivi_intestazione(FILE *f, const reg_intestazione_t *h);
-int reg_scrivi_record(FILE *f, int64_t tempo_ns, uint8_t canale, uint8_t direzione, const void *dati, uint16_t n);
+int reg_scrivi_record(FILE *f, int64_t tempo_ns, uint8_t canale, uint8_t direction, const void *data, uint16_t n);
 
 /* Lettura. Ritornano 1 = letto, 0 = fine del file, -1 = file rovinato o troncato a metà record. */
 int reg_leggi_intestazione(FILE *f, reg_intestazione_t *h);

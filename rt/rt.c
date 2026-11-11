@@ -37,70 +37,70 @@ int rt_mutex_init(pthread_mutex_t *m)
 	return r;
 }
 
-static void stats_azzera(rt_stats_t *s)
+static void stats_reset(rt_stats_t *s)
 {
 	memset(s, 0, sizeof(*s));
-	s->latenza_min_ns = INT64_MAX;
-	s->esec_min_ns = INT64_MAX;
+	s->latency_min_ns = INT64_MAX;
+	s->exec_min_ns = INT64_MAX;
 }
 
-static int consenti_senza_rt;
+static int allow_without_rt;
 
-void rt_consenti_senza_privilegi(int si)
+void rt_allow_without_privileges(int enable)
 {
-	consenti_senza_rt = si;
+	allow_without_rt = enable;
 }
 
-static int64_t cpu_del_thread(void)
+static int64_t thread_cpu_ns(void)
 {
 	struct timespec ts;
 	clock_gettime(CLOCK_THREAD_CPUTIME_ID, &ts);
 	return ts.tv_sec * RT_NS_PER_S + ts.tv_nsec;
 }
 
-static void stats_aggiorna(rt_task_t *t, int64_t rilascio, int64_t inizio, int64_t fine, int64_t cpu)
+static void stats_update(rt_task_t *t, int64_t release, int64_t start, int64_t end, int64_t cpu)
 {
 	rt_stats_t *s = &t->stats;
-	int64_t latenza = inizio - rilascio;
-	int64_t esecuzione = fine - inizio;
-	int64_t risposta = fine - rilascio;
+	int64_t latency = start - release;
+	int64_t execution = end - start;
+	int64_t response = end - release;
 
 	s->job++;
-	if (risposta > t->cfg.deadline_ns) {
-		s->deadline_mancate++;
-		if (s->deadline_mancate == 1) {
-			t->prima_mancata.job = s->job;
-			t->prima_mancata.latenza_ns = latenza;
-			t->prima_mancata.esecuzione_ns = esecuzione;
-			t->prima_mancata.cpu_ns = cpu;
-			t->prima_mancata.risposta_ns = risposta;
+	if (response > t->cfg.deadline_ns) {
+		s->missed_deadlines++;
+		if (s->missed_deadlines == 1) {
+			t->first_miss.job = s->job;
+			t->first_miss.latency_ns = latency;
+			t->first_miss.execution_ns = execution;
+			t->first_miss.cpu_ns = cpu;
+			t->first_miss.response_ns = response;
 		}
-		atomic_fetch_add(&t->mancate_di_fila, 1);
-		atomic_fetch_add(&t->mancate_totali, 1);
+		atomic_fetch_add(&t->consecutive_misses, 1);
+		atomic_fetch_add(&t->total_misses, 1);
 	} else {
-		atomic_store(&t->mancate_di_fila, 0);
+		atomic_store(&t->consecutive_misses, 0);
 	}
 
-	if (latenza < s->latenza_min_ns) s->latenza_min_ns = latenza;
-	if (latenza > s->latenza_max_ns) s->latenza_max_ns = latenza;
-	s->latenza_somma_ns += latenza;
+	if (latency < s->latency_min_ns) s->latency_min_ns = latency;
+	if (latency > s->latency_max_ns) s->latency_max_ns = latency;
+	s->latency_sum_ns += latency;
 
-	if (esecuzione < s->esec_min_ns) s->esec_min_ns = esecuzione;
-	if (esecuzione > s->esec_max_ns) s->esec_max_ns = esecuzione;
-	s->esec_somma_ns += esecuzione;
+	if (execution < s->exec_min_ns) s->exec_min_ns = execution;
+	if (execution > s->exec_max_ns) s->exec_max_ns = execution;
+	s->exec_sum_ns += execution;
 
-	if (risposta > s->risposta_max_ns) s->risposta_max_ns = risposta;
+	if (response > s->response_max_ns) s->response_max_ns = response;
 	if (cpu > s->cpu_max_ns) s->cpu_max_ns = cpu;
 
-	if (t->cfg.campioni && s->n_campioni < t->cfg.max_campioni) {
-		t->cfg.campioni[s->n_campioni].latenza_ns = latenza;
-		t->cfg.campioni[s->n_campioni].esecuzione_ns = esecuzione;
-		s->n_campioni++;
+	if (t->cfg.samples && s->n_samples < t->cfg.max_samples) {
+		t->cfg.samples[s->n_samples].latency_ns = latency;
+		t->cfg.samples[s->n_samples].execution_ns = execution;
+		s->n_samples++;
 	}
 }
 
 /* Fissa il thread chiamante al core indicato. */
-static int fissa_al_core(int cpu)
+static int pin_to_core(int cpu)
 {
 	cpu_set_t set;
 	CPU_ZERO(&set);
@@ -109,255 +109,255 @@ static int fissa_al_core(int cpu)
 }
 
 /* Il corpo di ogni task: configura il thread, poi esegue il ciclo periodico. */
-static void *ciclo_task(void *arg)
+static void *task_loop(void *arg)
 {
 	rt_task_t *t = arg;
 
 	/* L'affinità si imposta dall'interno del thread, prima del primo job:
 	 * musl non ha pthread_attr_setaffinity_np. Il thread nasce già SCHED_FIFO,
 	 * quindi da qui in poi non può essere interrotto da task meno prioritari. */
-	t->errore_avvio = (t->cfg.cpu == RT_CPU_QUALSIASI) ? 0 : fissa_al_core(t->cfg.cpu);
-	sem_post(&t->avviato);
-	if (t->errore_avvio != 0)
+	t->start_error = (t->cfg.cpu == RT_CPU_ANY) ? 0 : pin_to_core(t->cfg.cpu);
+	sem_post(&t->started);
+	if (t->start_error != 0)
 		return NULL;
 
-	int64_t rilascio = t->primo_rilascio_ns;
+	int64_t release = t->first_release_ns;
 	while (!atomic_load(&t->stop)) {
-		if (t->cfg.sporadico) {
-			/* aspetta la sveglia (rt_task_sveglia); il rilascio è l'istante in cui è arrivata */
-			while (sem_wait(&t->sveglia) != 0)
+		if (t->cfg.sporadic) {
+			/* aspetta la sveglia (rt_task_wake); il rilascio è l'istante in cui è arrivata */
+			while (sem_wait(&t->wakeup) != 0)
 				;
 			if (atomic_load(&t->stop))
 				break;
-			rilascio = atomic_exchange(&t->rilascio_pendente_ns, 0);
-			if (rilascio == 0)
-				rilascio = rt_adesso();
+			release = atomic_exchange(&t->pending_release_ns, 0);
+			if (release == 0)
+				release = rt_now();
 		} else {
-			rt_dormi_fino_a(rilascio);
+			rt_sleep_until(release);
 		}
-		int64_t inizio = rt_adesso();
-		atomic_store(&t->job_iniziato_ns, inizio);
-		int64_t cpu_inizio = cpu_del_thread();
+		int64_t start = rt_now();
+		atomic_store(&t->job_started_ns, start);
+		int64_t cpu_start = thread_cpu_ns();
 		t->cfg.job(t->cfg.arg);
-		int64_t cpu = cpu_del_thread() - cpu_inizio;
-		int64_t fine = rt_adesso();
-		atomic_store(&t->job_iniziato_ns, 0);
-		atomic_store(&t->battito_ns, fine);
-		stats_aggiorna(t, rilascio, inizio, fine, cpu);
+		int64_t cpu = thread_cpu_ns() - cpu_start;
+		int64_t end = rt_now();
+		atomic_store(&t->job_started_ns, 0);
+		atomic_store(&t->heartbeat_ns, end);
+		stats_update(t, release, start, end, cpu);
 
 		if (t->cfg.max_job && t->stats.job >= t->cfg.max_job)
 			break;
-		if (t->cfg.sporadico)
+		if (t->cfg.sporadic)
 			continue;
 		/* Prossimo rilascio: sempre periodo dopo il precedente, non dopo
 		 * "adesso". Se un job sfora il periodo, il successivo parte subito
 		 * (come vTaskDelayUntil): i ritardi non si accumulano in deriva. */
-		rilascio += t->cfg.periodo_ns;
+		release += t->cfg.period_ns;
 	}
 	return NULL;
 }
 
-int rt_task_avvia(rt_task_t *t, const rt_task_cfg_t *cfg, int64_t istante_zero_ns)
+int rt_task_start(rt_task_t *t, const rt_task_cfg_t *cfg, int64_t zero_time_ns)
 {
-	if (!cfg->job || cfg->periodo_ns <= 0 || cfg->deadline_ns < 0 || cfg->fase_ns < 0 ||
-	    cfg->priorita < RT_PRIO_MIN || cfg->priorita > RT_PRIO_MAX ||
-	    (cfg->cpu != RT_CPU_QUALSIASI && (cfg->cpu < 0 || cfg->cpu >= CPU_SETSIZE)))
+	if (!cfg->job || cfg->period_ns <= 0 || cfg->deadline_ns < 0 || cfg->phase_ns < 0 ||
+	    cfg->priority < RT_PRIO_MIN || cfg->priority > RT_PRIO_MAX ||
+	    (cfg->cpu != RT_CPU_ANY && (cfg->cpu < 0 || cfg->cpu >= CPU_SETSIZE)))
 		return EINVAL;
 
 	memset(t, 0, sizeof(*t));
 	t->cfg = *cfg;
 	if (t->cfg.deadline_ns == 0)
-		t->cfg.deadline_ns = t->cfg.periodo_ns;
-	t->primo_rilascio_ns = istante_zero_ns + t->cfg.fase_ns;
+		t->cfg.deadline_ns = t->cfg.period_ns;
+	t->first_release_ns = zero_time_ns + t->cfg.phase_ns;
 	atomic_init(&t->stop, 0);
-	atomic_init(&t->rilascio_pendente_ns, 0);
-	atomic_init(&t->attivazioni_perse, 0);
-	atomic_init(&t->battito_ns, t->primo_rilascio_ns);
-	atomic_init(&t->job_iniziato_ns, 0);
-	atomic_init(&t->mancate_di_fila, 0);
-	atomic_init(&t->mancate_totali, 0);
-	stats_azzera(&t->stats);
-	sem_init(&t->avviato, 0, 0);
-	sem_init(&t->sveglia, 0, 0);
+	atomic_init(&t->pending_release_ns, 0);
+	atomic_init(&t->lost_activations, 0);
+	atomic_init(&t->heartbeat_ns, t->first_release_ns);
+	atomic_init(&t->job_started_ns, 0);
+	atomic_init(&t->consecutive_misses, 0);
+	atomic_init(&t->total_misses, 0);
+	stats_reset(&t->stats);
+	sem_init(&t->started, 0, 0);
+	sem_init(&t->wakeup, 0, 0);
 
 	/* Politica e priorità vanno dichiarate negli attributi con
 	 * PTHREAD_EXPLICIT_SCHED: altrimenti il thread le eredita dal creatore
 	 * (di solito SCHED_OTHER) e quelle negli attributi vengono ignorate. */
 	pthread_attr_t a;
-	struct sched_param p = { .sched_priority = cfg->priorita };
+	struct sched_param p = { .sched_priority = cfg->priority };
 	int r = pthread_attr_init(&a);
 	if (r == 0) r = pthread_attr_setinheritsched(&a, PTHREAD_EXPLICIT_SCHED);
 	if (r == 0) r = pthread_attr_setschedpolicy(&a, SCHED_FIFO);
 	if (r == 0) r = pthread_attr_setschedparam(&a, &p);
-	if (r == 0) r = pthread_attr_setstacksize(&a, cfg->stack_byte ? cfg->stack_byte : RT_STACK_DEFAULT);
-	if (r == 0) r = pthread_create(&t->thread, &a, ciclo_task, t);
-	if (r == EPERM && consenti_senza_rt) {
+	if (r == 0) r = pthread_attr_setstacksize(&a, cfg->stack_bytes ? cfg->stack_bytes : RT_STACK_DEFAULT);
+	if (r == 0) r = pthread_create(&t->thread, &a, task_loop, t);
+	if (r == EPERM && allow_without_rt) {
 		/* niente SCHED_FIFO (PC senza permessi): thread normale, solo per provare la logica */
 		pthread_attr_setinheritsched(&a, PTHREAD_INHERIT_SCHED);
-		r = pthread_create(&t->thread, &a, ciclo_task, t);
+		r = pthread_create(&t->thread, &a, task_loop, t);
 		if (r == 0) {
-			static int detto;
-			t->senza_rt = 1;
-			if (!detto++)
+			static int told;
+			t->without_rt = 1;
+			if (!told++)
 				fprintf(stderr, "rt: niente permessi per SCHED_FIFO, i task girano con lo scheduling normale "
 				                "(va bene solo per provare la logica, i tempi non valgono)\n");
 		}
 	}
 	pthread_attr_destroy(&a);
 	if (r != 0) {
-		sem_destroy(&t->avviato);
-		sem_destroy(&t->sveglia);
+		sem_destroy(&t->started);
+		sem_destroy(&t->wakeup);
 		return r;
 	}
 
 	/* Aspetta che il thread abbia impostato l'affinità, così un errore
 	 * (es. core inesistente) viene riportato subito al chiamante. */
-	sem_wait(&t->avviato);
-	sem_destroy(&t->avviato);
-	if (t->errore_avvio != 0) {
+	sem_wait(&t->started);
+	sem_destroy(&t->started);
+	if (t->start_error != 0) {
 		pthread_join(t->thread, NULL);
-		sem_destroy(&t->sveglia);
-		return t->errore_avvio;
+		sem_destroy(&t->wakeup);
+		return t->start_error;
 	}
-	t->attivo = 1;
+	t->active = 1;
 	return 0;
 }
 
-void rt_task_attendi(rt_task_t *t)
+void rt_task_join(rt_task_t *t)
 {
-	if (!t->attivo)
+	if (!t->active)
 		return;
 	pthread_join(t->thread, NULL);
-	sem_destroy(&t->sveglia);
-	t->attivo = 0;
+	sem_destroy(&t->wakeup);
+	t->active = 0;
 }
 
-void rt_task_ferma(rt_task_t *t)
+void rt_task_stop(rt_task_t *t)
 {
 	atomic_store(&t->stop, 1);
-	if (t->attivo && t->cfg.sporadico)
-		sem_post(&t->sveglia);
-	rt_task_attendi(t);
+	if (t->active && t->cfg.sporadic)
+		sem_post(&t->wakeup);
+	rt_task_join(t);
 }
 
-int rt_task_sveglia(rt_task_t *t, int64_t rilascio_ns)
+int rt_task_wake(rt_task_t *t, int64_t release_ns)
 {
 	int64_t zero = 0;
-	if (!atomic_compare_exchange_strong(&t->rilascio_pendente_ns, &zero, rilascio_ns ? rilascio_ns : 1)) {
-		atomic_fetch_add(&t->attivazioni_perse, 1);
+	if (!atomic_compare_exchange_strong(&t->pending_release_ns, &zero, release_ns ? release_ns : 1)) {
+		atomic_fetch_add(&t->lost_activations, 1);
 		return 0;
 	}
-	sem_post(&t->sveglia);
+	sem_post(&t->wakeup);
 	return 1;
 }
 
-int rt_task_bloccato(rt_task_t *t, int64_t adesso, int64_t soglia_ns)
+int rt_task_is_stuck(rt_task_t *t, int64_t now, int64_t threshold_ns)
 {
-	int64_t iniziato = atomic_load(&t->job_iniziato_ns);
-	if (iniziato && adesso - iniziato > soglia_ns)
+	int64_t started_ns = atomic_load(&t->job_started_ns);
+	if (started_ns && now - started_ns > threshold_ns)
 		return 1;
-	if (t->cfg.sporadico) {
-		int64_t pendente = atomic_load(&t->rilascio_pendente_ns);
-		return pendente && adesso - pendente > soglia_ns;
+	if (t->cfg.sporadic) {
+		int64_t pending_ns = atomic_load(&t->pending_release_ns);
+		return pending_ns && now - pending_ns > threshold_ns;
 	}
-	return adesso - atomic_load(&t->battito_ns) > t->cfg.periodo_ns + soglia_ns;
+	return now - atomic_load(&t->heartbeat_ns) > t->cfg.period_ns + threshold_ns;
 }
 
-int rt_priorita_rm(rt_task_cfg_t *cfg[], int n, int prio_max)
+int rt_priority_rm(rt_task_cfg_t *cfg[], int n, int prio_max)
 {
 	/* ordina per periodo crescente (insertion sort su una copia dei puntatori: n è piccolo) */
-	rt_task_cfg_t *ord[64];
+	rt_task_cfg_t *sorted[64];
 	if (n < 0 || n > 64)
 		return EINVAL;
 	for (int i = 0; i < n; i++) {
 		int j = i;
-		while (j > 0 && ord[j - 1]->periodo_ns > cfg[i]->periodo_ns) {
-			ord[j] = ord[j - 1];
+		while (j > 0 && sorted[j - 1]->period_ns > cfg[i]->period_ns) {
+			sorted[j] = sorted[j - 1];
 			j--;
 		}
-		ord[j] = cfg[i];
+		sorted[j] = cfg[i];
 	}
 	int prio = prio_max;
 	for (int i = 0; i < n; i++) {
-		if (i > 0 && ord[i]->periodo_ns != ord[i - 1]->periodo_ns)
+		if (i > 0 && sorted[i]->period_ns != sorted[i - 1]->period_ns)
 			prio--;
 		if (prio < RT_PRIO_MIN)
 			return EINVAL;
-		ord[i]->priorita = prio;
+		sorted[i]->priority = prio;
 	}
 	return 0;
 }
 
-void rt_stats_stampa(const rt_task_t *t)
+void rt_stats_print(const rt_task_t *t)
 {
 	const rt_stats_t *s = &t->stats;
 	if (s->job == 0) {
-		printf("%s: nessun job eseguito\n", t->cfg.nome ? t->cfg.nome : "task");
+		printf("%s: nessun job eseguito\n", t->cfg.name ? t->cfg.name : "task");
 		return;
 	}
 	printf("%s: prio %d, cpu %d, periodo %.1f us, deadline %.1f us\n",
-	       t->cfg.nome ? t->cfg.nome : "task", t->cfg.priorita, t->cfg.cpu,
-	       t->cfg.periodo_ns / 1e3, t->cfg.deadline_ns / 1e3);
+	       t->cfg.name ? t->cfg.name : "task", t->cfg.priority, t->cfg.cpu,
+	       t->cfg.period_ns / 1e3, t->cfg.deadline_ns / 1e3);
 	printf("  job %llu, deadline mancate %llu\n",
-	       (unsigned long long)s->job, (unsigned long long)s->deadline_mancate);
+	       (unsigned long long)s->job, (unsigned long long)s->missed_deadlines);
 	printf("  latenza    min %8.1f  media %8.1f  max %8.1f us\n",
-	       s->latenza_min_ns / 1e3, (double)s->latenza_somma_ns / s->job / 1e3,
-	       s->latenza_max_ns / 1e3);
+	       s->latency_min_ns / 1e3, (double)s->latency_sum_ns / s->job / 1e3,
+	       s->latency_max_ns / 1e3);
 	printf("  esecuzione min %8.1f  media %8.1f  max %8.1f us\n",
-	       s->esec_min_ns / 1e3, (double)s->esec_somma_ns / s->job / 1e3,
-	       s->esec_max_ns / 1e3);
-	printf("  risposta max %.1f us, CPU max di un job %.1f us\n", s->risposta_max_ns / 1e3, s->cpu_max_ns / 1e3);
+	       s->exec_min_ns / 1e3, (double)s->exec_sum_ns / s->job / 1e3,
+	       s->exec_max_ns / 1e3);
+	printf("  risposta max %.1f us, CPU max di un job %.1f us\n", s->response_max_ns / 1e3, s->cpu_max_ns / 1e3);
 }
 
 /* ------------------------------------------------------------------------------------------ task aperiodico --- */
 
 /* Il corpo del task aperiodico: aspetta una sveglia, esegue il job, misura. */
-static void *ciclo_aperiodico(void *arg)
+static void *aperiodic_loop(void *arg)
 {
-	rt_aperiodico_t *a = arg;
+	rt_aperiodic_t *a = arg;
 
-	a->errore_avvio = (a->cfg.cpu == RT_CPU_QUALSIASI) ? 0 : fissa_al_core(a->cfg.cpu);
-	sem_post(&a->avviato);
-	if (a->errore_avvio != 0)
+	a->start_error = (a->cfg.cpu == RT_CPU_ANY) ? 0 : pin_to_core(a->cfg.cpu);
+	sem_post(&a->started);
+	if (a->start_error != 0)
 		return NULL;
 
 	while (!atomic_load(&a->stop)) {
-		while (sem_wait(&a->sveglia) != 0)
+		while (sem_wait(&a->wakeup) != 0)
 			;
 		if (atomic_load(&a->stop))
 			break;
 		/* azzerare la richiesta PRIMA del job: una sveglia che arriva durante il job ne fa partire un altro dopo */
-		int64_t richiesta = atomic_exchange(&a->richiesta_ns, 0);
-		if (richiesta == 0)
+		int64_t request = atomic_exchange(&a->request_ns, 0);
+		if (request == 0)
 			continue;
-		int64_t inizio = rt_adesso();
-		int64_t cpu_inizio = cpu_del_thread();
+		int64_t start = rt_now();
+		int64_t cpu_start = thread_cpu_ns();
 		a->cfg.job(a->cfg.arg);
-		int64_t cpu = cpu_del_thread() - cpu_inizio;
-		int64_t fine = rt_adesso();
+		int64_t cpu = thread_cpu_ns() - cpu_start;
+		int64_t end = rt_now();
 
-		rt_aperiodico_stats_t *s = &a->stats;
+		rt_aperiodic_stats_t *s = &a->stats;
 		s->job++;
-		s->esec_somma_ns += fine - inizio;
-		if (fine - inizio > s->esec_max_ns) s->esec_max_ns = fine - inizio;
+		s->exec_sum_ns += end - start;
+		if (end - start > s->exec_max_ns) s->exec_max_ns = end - start;
 		if (cpu > s->cpu_max_ns) s->cpu_max_ns = cpu;
-		if (fine - richiesta > s->risposta_max_ns) s->risposta_max_ns = fine - richiesta;
+		if (end - request > s->response_max_ns) s->response_max_ns = end - request;
 	}
 	return NULL;
 }
 
-int rt_aperiodico_avvia(rt_aperiodico_t *a, const rt_aperiodico_cfg_t *cfg)
+int rt_aperiodic_start(rt_aperiodic_t *a, const rt_aperiodic_cfg_t *cfg)
 {
-	if (!cfg->job || (cfg->cpu != RT_CPU_QUALSIASI && (cfg->cpu < 0 || cfg->cpu >= CPU_SETSIZE)))
+	if (!cfg->job || (cfg->cpu != RT_CPU_ANY && (cfg->cpu < 0 || cfg->cpu >= CPU_SETSIZE)))
 		return EINVAL;
 
 	memset(a, 0, sizeof(*a));
 	a->cfg = *cfg;
 	atomic_init(&a->stop, 0);
-	atomic_init(&a->richiesta_ns, 0);
-	atomic_init(&a->sveglie, 0);
-	sem_init(&a->avviato, 0, 0);
-	sem_init(&a->sveglia, 0, 0);
+	atomic_init(&a->request_ns, 0);
+	atomic_init(&a->wakeups, 0);
+	sem_init(&a->started, 0, 0);
+	sem_init(&a->wakeup, 0, 0);
 
 	/* scheduling normale dichiarato esplicitamente: chi lo crea (il main) potrebbe essere SCHED_FIFO */
 	pthread_attr_t at;
@@ -366,57 +366,57 @@ int rt_aperiodico_avvia(rt_aperiodico_t *a, const rt_aperiodico_cfg_t *cfg)
 	if (r == 0) r = pthread_attr_setinheritsched(&at, PTHREAD_EXPLICIT_SCHED);
 	if (r == 0) r = pthread_attr_setschedpolicy(&at, SCHED_OTHER);
 	if (r == 0) r = pthread_attr_setschedparam(&at, &p);
-	if (r == 0) r = pthread_attr_setstacksize(&at, cfg->stack_byte ? cfg->stack_byte : RT_STACK_DEFAULT);
-	if (r == 0) r = pthread_create(&a->thread, &at, ciclo_aperiodico, a);
+	if (r == 0) r = pthread_attr_setstacksize(&at, cfg->stack_bytes ? cfg->stack_bytes : RT_STACK_DEFAULT);
+	if (r == 0) r = pthread_create(&a->thread, &at, aperiodic_loop, a);
 	pthread_attr_destroy(&at);
 	if (r != 0) {
-		sem_destroy(&a->avviato);
-		sem_destroy(&a->sveglia);
+		sem_destroy(&a->started);
+		sem_destroy(&a->wakeup);
 		return r;
 	}
 
-	sem_wait(&a->avviato);
-	sem_destroy(&a->avviato);
-	if (a->errore_avvio != 0) {
+	sem_wait(&a->started);
+	sem_destroy(&a->started);
+	if (a->start_error != 0) {
 		pthread_join(a->thread, NULL);
-		sem_destroy(&a->sveglia);
-		return a->errore_avvio;
+		sem_destroy(&a->wakeup);
+		return a->start_error;
 	}
-	a->attivo = 1;
+	a->active = 1;
 	return 0;
 }
 
-void rt_aperiodico_sveglia(rt_aperiodico_t *a)
+void rt_aperiodic_wake(rt_aperiodic_t *a)
 {
-	atomic_fetch_add(&a->sveglie, 1);
+	atomic_fetch_add(&a->wakeups, 1);
 	/* solo la prima sveglia non servita fa il sem_post: le altre si uniscono a lei */
 	int64_t zero = 0;
-	if (atomic_compare_exchange_strong(&a->richiesta_ns, &zero, rt_adesso()))
-		sem_post(&a->sveglia);
+	if (atomic_compare_exchange_strong(&a->request_ns, &zero, rt_now()))
+		sem_post(&a->wakeup);
 }
 
-void rt_aperiodico_ferma(rt_aperiodico_t *a)
+void rt_aperiodic_stop(rt_aperiodic_t *a)
 {
-	if (!a->attivo)
+	if (!a->active)
 		return;
 	atomic_store(&a->stop, 1);
-	sem_post(&a->sveglia);
+	sem_post(&a->wakeup);
 	pthread_join(a->thread, NULL);
-	sem_destroy(&a->sveglia);
-	a->stats.sveglie = atomic_load(&a->sveglie);
-	a->attivo = 0;
+	sem_destroy(&a->wakeup);
+	a->stats.wakeups = atomic_load(&a->wakeups);
+	a->active = 0;
 }
 
-void rt_aperiodico_stampa(const rt_aperiodico_t *a)
+void rt_aperiodic_print(const rt_aperiodic_t *a)
 {
-	const rt_aperiodico_stats_t *s = &a->stats;
-	printf("%s: aperiodico, cpu %d, scheduling normale\n", a->cfg.nome ? a->cfg.nome : "task", a->cfg.cpu);
+	const rt_aperiodic_stats_t *s = &a->stats;
+	printf("%s: aperiodico, cpu %d, scheduling normale\n", a->cfg.name ? a->cfg.name : "task", a->cfg.cpu);
 	if (s->job == 0) {
-		printf("  nessun job eseguito (sveglie %llu)\n", (unsigned long long)s->sveglie);
+		printf("  nessun job eseguito (sveglie %llu)\n", (unsigned long long)s->wakeups);
 		return;
 	}
-	printf("  job %llu, sveglie %llu\n", (unsigned long long)s->job, (unsigned long long)s->sveglie);
+	printf("  job %llu, sveglie %llu\n", (unsigned long long)s->job, (unsigned long long)s->wakeups);
 	printf("  esecuzione media %.1f  max %.1f us, CPU max di un job %.1f us\n",
-	       (double)s->esec_somma_ns / s->job / 1e3, s->esec_max_ns / 1e3, s->cpu_max_ns / 1e3);
-	printf("  risposta max %.1f us (dalla sveglia alla fine del job)\n", s->risposta_max_ns / 1e3);
+	       (double)s->exec_sum_ns / s->job / 1e3, s->exec_max_ns / 1e3, s->cpu_max_ns / 1e3);
+	printf("  risposta max %.1f us (dalla sveglia alla fine del job)\n", s->response_max_ns / 1e3);
 }

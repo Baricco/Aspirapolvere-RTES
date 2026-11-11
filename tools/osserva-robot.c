@@ -29,7 +29,7 @@
 
 #define CELLE 65536
 #define PULITE (CELLE / 4)
-#define POSA_DIM 32        /* sizeof(drv_posa_t), driver/contatti.h */
+#define POSA_DIM 32        /* sizeof(drv_pose_t), driver/contacts.h */
 
 static double adesso_s(void)
 {
@@ -98,8 +98,8 @@ int main(int argc, char **argv)
 	snprintf(ultima_tmp, sizeof ultima_tmp, "%s.ultima.tmp", argv[2]);
 	double x = 0, y = 0, th = 0;
 	for (;;) {
-		int32_t stato, missione;
-		if (pread(fd, &stato, 4, a[STATO]) != 4 || pread(fd, &missione, 4, a[MISSIONE]) != 4)
+		int32_t status, missione;
+		if (pread(fd, &status, 4, a[STATO]) != 4 || pread(fd, &missione, 4, a[MISSIONE]) != 4)
 			break;                        /* il programma è finito */
 		uint32_t v, v2;
 		uint8_t buf[POSA_DIM];
@@ -110,12 +110,12 @@ int main(int argc, char **argv)
 			x = d[0], y = d[1], th = d[2];
 		}
 		double t = adesso_s() - t0;
-		fprintf(oss, "P %.2f %.3f %.3f %.1f %d %d\n", t, x, y, th * 57.29578, stato, missione);
+		fprintf(oss, "P %.2f %.3f %.3f %.1f %d %d\n", t, x, y, th * 57.29578, status, missione);
 		fflush(oss);
 		if (t >= prossima_mappa || t >= prossima_ultima) {
-			uint32_t versione = 0, asse = 0;
+			uint32_t version = 0, asse = 0;
 			uint8_t b = 0;
-			if (pread(fd, griglia, CELLE, a[MAPPA]) == CELLE && pread(fd, &versione, 4, a[MAPPA] + CELLE) == 4 &&
+			if (pread(fd, griglia, CELLE, a[MAPPA]) == CELLE && pread(fd, &version, 4, a[MAPPA] + CELLE) == 4 &&
 			    pread(fd, &b, 1, a[ASSE]) == 1 && pread(fd, pulite, PULITE, a[MASCHERA]) == PULITE) {
 				asse = b;
 				FILE *uscite[2] = { t >= prossima_mappa ? map : NULL, t >= prossima_ultima ? fopen(ultima_tmp, "wb") : NULL };
@@ -123,7 +123,7 @@ int main(int argc, char **argv)
 					if (!uscite[k])
 						continue;
 					fwrite(&t, sizeof t, 1, uscite[k]);
-					fwrite(&versione, 4, 1, uscite[k]);
+					fwrite(&version, 4, 1, uscite[k]);
 					fwrite(&asse, 4, 1, uscite[k]);
 					fwrite(griglia, 1, CELLE, uscite[k]);
 					fwrite(pulite, 1, PULITE, uscite[k]);

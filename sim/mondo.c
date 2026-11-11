@@ -22,10 +22,10 @@ static void aggiungi_muro(mondo_t *m, double x0, double y0, double x1, double y1
 	memset(o, 0, sizeof *o);
 	o->forma = OGG_RETTANGOLO;
 	o->muro = 1;
-	snprintf(o->nome, sizeof o->nome, "muro");
+	snprintf(o->name, sizeof o->name, "muro");
 	o->x = (x0 + x1) / 2;
 	o->y = (y0 + y1) / 2;
-	o->angolo = atan2(y1 - y0, x1 - x0);
+	o->angle = atan2(y1 - y0, x1 - x0);
 	o->larghezza = hypot(x1 - x0, y1 - y0);
 	o->profondita = spessore;
 	o->quota_a = QUOTA_MURO;
@@ -34,7 +34,7 @@ static void aggiungi_muro(mondo_t *m, double x0, double y0, double x1, double y1
 void mondo_nuovo(mondo_t *m, double w, double h)
 {
 	memset(m, 0, sizeof *m);
-	snprintf(m->nome, sizeof m->nome, "nuova");
+	snprintf(m->name, sizeof m->name, "nuova");
 	m->larghezza = w;
 	m->profondita = h;
 	const double s = 0.10;
@@ -54,11 +54,11 @@ static int coppia(const char *s, double *a, double *b)
 	return sscanf(s, "%lf,%lf", a, b) == 2;
 }
 
-int mondo_leggi_testo(mondo_t *m, const char *testo, char *errore, size_t dim)
+int mondo_leggi_testo(mondo_t *m, const char *testo, char *errore, size_t size)
 {
 	static mondo_t nuovo;          /* grande: non sullo stack */
 	memset(&nuovo, 0, sizeof nuovo);
-	snprintf(nuovo.nome, sizeof nuovo.nome, "senza nome");
+	snprintf(nuovo.name, sizeof nuovo.name, "senza nome");
 	nuovo.larghezza = nuovo.profondita = -1;
 	nuovo.robot_dir = M_PI / 2;
 	int ha_robot = 0, nriga = 0;
@@ -73,15 +73,15 @@ int mondo_leggi_testo(mondo_t *m, const char *testo, char *errore, size_t dim)
 		char *c = strchr(riga, '#');
 		if (c)
 			*c = 0;
-		char *salva, *tipo = strtok_r(riga, " \t\r", &salva);
-		if (!tipo)
+		char *salva, *type = strtok_r(riga, " \t\r", &salva);
+		if (!type)
 			continue;
 		oggetto_t o;
 		memset(&o, 0, sizeof o);
 		double da_x = 0, da_y = 0, a_x = 0, a_y = 0, spessore = 0.1, x = 0, y = 0, ang = 0;
 		double larg = -1, prof = -1, raggio = -1, qda = 0, qa = -1;
-		int ha_da = 0, ha_a = 0, in_punti = 0, ha_xy = 0;
-		char nome[MONDO_NOME] = "", gruppo[MONDO_NOME] = "";
+		int ha_da = 0, has_a = 0, in_punti = 0, ha_xy = 0;
+		char name[MONDO_NOME] = "", group[MONDO_NOME] = "";
 		for (char *t = strtok_r(NULL, " \t\r", &salva); t; t = strtok_r(NULL, " \t\r", &salva)) {
 			char *uguale = strchr(t, '=');
 			if (!uguale) {
@@ -90,14 +90,14 @@ int mondo_leggi_testo(mondo_t *m, const char *testo, char *errore, size_t dim)
 					o.n_punti++;
 					continue;
 				}
-				snprintf(errore, dim, "riga %d: \"%s\" non è chiave=valore", nriga, t);
+				snprintf(errore, size, "riga %d: \"%s\" non è chiave=valore", nriga, t);
 				return -1;
 			}
 			*uguale = 0;
 			const char *k = t, *v = uguale + 1;
 			in_punti = 0;
-			if (!strcmp(k, "nome")) snprintf(nome, sizeof nome, "%s", v);
-			else if (!strcmp(k, "gruppo")) snprintf(gruppo, sizeof gruppo, "%s", v);
+			if (!strcmp(k, "nome")) snprintf(name, sizeof name, "%s", v);
+			else if (!strcmp(k, "gruppo")) snprintf(group, sizeof group, "%s", v);
 			else if (!strcmp(k, "x")) { x = atof(v); ha_xy |= 1; }
 			else if (!strcmp(k, "y")) { y = atof(v); ha_xy |= 2; }
 			else if (!strcmp(k, "angolo")) ang = atof(v) * GRADI;
@@ -108,29 +108,29 @@ int mondo_leggi_testo(mondo_t *m, const char *testo, char *errore, size_t dim)
 			else if (!strcmp(k, "quota_a")) qa = atof(v);
 			else if (!strcmp(k, "spessore")) spessore = atof(v);
 			else if (!strcmp(k, "da")) ha_da = coppia(v, &da_x, &da_y);
-			else if (!strcmp(k, "a")) ha_a = coppia(v, &a_x, &a_y);
+			else if (!strcmp(k, "a")) has_a = coppia(v, &a_x, &a_y);
 			else if (!strcmp(k, "punti")) {
 				in_punti = 1;
 				if (*v && coppia(v, &o.px[0], &o.py[0]))
 					o.n_punti = 1;
 			} else {
-				snprintf(errore, dim, "riga %d: chiave sconosciuta \"%s\"", nriga, k);
+				snprintf(errore, size, "riga %d: chiave sconosciuta \"%s\"", nriga, k);
 				return -1;
 			}
 		}
-		if (!strcmp(tipo, "stanza")) {
-			if (nome[0])
-				snprintf(nuovo.nome, sizeof nuovo.nome, "%s", nome);
+		if (!strcmp(type, "stanza")) {
+			if (name[0])
+				snprintf(nuovo.name, sizeof nuovo.name, "%s", name);
 			nuovo.larghezza = larg;
 			nuovo.profondita = prof;
 			continue;
 		}
-		if (!strcmp(tipo, "robot") || !strcmp(tipo, "base")) {
+		if (!strcmp(type, "robot") || !strcmp(type, "base")) {
 			if (ha_xy != 3) {
-				snprintf(errore, dim, "riga %d: %s senza x e y", nriga, tipo);
+				snprintf(errore, size, "riga %d: %s senza x e y", nriga, type);
 				return -1;
 			}
-			if (tipo[0] == 'r') {
+			if (type[0] == 'r') {
 				nuovo.robot_x = x, nuovo.robot_y = y, nuovo.robot_dir = ang;
 				ha_robot = 1;
 			} else {
@@ -140,43 +140,43 @@ int mondo_leggi_testo(mondo_t *m, const char *testo, char *errore, size_t dim)
 			continue;
 		}
 		if (nuovo.n >= MONDO_MAX_OGGETTI) {
-			snprintf(errore, dim, "troppi oggetti (massimo %d)", MONDO_MAX_OGGETTI);
+			snprintf(errore, size, "troppi oggetti (massimo %d)", MONDO_MAX_OGGETTI);
 			return -1;
 		}
-		snprintf(o.nome, sizeof o.nome, "%s", nome[0] ? nome : tipo);
-		snprintf(o.gruppo, sizeof o.gruppo, "%s", gruppo);
+		snprintf(o.name, sizeof o.name, "%s", name[0] ? name : type);
+		snprintf(o.group, sizeof o.group, "%s", group);
 		o.quota_da = qda;
-		if (!strcmp(tipo, "muro")) {
-			if (!ha_da || !ha_a || spessore <= 0) {
-				snprintf(errore, dim, "riga %d: muro senza da=, a= o spessore", nriga);
+		if (!strcmp(type, "muro")) {
+			if (!ha_da || !has_a || spessore <= 0) {
+				snprintf(errore, size, "riga %d: muro senza da=, a= o spessore", nriga);
 				return -1;
 			}
 			o.forma = OGG_RETTANGOLO;
 			o.muro = 1;
 			o.x = (da_x + a_x) / 2, o.y = (da_y + a_y) / 2;
-			o.angolo = atan2(a_y - da_y, a_x - da_x);
+			o.angle = atan2(a_y - da_y, a_x - da_x);
 			o.larghezza = hypot(a_x - da_x, a_y - da_y);
 			o.profondita = spessore;
 			o.quota_a = qa > 0 ? qa : QUOTA_MURO;
-		} else if (!strcmp(tipo, "rettangolo")) {
+		} else if (!strcmp(type, "rettangolo")) {
 			if (ha_xy != 3 || larg <= 0 || prof <= 0) {
-				snprintf(errore, dim, "riga %d: rettangolo senza x, y, larghezza o profondita", nriga);
+				snprintf(errore, size, "riga %d: rettangolo senza x, y, larghezza o profondita", nriga);
 				return -1;
 			}
 			o.forma = OGG_RETTANGOLO;
-			o.x = x, o.y = y, o.angolo = ang, o.larghezza = larg, o.profondita = prof;
+			o.x = x, o.y = y, o.angle = ang, o.larghezza = larg, o.profondita = prof;
 			o.quota_a = qa > 0 ? qa : 0.5;
-		} else if (!strcmp(tipo, "cerchio")) {
+		} else if (!strcmp(type, "cerchio")) {
 			if (ha_xy != 3 || raggio <= 0) {
-				snprintf(errore, dim, "riga %d: cerchio senza x, y o raggio", nriga);
+				snprintf(errore, size, "riga %d: cerchio senza x, y o raggio", nriga);
 				return -1;
 			}
 			o.forma = OGG_CERCHIO;
 			o.x = x, o.y = y, o.raggio = raggio;
 			o.quota_a = qa > 0 ? qa : 0.5;
-		} else if (!strcmp(tipo, "vuoto")) {
+		} else if (!strcmp(type, "vuoto")) {
 			if (o.n_punti < 3) {
-				snprintf(errore, dim, "riga %d: vuoto con meno di 3 punti", nriga);
+				snprintf(errore, size, "riga %d: vuoto con meno di 3 punti", nriga);
 				return -1;
 			}
 			o.forma = OGG_VUOTO;
@@ -185,17 +185,17 @@ int mondo_leggi_testo(mondo_t *m, const char *testo, char *errore, size_t dim)
 				sx += o.px[i], sy += o.py[i];
 			o.x = sx / o.n_punti, o.y = sy / o.n_punti;
 		} else {
-			snprintf(errore, dim, "riga %d: tipo sconosciuto \"%s\"", nriga, tipo);
+			snprintf(errore, size, "riga %d: tipo sconosciuto \"%s\"", nriga, type);
 			return -1;
 		}
 		if (o.quota_a <= o.quota_da && o.forma != OGG_VUOTO) {
-			snprintf(errore, dim, "riga %d: quota_a deve essere più alta di quota_da", nriga);
+			snprintf(errore, size, "riga %d: quota_a deve essere più alta di quota_da", nriga);
 			return -1;
 		}
 		nuovo.o[nuovo.n++] = o;
 	}
 	if (nuovo.larghezza <= 0 || nuovo.profondita <= 0 || nuovo.larghezza > 50 || nuovo.profondita > 50) {
-		snprintf(errore, dim, "manca la riga \"stanza larghezza=... profondita=...\" (da 0 a 50 m)");
+		snprintf(errore, size, "manca la riga \"stanza larghezza=... profondita=...\" (da 0 a 50 m)");
 		return -1;
 	}
 	if (!ha_robot) {
@@ -206,18 +206,18 @@ int mondo_leggi_testo(mondo_t *m, const char *testo, char *errore, size_t dim)
 	return 0;
 }
 
-int mondo_leggi_file(mondo_t *m, const char *percorso, char *errore, size_t dim)
+int mondo_leggi_file(mondo_t *m, const char *percorso, char *errore, size_t size)
 {
 	FILE *f = fopen(percorso, "r");
 	if (!f) {
-		snprintf(errore, dim, "non riesco ad aprire %s", percorso);
+		snprintf(errore, size, "non riesco ad aprire %s", percorso);
 		return -1;
 	}
 	static char t[1 << 20];
 	size_t n = fread(t, 1, sizeof t - 1, f);
 	fclose(f);
 	t[n] = 0;
-	return mondo_leggi_testo(m, t, errore, dim);
+	return mondo_leggi_testo(m, t, errore, size);
 }
 
 /* ------------------------------------------------------------------------------------------ scrittura --- */
@@ -271,7 +271,7 @@ char *mondo_testo(const mondo_t *m)
 	buf_t s = { malloc(8192), 0, 8192 };
 	char a[32], b[32], c[32], d[32], e[32], f[32], g[32];
 	ag(&s, "# stanza del simulatore RTES (formato in sim/mondo.h)\n");
-	ag(&s, "stanza nome=%s larghezza=%s profondita=%s\n", m->nome, num(a, m->larghezza), num(b, m->profondita));
+	ag(&s, "stanza nome=%s larghezza=%s profondita=%s\n", m->name, num(a, m->larghezza), num(b, m->profondita));
 	ag(&s, "robot x=%s y=%s angolo=%s\n", num(a, m->robot_x), num(b, m->robot_y), num(c, m->robot_dir / GRADI));
 	if (m->ha_base)
 		ag(&s, "base x=%s y=%s angolo=%s\n", num(a, m->base_x), num(b, m->base_y), num(c, m->base_dir / GRADI));
@@ -279,18 +279,18 @@ char *mondo_testo(const mondo_t *m)
 		const oggetto_t *o = &m->o[i];
 		char extra[160] = "";
 		size_t k = 0;
-		if (o->nome[0] && strcmp(o->nome, o->muro ? "muro" : o->forma == OGG_CERCHIO ? "cerchio" :
+		if (o->name[0] && strcmp(o->name, o->muro ? "muro" : o->forma == OGG_CERCHIO ? "cerchio" :
 		                         o->forma == OGG_VUOTO ? "vuoto" : "rettangolo"))
-			k += (size_t)snprintf(extra + k, sizeof extra - k, " nome=%s", o->nome);
-		if (o->gruppo[0])
-			k += (size_t)snprintf(extra + k, sizeof extra - k, " gruppo=%s", o->gruppo);
+			k += (size_t)snprintf(extra + k, sizeof extra - k, " nome=%s", o->name);
+		if (o->group[0])
+			k += (size_t)snprintf(extra + k, sizeof extra - k, " gruppo=%s", o->group);
 		if (o->forma == OGG_VUOTO) {
 			ag(&s, "vuoto%s punti=", extra);
 			for (int j = 0; j < o->n_punti; j++)
 				ag(&s, "%s%s,%s", j ? " " : "", num(a, o->px[j]), num(b, o->py[j]));
 			ag(&s, "\n");
 		} else if (o->muro) {
-			double cx = cos(o->angolo) * o->larghezza / 2, cy = sin(o->angolo) * o->larghezza / 2;
+			double cx = cos(o->angle) * o->larghezza / 2, cy = sin(o->angle) * o->larghezza / 2;
 			ag(&s, "muro%s da=%s,%s a=%s,%s spessore=%s", extra, num(a, o->x - cx), num(b, o->y - cy),
 			   num(c, o->x + cx), num(d, o->y + cy), num(e, o->profondita));
 			if (o->quota_da > 0 || fabs(o->quota_a - QUOTA_MURO) > 1e-9)
@@ -298,7 +298,7 @@ char *mondo_testo(const mondo_t *m)
 			ag(&s, "\n");
 		} else if (o->forma == OGG_RETTANGOLO) {
 			ag(&s, "rettangolo%s x=%s y=%s larghezza=%s profondita=%s angolo=%s quota_da=%s quota_a=%s\n", extra,
-			   num(a, o->x), num(b, o->y), num(c, o->larghezza), num(d, o->profondita), num(e, o->angolo / GRADI),
+			   num(a, o->x), num(b, o->y), num(c, o->larghezza), num(d, o->profondita), num(e, o->angle / GRADI),
 			   num(f, o->quota_da), num(g, o->quota_a));
 		} else {
 			ag(&s, "cerchio%s x=%s y=%s raggio=%s quota_da=%s quota_a=%s\n", extra, num(a, o->x), num(b, o->y),
@@ -383,7 +383,7 @@ int mondo_dentro(const oggetto_t *o, double x, double y)
 	if (o->forma == OGG_CERCHIO)
 		return hypot(x - o->x, y - o->y) <= o->raggio;
 	double u, v;
-	locale(o->x, o->y, o->angolo, x, y, &u, &v);
+	locale(o->x, o->y, o->angle, x, y, &u, &v);
 	return fabs(u) <= o->larghezza / 2 && fabs(v) <= o->profondita / 2;
 }
 
@@ -407,8 +407,8 @@ double mondo_raggio(const mondo_t *m, double x, double y, double ang, double quo
 			t = raggio_cerchio(x, y, dx, dy, o->x, o->y, o->raggio);
 		} else {
 			double u, v;
-			locale(o->x, o->y, o->angolo, x, y, &u, &v);
-			double c = cos(o->angolo), s = sin(o->angolo);
+			locale(o->x, o->y, o->angle, x, y, &u, &v);
+			double c = cos(o->angle), s = sin(o->angle);
 			t = raggio_rett(u, v, dx * c + dy * s, -dx * s + dy * c, o->larghezza / 2, o->profondita / 2);
 		}
 		if (t < best)
@@ -458,11 +458,11 @@ int mondo_urto(const mondo_t *m, double x, double y, double r, double z0, double
 			continue;
 		}
 		double u, v;
-		locale(o->x, o->y, o->angolo, x, y, &u, &v);
+		locale(o->x, o->y, o->angle, x, y, &u, &v);
 		double cu = fmax(-o->larghezza / 2, fmin(u, o->larghezza / 2));
 		double cv = fmax(-o->profondita / 2, fmin(v, o->profondita / 2));
 		if (hypot(u - cu, v - cv) < r) {
-			double c = cos(o->angolo), s = sin(o->angolo);
+			double c = cos(o->angle), s = sin(o->angle);
 			if (fabs(u - cu) < 1e-12 && fabs(v - cv) < 1e-12)       /* centro dentro: verso il centro dell'oggetto */
 				contatto(x, y, o->x, o->y, &sx, &sy, &n);
 			else

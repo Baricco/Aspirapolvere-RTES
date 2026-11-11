@@ -1,5 +1,5 @@
 #include "driver/driver.h"
-#include "driver/scambio.h"
+#include "driver/exchange.h"
 #include <math.h>
 #include <stdatomic.h>
 #include <string.h>
@@ -82,7 +82,7 @@
 #define SUCTION_POWER_NORMAL 15500
 #define SUCTION_POWER_MAX 19500
 
-#define CHARGING_STATION_CELL coord_to_nav_index(AGG_PUNTO_X_M, 0)          // cella che si trova davanti alla base di ricarica 
+#define CHARGING_STATION_CELL coord_to_nav_index(DOCK_POINT_X_M, 0)          // cella che si trova davanti alla base di ricarica 
 #define NO_PATH_HOME_TIMEOUT RT_MS(30000)       // tempo per cui il ritorno alla base riprova a cercare il percorso (per esempio se una persona blocca il passaggio) prima che il robot vada in guasto
 #define HOOK_UP_TIMEOUT RT_MS(30000)            // tempo massimo che può impiegare il robot ad agganciarsi alla base di ricarica prima che vada in stato di guasto
 
@@ -132,17 +132,17 @@ static const int SEARCH_NEIGHBOR_SHIFT[8] = {
 
 // Primo doppio buffer per comunicare con il task di movimento
 // canale di scambio del doppio buffer
-static scambio_t double_buffer;
+static exchange_t double_buffer;
 // i due buffer
 static navigation_objective_t buffer1, buffer2;
 
 // Secondo doppio buffer per comunicare con la mappatura
-static scambio_t double_buffer_2;
+static exchange_t double_buffer_2;
 // i due buffer
 static navigation_closed_cells_t buffer3, buffer4;  
 
 // Terzo doppio buffer: lo stato della navigazione, per la sicurezza e i thread dell'app
-static scambio_t double_buffer_status;
+static exchange_t double_buffer_status;
 // i due buffer
 static navigation_status_t buffer5, buffer6;
 
@@ -576,7 +576,7 @@ static void set_state(nav_state_t next_state) {
 
     nav_state.state = next_state;       // imposta il prossimo stato
      
-    nav_state.state_start = rt_adesso();    // imposta l'istante di inizio ad ora
+    nav_state.state_start = rt_now();    // imposta l'istante di inizio ad ora
 
     nav_state.stall_start = 0;              // azzera il tempo di arresto del robot (il robot non è in arresto)
 
@@ -586,19 +586,19 @@ static void set_state(nav_state_t next_state) {
 static bool is_battery_dead() {
 
     // leggi lo stato attuale del driver
-    drv_stato_t cur_state = {0};
+    drv_status_t cur_state = {0};
 
-    drv_stato(&cur_state);
+    drv_status(&cur_state);
 
     // da quanto tempo la batteria è bassa: un calo di qualche istante (carico forte) non conta
-    if (cur_state.batteria == BAT_OK) nav_state.battery_low_since = 0;
-    else if (nav_state.battery_low_since == 0) nav_state.battery_low_since = rt_adesso();
+    if (cur_state.battery == BAT_OK) nav_state.battery_low_since = 0;
+    else if (nav_state.battery_low_since == 0) nav_state.battery_low_since = rt_now();
 
     // se la batteria è scarica da almeno BATTERY_LOW_CONFIRM_TIME e la missione attuale è di esplorazione o pulizia
     // e lo stato attuale non è sblocco, attesa, guasto, riposo, uscita o aggancio alla base
     // ritorna il segnale che la batteria è scarica e bisogna interrompere la missione per andare a ricaricarla
     return (
-        nav_state.battery_low_since != 0 && rt_adesso() - nav_state.battery_low_since >= BATTERY_LOW_CONFIRM_TIME &&
+        nav_state.battery_low_since != 0 && rt_now() - nav_state.battery_low_since >= BATTERY_LOW_CONFIRM_TIME &&
         (nav_state.mission == NAV_STATE_EXPLORE || nav_state.mission == NAV_STATE_FOLLOW_BORDERS || nav_state.mission == NAV_STATE_CLEAN) &&
         (nav_state.state != NAV_STATE_UNLOCK && nav_state.state != NAV_STATE_WAIT && nav_state.state != NAV_STATE_FAILURE && nav_state.state != NAV_STATE_SLEEP && nav_state.state != NAV_STATE_LEAVE_BASE && nav_state.state != NAV_STATE_HOOK_UP && nav_state.state != NAV_STATE_PAUSE && nav_state.state != NAV_STATE_REMOTE)
     );
@@ -618,7 +618,7 @@ static void close_cell(uint16_t cell) {
     nav_state.closed_cells.num++;
 
     // pubblica la nuova lista
-    scambio_scrivi(&double_buffer_2, &nav_state.closed_cells);
+    exchange_write(&double_buffer_2, &nav_state.closed_cells);
 
     // aggiorna anche la copia locale della mappa
     nav_state.map[cell] = set_nav_cell_state(nav_state.map[cell], NAV_CELL_TOO_NARROW);
@@ -626,7 +626,7 @@ static void close_cell(uint16_t cell) {
 
 // funzione helper per calcolare il tempo passato da un certo istante ad adesso
 static inline int64_t elapsed_time(const int64_t start) {
-    return rt_adesso() - start;
+    return rt_now() - start;
 }
 
 // Funzione Helper che prende allarmi e posizione attuale ritorna true
@@ -639,7 +639,7 @@ static bool is_stalled(safety_alarm_t cur_alarm, movement_position_data_t cur_po
         return false;
     } else if (nav_state.stall_start == 0) {    // se è in stallo e stall_start è a 0
         // metti stall_start all'istante corrente
-        nav_state.stall_start = rt_adesso();
+        nav_state.stall_start = rt_now();
     }
 
     // ritorna se è passato più di STALL_TIME dall'ultimo stallo
@@ -927,7 +927,7 @@ static bool cell_is_goal(const nav_search_goal_t goal, const uint16_t cell, cons
             if (!is_nav_cell_free(cell)) return false;
             double x, y;
             nav_index_to_coord(cell, &x, &y);
-            return hypot(x - AGG_PUNTO_X_M, y) <= HOME_IR_DOCK_DIST;
+            return hypot(x - DOCK_POINT_X_M, y) <= HOME_IR_DOCK_DIST;
         }
         case GOAL_EDGE:
            
@@ -1468,14 +1468,14 @@ static void publish_status(void) {
         .last_command_result = nav_state.last_command_result,
     };
 
-    scambio_scrivi(&double_buffer_status, &status);
+    exchange_write(&double_buffer_status, &status);
 }
 
 // funzione di inizializzazione del task
 void init_navigation(void) {
 
     // inizializza il primo doppio buffer passando i due buffer da usare e la loro dimensione 
-    scambio_init(
+    exchange_init(
         &double_buffer,
         &buffer1,
         &buffer2, 
@@ -1483,7 +1483,7 @@ void init_navigation(void) {
     );
 
     // inizializza il secondo doppio buffer passando i due buffer da usare e la loro dimensione 
-    scambio_init(
+    exchange_init(
         &double_buffer_2,
         &buffer3,
         &buffer4, 
@@ -1492,7 +1492,7 @@ void init_navigation(void) {
 
 
     // inizializza il terzo doppio buffer (lo stato della navigazione) e pubblica subito lo stato di partenza
-    scambio_init(
+    exchange_init(
         &double_buffer_status,
         &buffer5,
         &buffer6,
@@ -1502,7 +1502,7 @@ void init_navigation(void) {
     // inizializza a 0 il comando dell'app
     atomic_store(&app_command, 0);
 
-    nav_state.state_start = rt_adesso();
+    nav_state.state_start = rt_now();
 
     // si parte in riposo: il robot aspetta un comando (tasto di accensione o l'app)
     nav_state.state = NAV_STATE_SLEEP;
@@ -1523,7 +1523,7 @@ navigation_objective_t read_navigation(void) {
     navigation_objective_t navigation_data = {0};
 
     // Copia il buffer pubblicato in navigation_data
-    scambio_leggi(&double_buffer, &navigation_data);
+    exchange_read(&double_buffer, &navigation_data);
 
     // ritorna navigation_data
     return navigation_data;
@@ -1537,7 +1537,7 @@ navigation_closed_cells_t read_closed_cells(void) {
     navigation_closed_cells_t navigation_closed_cells = {0};
 
     // Copia il buffer pubblicato in navigation_closed_cells
-    scambio_leggi(&double_buffer_2, &navigation_closed_cells);
+    exchange_read(&double_buffer_2, &navigation_closed_cells);
 
     // ritorna navigation_closed_cells
     return navigation_closed_cells;
@@ -1552,7 +1552,7 @@ navigation_status_t read_navigation_status(void) {
     navigation_status_t navigation_status = {0};
 
     // Copia il buffer pubblicato in navigation_status
-    scambio_leggi(&double_buffer_status, &navigation_status);
+    exchange_read(&double_buffer_status, &navigation_status);
 
     // ritorna navigation_status
     return navigation_status;
@@ -1567,7 +1567,7 @@ void send_navigation_command(const navigation_command_t *command) {
 void write_objective(const navigation_objective_t *next_objective) {
 
     // Copia scrivi il prossimo obiettivo nel doppio buffer
-    scambio_scrivi(&double_buffer, next_objective);
+    exchange_write(&double_buffer, next_objective);
 
     return;
 }
@@ -1599,12 +1599,12 @@ void send_objective(
 }
 
 // funzione helper per fermare il robot e andare in stato di guasto. reason è il motivo, che il driver scrive nel registro
-// e pubblica in drv_stato_t.task_fault: il driver ferma i motori, accende il LED del guasto e suona
+// e pubblica in drv_status_t.task_fault: il driver ferma i motori, accende il LED del guasto e suona
 static inline void stop_and_fail(drv_task_fault_t reason) {
 
     send_objective(OBJ_STOP, 0, 0, 0, 0, 0);
 
-    drv_segnala_guasto(reason);
+    drv_report_fault(reason);
 
     set_state(NAV_STATE_FAILURE);
 
@@ -1736,7 +1736,7 @@ static void unlock_start_rotation(safety_alarm_t cur_alarm, movement_position_da
 
     // passa alla fase di rotazione e segna quando è iniziata (per il timeout)
     nav_state.unlock_phase = UNLOCK_PHASE_ROTATE;
-    nav_state.phase_start = rt_adesso();
+    nav_state.phase_start = rt_now();
 }
 
 // Funzione Helper per lo sblocco del robot, fa andare il robot al prossimo punto della scia
@@ -1788,7 +1788,7 @@ static void start_unlock_attempt(safety_alarm_t cur_alarm, movement_position_dat
     nav_state.unlock_phase = UNLOCK_PHASE_BACK;
 
     // imposta l'istante di inizio del tentativo corrente ad adesso
-    nav_state.phase_start = rt_adesso();
+    nav_state.phase_start = rt_now();
 
     // inizia ad indietreggiare
     unlock_next_back_point(cur_alarm, cur_pos);
@@ -1827,7 +1827,7 @@ static bool can_pass_through(const uint32_t idx, const movement_position_data_t 
 static void start_unlock_after_alarm(const safety_alarm_t cur_alarm, const movement_position_data_t cur_pos) {
 
     // l'incastro diventa un ostacolo sulla mappa solo adesso: se l'attraversamento riesce, il bordo del tappeto resta percorribile
-    if (cur_alarm.error_mask & SAFETY_ERROR_STUCK) drv_incastro(1);
+    if (cur_alarm.error_mask & SAFETY_ERROR_STUCK) drv_stuck(1);
 
     // se non c'è l'errore SAFETY_ERROR_CONTACT segna la cella del robot come ostacolo,
     // per non incappare nello stesso allarme successivamente 
@@ -1863,9 +1863,9 @@ static bool should_start_cross(const uint8_t error_mask) {
     if (nav_state.state == NAV_STATE_FOLLOW_PATH) return nav_state.cur_obj.v > 0;
 
     if (nav_state.state == NAV_STATE_LEAVE_BASE) {
-        drv_stato_t cur_drv_state = {0};
-        drv_stato(&cur_drv_state);
-        return !cur_drv_state.sulla_base;
+        drv_status_t cur_drv_state = {0};
+        drv_status(&cur_drv_state);
+        return !cur_drv_state.on_base;
     }
 
     return false;
@@ -1877,7 +1877,7 @@ static void start_cross_rotation(const double angle) {
 
     send_objective(OBJ_ROTATE, MAX_ROTATION_SPEED, wrap_angle(nav_state.cross_theta + angle), 0, 0, 0);
 
-    nav_state.phase_start = rt_adesso();
+    nav_state.phase_start = rt_now();
 }
 
 // Funzione helper che fa partire un tentativo di attraversamento e lo conta
@@ -1933,7 +1933,7 @@ static void start_following_path(const safety_alarm_t cur_alarm, const movement_
 static void start_leaving_base(void) {
     nav_state.has_left_base = false;
     nav_state.cross_attempt = 0;
-    drv_esci_dalla_base(1);
+    drv_leave_base(1);
     set_state(NAV_STATE_LEAVE_BASE);
 }
 
@@ -1945,7 +1945,7 @@ static void start_hook_up(const safety_alarm_t cur_alarm) {
     // mentre in questo momento dobbiamo ancora metterci nelle condizioni di chiedere al driver l'aggancio
     nav_state.hook_has_started = false;
 
-    send_objective(OBJ_MOVE, MAX_ROTATION_SPEED, 0, MIN(cur_alarm.max_v_forw, CRUISING_SPEED), AGG_PUNTO_X_M, 0);
+    send_objective(OBJ_MOVE, MAX_ROTATION_SPEED, 0, MIN(cur_alarm.max_v_forw, CRUISING_SPEED), DOCK_POINT_X_M, 0);
 
     set_state(NAV_STATE_HOOK_UP);
 }
@@ -2202,13 +2202,13 @@ static bool find_clean_start_cell(const uint16_t robot_cell, const movement_posi
 // funzione helper che legge i tasti premuti dall'ultimo job (le pressioni contate dal driver) e li trasforma in un comando,
 // lo stesso che manderebbe l'app: il tasto di accensione diventa start, pause o resume secondo lo stato, il tasto casa
 // diventa home. Ritorna NAV_COMMAND_NONE se non è stato premuto nessun tasto
-static nav_command_type_t read_commands(const drv_stato_t *cur_drv_state) {
+static nav_command_type_t read_commands(const drv_status_t *cur_drv_state) {
 
-    bool power_pressed = cur_drv_state->pressioni_accensione != nav_state.last_power_presses;
-    bool home_pressed = cur_drv_state->pressioni_casa != nav_state.last_home_presses;
+    bool power_pressed = cur_drv_state->power_presses != nav_state.last_power_presses;
+    bool home_pressed = cur_drv_state->home_presses != nav_state.last_home_presses;
 
-    nav_state.last_power_presses = cur_drv_state->pressioni_accensione;
-    nav_state.last_home_presses = cur_drv_state->pressioni_casa;
+    nav_state.last_power_presses = cur_drv_state->power_presses;
+    nav_state.last_home_presses = cur_drv_state->home_presses;
 
     if (power_pressed) {
 
@@ -2242,14 +2242,14 @@ static void start_new_mission(void) {
 
     // da qui c'è una missione in corso, fino al prossimo riposo
     nav_state.is_mission_active = true;
-    nav_state.mission_start = rt_adesso();
+    nav_state.mission_start = rt_now();
 
     // celle chiuse: la lista ricomincia, e il numero di pulizia nuovo dice alla mappatura di azzerare le sue
     nav_state.closed_cells.num = 0;
     nav_state.closed_cells.mission_num++;
-    scambio_scrivi(&double_buffer_2, &nav_state.closed_cells);
+    exchange_write(&double_buffer_2, &nav_state.closed_cells);
 
-    drv_led(DRV_LED_AZZURRO);
+    drv_led(DRV_LED_BLUE);
 
     set_state(NAV_STATE_WAIT);
 
@@ -2273,11 +2273,11 @@ static void start_pause(void) {
     send_objective(OBJ_STOP, 0, 0, 0, 0, 0);
 
     // non deve muoversi con i contatti chiusi, e se il driver stava facendo l'aggancio la manovra si annulla
-    drv_esci_dalla_base(0);
-    if (nav_state.state == NAV_STATE_HOOK_UP && nav_state.hook_has_started) drv_aggancia(0);
+    drv_leave_base(0);
+    if (nav_state.state == NAV_STATE_HOOK_UP && nav_state.hook_has_started) drv_dock(0);
     nav_state.hook_has_started = false;
 
-    drv_led(DRV_LED_AZZURRO_RESPIRA);
+    drv_led(DRV_LED_BLUE_BREATHING);
 
     set_state(NAV_STATE_PAUSE);
 }
@@ -2287,14 +2287,14 @@ static void go_home_now(void) {
 
     send_objective(OBJ_STOP, 0, 0, 0, 0, 0);
 
-    drv_esci_dalla_base(0);
+    drv_leave_base(0);
     nav_state.interrupted_mission = 0;
 
     // il rientro chiesto da fermo (in riposo fuori dalla base) è una missione a sé
-    if (!nav_state.is_mission_active) nav_state.mission_start = rt_adesso();
+    if (!nav_state.is_mission_active) nav_state.mission_start = rt_now();
     nav_state.is_mission_active = true;
 
-    drv_led(DRV_LED_AZZURRO);
+    drv_led(DRV_LED_BLUE);
 
     set_state(NAV_STATE_RETURN_HOME);
 }
@@ -2306,20 +2306,20 @@ static void start_blind_hook_up(void) {
 
     send_objective(OBJ_STOP, 0, 0, 0, 0, 0);
 
-    drv_esci_dalla_base(0);
+    drv_leave_base(0);
     nav_state.interrupted_mission = 0;
 
-    if (!nav_state.is_mission_active) nav_state.mission_start = rt_adesso();
+    if (!nav_state.is_mission_active) nav_state.mission_start = rt_now();
     nav_state.is_mission_active = true;
 
-    drv_led(DRV_LED_AZZURRO);
+    drv_led(DRV_LED_BLUE);
 
     // la mappatura annulla la ricerca (se gira) e aspetta che il robot sia sulla base
     nav_state.closed_cells.stop_search_num++;
-    scambio_scrivi(&double_buffer_2, &nav_state.closed_cells);
+    exchange_write(&double_buffer_2, &nav_state.closed_cells);
 
     // aggancio a infrarossi: lo fa il driver, la navigazione aspetta l'esito
-    drv_aggancia(1);
+    drv_dock(1);
     nav_state.hook_has_started = true;
     set_state(NAV_STATE_HOOK_UP);
     nav_state.mission = NAV_STATE_RETURN_HOME;
@@ -2331,16 +2331,16 @@ static void start_blind_hook_up(void) {
 static void leave_failure(void) {
 
     if (nav_state.is_remote) {
-        drv_esci_dalla_base(1);
-        drv_led(DRV_LED_AZZURRO);
+        drv_leave_base(1);
+        drv_led(DRV_LED_BLUE);
         set_state(NAV_STATE_REMOTE);
     } else if (nav_state.is_mission_active) {
         // non deve muoversi con i contatti chiusi finché non arriva la ripresa
-        drv_esci_dalla_base(0);
-        drv_led(DRV_LED_AZZURRO_RESPIRA);
+        drv_leave_base(0);
+        drv_led(DRV_LED_BLUE_BREATHING);
         set_state(NAV_STATE_PAUSE);
     } else {
-        drv_led(DRV_LED_AZZURRO);
+        drv_led(DRV_LED_BLUE);
         set_state(NAV_STATE_SLEEP);
     }
 }
@@ -2361,13 +2361,13 @@ static void start_remote(void) {
     send_objective(OBJ_STOP, 0, 0, 0, 0, 0);
 
     // se il driver stava facendo l'aggancio la manovra si annulla
-    if (nav_state.state == NAV_STATE_HOOK_UP && nav_state.hook_has_started) drv_aggancia(0);
+    if (nav_state.state == NAV_STATE_HOOK_UP && nav_state.hook_has_started) drv_dock(0);
     nav_state.hook_has_started = false;
 
     // sulla base il robot può uscire piano in avanti
-    drv_esci_dalla_base(1);
+    drv_leave_base(1);
 
-    drv_led(DRV_LED_AZZURRO);
+    drv_led(DRV_LED_BLUE);
 
     set_state(NAV_STATE_REMOTE);
 }
@@ -2386,10 +2386,10 @@ static void end_remote(void) {
 
     send_objective(OBJ_STOP, 0, 0, 0, 0, 0);
 
-    drv_esci_dalla_base(0);
+    drv_leave_base(0);
 
     if (nav_state.is_mission_active) {
-        drv_led(DRV_LED_AZZURRO_RESPIRA);
+        drv_led(DRV_LED_BLUE_BREATHING);
         set_state(NAV_STATE_PAUSE);
     } else {
         set_state(NAV_STATE_SLEEP);
@@ -2398,7 +2398,7 @@ static void end_remote(void) {
 
 // funzione che applica un comando (di un tasto o dell'app) in base allo stato, e ne ritorna l'esito.
 // È l'unico punto in cui i comandi cambiano lo stato della navigazione
-static nav_command_result_t apply_command(const navigation_command_t *command, const drv_stato_t *cur_drv_state) {
+static nav_command_result_t apply_command(const navigation_command_t *command, const drv_status_t *cur_drv_state) {
 
     bool is_position_lost = read_mapping_correction().state == MAP_LOST;
 
@@ -2415,7 +2415,7 @@ static nav_command_result_t apply_command(const navigation_command_t *command, c
         case NAV_COMMAND_REMOTE_CLEANING:
 
             if (!nav_state.is_remote) start_remote();
-            nav_state.remote_last_command = rt_adesso();
+            nav_state.remote_last_command = rt_now();
 
             if (command->type == NAV_COMMAND_REMOTE_MOVE) {
 
@@ -2428,7 +2428,7 @@ static nav_command_result_t apply_command(const navigation_command_t *command, c
 
                 nav_state.remote_v = command->v;
                 nav_state.remote_omega = command->omega;
-                nav_state.remote_last_move = rt_adesso();
+                nav_state.remote_last_move = rt_now();
             }
 
             if (command->type == NAV_COMMAND_REMOTE_CLEANING) {
@@ -2475,7 +2475,7 @@ static nav_command_result_t apply_command(const navigation_command_t *command, c
         case NAV_COMMAND_RESUME:
             // riprende passando dall'attesa, che torna alla missione (o all'uscita dalla base)
             if (nav_state.state != NAV_STATE_PAUSE) return NAV_RESULT_NOT_PAUSED;
-            drv_led(DRV_LED_AZZURRO);
+            drv_led(DRV_LED_BLUE);
             set_state(NAV_STATE_WAIT);
             return NAV_RESULT_OK;
 
@@ -2485,7 +2485,7 @@ static nav_command_result_t apply_command(const navigation_command_t *command, c
 
                 case NAV_STATE_SLEEP:
                     // sulla base niente, fuori rientra
-                    if (cur_drv_state->sulla_base) return NAV_RESULT_ALREADY_HOME;
+                    if (cur_drv_state->on_base) return NAV_RESULT_ALREADY_HOME;
                     go_home_now();
                     return NAV_RESULT_OK;
 
@@ -2500,9 +2500,9 @@ static nav_command_result_t apply_command(const navigation_command_t *command, c
 
                 default:
                     // in missione rientra. Se il robot non è ancora uscito dalla base, resta lì in riposo
-                    if (cur_drv_state->sulla_base) {
+                    if (cur_drv_state->on_base) {
                         send_objective(OBJ_STOP, 0, 0, 0, 0, 0);
-                        drv_esci_dalla_base(0);
+                        drv_leave_base(0);
                         set_state(NAV_STATE_SLEEP);
                     } else go_home_now();
                     return NAV_RESULT_OK;
@@ -2564,7 +2564,7 @@ static void check_brush_unlock(const safety_alarm_t cur_alarm) {
 
     // avvia un nuovo sblocco
     nav_state.brush_unlock_attempt++;
-    nav_state.brush_unlock_start = rt_adesso();
+    nav_state.brush_unlock_start = rt_now();
 
 }
 
@@ -2589,17 +2589,17 @@ static void job_navigation_body(void *arg) {
     movement_position_data_t cur_pos = read_movement();
 
     // leggi lo stato del driver: guasto, tasti, base
-    drv_stato_t cur_drv_state = {0};
-    drv_stato(&cur_drv_state);
+    drv_status_t cur_drv_state = {0};
+    drv_status(&cur_drv_state);
 
     // se il driver è in guasto (chiesto da un task o suo) la navigazione si ferma in guasto
-    if (cur_drv_state.fase == DRV_GUASTO && nav_state.state != NAV_STATE_FAILURE) {
+    if (cur_drv_state.phase == DRV_FAULT && nav_state.state != NAV_STATE_FAILURE) {
         send_objective(OBJ_STOP, 0, 0, 0, 0, 0);
         set_state(NAV_STATE_FAILURE);
     }
 
     // guasto azzerato (da un tasto, dall'app o perché il robot è stato rimesso sulla base): pausa, riposo o telecomando
-    if (nav_state.state == NAV_STATE_FAILURE && cur_drv_state.fase != DRV_GUASTO) leave_failure();
+    if (nav_state.state == NAV_STATE_FAILURE && cur_drv_state.phase != DRV_FAULT) leave_failure();
 
     // leggi e applica i comandi: si fa prima di tutto il resto, anche con la posizione non valida.
     // Prima i tasti, che diventano comandi (il guasto lo azzera già il driver alla pressione)
@@ -2636,20 +2636,20 @@ static void job_navigation_body(void *arg) {
         is_suction_on = false;
     }
 
-    drv_aspirazione(is_suction_on ? SUCTION_POWER_NORMAL : SUCTION_POWER_OFF);
+    drv_suction(is_suction_on ? SUCTION_POWER_NORMAL : SUCTION_POWER_OFF);
 
     // durante lo sblocco la spazzola centrale gira al contrario, la laterale continua normalmente
-    if (!is_brushes_on) drv_spazzole(BRUSH_SPEED_OFF, BRUSH_SPEED_OFF);
-    else if (is_brush_unlocking()) drv_spazzole(BRUSH_SPEED_NORMAL, BRUSH_SPEED_UNLOCK);
-    else drv_spazzole(BRUSH_SPEED_NORMAL, BRUSH_SPEED_NORMAL);
+    if (!is_brushes_on) drv_brushes(BRUSH_SPEED_OFF, BRUSH_SPEED_OFF);
+    else if (is_brush_unlocking()) drv_brushes(BRUSH_SPEED_NORMAL, BRUSH_SPEED_UNLOCK);
+    else drv_brushes(BRUSH_SPEED_NORMAL, BRUSH_SPEED_NORMAL);
 
     // se la posizione corrente non è valida
     if (!cur_pos.valid) {
 
         // aggancio alla cieca in corso (tasto premuto con la posizione persa): si aspetta solo l'esito del driver
         if (nav_state.state == NAV_STATE_HOOK_UP && nav_state.hook_has_started) {
-            if (cur_drv_state.aggancio == AGG_FATTO) set_state(NAV_STATE_SLEEP);
-            else if (cur_drv_state.aggancio == AGG_FALLITO) stop_and_fail(DRV_FAULT_DOCKING_FAILED);
+            if (cur_drv_state.docking == DOCK_DONE) set_state(NAV_STATE_SLEEP);
+            else if (cur_drv_state.docking == DOCK_FAILED) stop_and_fail(DRV_FAULT_DOCKING_FAILED);
             return;
         }
         
@@ -2659,7 +2659,7 @@ static void job_navigation_body(void *arg) {
         // se il robot stava uscendo dalla base ormai non ci è più: togli il permesso di muoversi con i contatti chiusi.
         // se viene riappoggiato sulla base, l'attesa fa ripartire l'uscita
         if (read_started_on_base() && !nav_state.has_left_base) {
-            drv_esci_dalla_base(0);
+            drv_leave_base(0);
             nav_state.has_left_base = true;
         }
         
@@ -2686,7 +2686,7 @@ static void job_navigation_body(void *arg) {
     if (is_active_cleaning()) set_robot_cell_clean(cur_pos);
 
     // l'incastro si segnala alla mappa solo quando parte lo sblocco
-    drv_incastro(0);
+    drv_stuck(0);
 
     // se il robot è incastrato su qualcosa di basso, prima dello sblocco prova ad attraversarlo
     if (should_start_cross(cur_alarm.error_mask)) {
@@ -2745,7 +2745,7 @@ static void job_navigation_body(void *arg) {
 
                 // se il robot è partito dalla base e non ne è ancora uscito, esce per prima cosa.
                 // lo stesso se è stato sollevato e riappoggiato sulla base
-                if (read_started_on_base() && (!nav_state.has_left_base || cur_drv_state.sulla_base)) start_leaving_base();
+                if (read_started_on_base() && (!nav_state.has_left_base || cur_drv_state.on_base)) start_leaving_base();
                 // altrimenti passa al prossimo stato
                 else set_state(nav_state.mission);
             }
@@ -2974,7 +2974,7 @@ static void job_navigation_body(void *arg) {
 
                 send_objective(OBJ_CONST_SPEED, 0, 0, 0, 0, 0);
 
-                if (nav_state.border_lost_start == 0) nav_state.border_lost_start = rt_adesso();
+                if (nav_state.border_lost_start == 0) nav_state.border_lost_start = rt_now();
 
                 if (elapsed_time(nav_state.border_lost_start) >= BORDER_LOST_TIME) end_border_lap();
 
@@ -3087,7 +3087,7 @@ static void job_navigation_body(void *arg) {
                 // finita la rotazione spingi dritto
                 if (is_objective_achieved(cur_pos) || elapsed_time(nav_state.phase_start) >= UNLOCK_PHASE_TIMEOUT) {
                     send_objective(OBJ_CONST_SPEED, 0, 0, MIN(CRUISING_SPEED, cur_alarm.max_v_forw), 0, 0);
-                    nav_state.phase_start = rt_adesso();
+                    nav_state.phase_start = rt_now();
                 }
 
                 break;
@@ -3122,12 +3122,12 @@ static void job_navigation_body(void *arg) {
 
             // se il robot è arrivato al punto davanti alla base. la posizione è quella data dal lidar:
             // se le ruote slittano l'odometria direbbe che il robot è uscito anche quando è fermo
-            if (read_mapping_correction().map_x >= AGG_PUNTO_X_M) {
+            if (read_mapping_correction().map_x >= DOCK_POINT_X_M) {
 
                 send_objective(OBJ_STOP, 0, 0, 0, 0, 0);
 
                 // da adesso il permesso di muoversi con i contatti chiusi non serve più, quindi lo revochiamo
-                drv_esci_dalla_base(0);
+                drv_leave_base(0);
 
                 // segna che il robot è uscito dalla base
                 nav_state.has_left_base = true;
@@ -3141,7 +3141,7 @@ static void job_navigation_body(void *arg) {
             } else if (elapsed_time(nav_state.state_start) >= LEAVE_BASE_TIMEOUT) {     // se è passato troppo tempo da quando ha provato a uscire dalla base
 
                 // revoca il permesso di muoversi al robot
-                drv_esci_dalla_base(0);
+                drv_leave_base(0);
 
                 stop_and_fail(DRV_FAULT_LEAVE_BASE_TIMEOUT);
 
@@ -3161,11 +3161,11 @@ static void job_navigation_body(void *arg) {
             if (nav_state.hook_has_started) {
 
                 // agganciato: riposo sulla base, e la mappa si salva
-                if (cur_drv_state.aggancio == AGG_FATTO) {
+                if (cur_drv_state.docking == DOCK_DONE) {
                     set_state(NAV_STATE_SLEEP);
                     request_map_save_if_allowed();
                 }
-                else if (cur_drv_state.aggancio == AGG_FALLITO) stop_and_fail(DRV_FAULT_DOCKING_FAILED);
+                else if (cur_drv_state.docking == DOCK_FAILED) stop_and_fail(DRV_FAULT_DOCKING_FAILED);
 
                 break;
             }
@@ -3191,9 +3191,9 @@ static void job_navigation_body(void *arg) {
                     send_objective(OBJ_STOP, 0, 0, 0, 0, 0);
 
                     // al contatto le ruote si devono fermare
-                    drv_esci_dalla_base(0);
+                    drv_leave_base(0);
 
-                    drv_aggancia(1);
+                    drv_dock(1);
 
                     nav_state.hook_has_started = true;
                 }
@@ -3232,9 +3232,9 @@ static void job_navigation_body(void *arg) {
                 // robot è già vicino al punto di aggancio l'aggancio a infrarossi lo fa il driver da qui, altrimenti ci si
                 // avvicina il più possibile e si torna qui
                 // (mezza cella in più: il robot arrivato al centro della cella trovata con GOAL_NEAR_HOME deve rientrarci)
-                if (hypot(cur_pos.x - AGG_PUNTO_X_M, cur_pos.y) <= HOME_IR_DOCK_DIST + NAV_MAP_CELL_SIZE / 2) {
+                if (hypot(cur_pos.x - DOCK_POINT_X_M, cur_pos.y) <= HOME_IR_DOCK_DIST + NAV_MAP_CELL_SIZE / 2) {
                     send_objective(OBJ_STOP, 0, 0, 0, 0, 0);
-                    drv_aggancia(1);
+                    drv_dock(1);
                     nav_state.hook_has_started = true;
                     set_state(NAV_STATE_HOOK_UP);
                     break;
@@ -3261,14 +3261,14 @@ static void job_navigation_body(void *arg) {
             if (nav_state.cur_obj.obj_type != OBJ_STOP) send_objective(OBJ_STOP, 0, 0, 0, 0, 0);
 
             // leggi lo stato attuale del driver
-            drv_stato_t cur_state = {0};
+            drv_status_t cur_state = {0};
 
-            drv_stato(&cur_state);
+            drv_status(&cur_state);
 
             // controlla se quando è andato a caricarsi era stata interrotta una missione
             // e adesso si trova sulla base di ricarica
             // e la batteria è a percentuale maggiore della soglia per ripartire
-            if (nav_state.interrupted_mission != 0 && cur_state.sulla_base && cur_state.percentuale >= BATTERY_RESUME_PERCENT) {
+            if (nav_state.interrupted_mission != 0 && cur_state.on_base && cur_state.percentage >= BATTERY_RESUME_PERCENT) {
                 
                 // imposta la missione alla missione precedente all'interruzione dovuta alla batteria
                 nav_state.mission = nav_state.interrupted_mission;
@@ -3379,7 +3379,7 @@ static void job_navigation_body(void *arg) {
         case NAV_STATE_REMOTE: {
 
             // fuori dalla base l'uscita è già fatta
-            if (!cur_drv_state.sulla_base) nav_state.has_left_base = true;
+            if (!cur_drv_state.on_base) nav_state.has_left_base = true;
 
             // un comando di movimento vale per REMOTE_MOVE_TIMEOUT, poi il robot si ferma
             double remote_v = nav_state.remote_v;

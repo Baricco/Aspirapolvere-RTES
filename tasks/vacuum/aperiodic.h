@@ -15,7 +15,7 @@
 #define APERIODIC_CPU 3                 // core del task aperiodico
 
 // caratteristiche del task aperiodico
-extern rt_aperiodico_t aperiodic_task;
+extern rt_aperiodic_t aperiodic_task;
 
 void init_aperiodic(void);
 void job_aperiodic(void *arg);

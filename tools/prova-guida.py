@@ -3,7 +3,7 @@
 
 Il GD32 finto è questo script: tiene il lato master di una pty, manda il frame dei sensori 0x15 ogni 20 ms
 (byte 3 = anti-caduta, byte 8 = tensione) e legge tutto quello che spia guida manda. Ogni scenario controlla
-le regole di sicurezza di gd32/sicurezza.h:
+le regole di sicurezza di gd32/interlock.h:
 
   1. comando a un motore senza --sollevato: rifiutato alla lettura delle opzioni (codice 2);
   2. pompa dell'acqua: vietata (codice 2);

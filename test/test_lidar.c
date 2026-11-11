@@ -22,11 +22,11 @@ static const uint8_t AVVIO_VERO[] = {
 };
 
 typedef struct {
-	lidar_pacchetto_t p[16];
+	lidar_packet_t p[16];
 	size_t n;
 } raccolta_t;
 
-static void raccogli(const lidar_pacchetto_t *p, void *ctx)
+static void raccogli(const lidar_packet_t *p, void *ctx)
 {
 	raccolta_t *r = ctx;
 	if (r->n < 16)
@@ -39,7 +39,7 @@ static void crc_vettori_noti(void)
 	CONTROLLA(lidar_crc16((const uint8_t *)"123456789", 9) == 0x4B37);
 	CONTROLLA(lidar_crc16(NULL, 0) == 0xFFFF);
 	uint8_t b[] = { 0x01, 0x02, 0xff };
-	CONTROLLA(lidar_somma(b, 3) == 0x102);
+	CONTROLLA(lidar_sum(b, 3) == 0x102);
 }
 
 static void avvio_vero(void)
@@ -47,49 +47,49 @@ static void avvio_vero(void)
 	lidar_deframer_t d;
 	lidar_deframer_init(&d);
 	raccolta_t r = { .n = 0 };
-	lidar_deframer_scrivi(&d, AVVIO_VERO, sizeof AVVIO_VERO, raccogli, &r);
+	lidar_deframer_feed(&d, AVVIO_VERO, sizeof AVVIO_VERO, raccogli, &r);
 	CONTROLLA(r.n == 1);
-	CONTROLLA(r.p[0].cmd == LIDAR_VERSIONE && r.p[0].indirizzo == 1 && r.p[0].tipo == 0x61);
-	CONTROLLA(r.p[0].n_param == 43 && r.p[0].n_dichiarato == 43);
+	CONTROLLA(r.p[0].cmd == LIDAR_VERSION && r.p[0].address == 1 && r.p[0].type == 0x61);
+	CONTROLLA(r.p[0].n_param == 43 && r.p[0].n_declared == 43);
 	CONTROLLA(memcmp(r.p[0].param + 24, "LDS3_NOR_1805041536", 19) == 0);
-	CONTROLLA(d.byte_scartati == 87);     /* il testo di avvio */
-	CONTROLLA(d.checksum_errati == 0);
+	CONTROLLA(d.discarded_bytes == 87);     /* il testo di avvio */
+	CONTROLLA(d.bad_checksums == 0);
 }
 
 static void componi_e_rileggi(void)
 {
-	uint8_t out[LIDAR_MAX_PACCHETTO], param[LIDAR_MAX_PARAMETRI];
+	uint8_t out[LIDAR_MAX_PACKET], param[LIDAR_MAX_PARAMS];
 	for (size_t i = 0; i < sizeof param; i++)
 		param[i] = (uint8_t)(i * 31);
 	/* il pacchetto vero ricomposto deve essere identico byte per byte */
-	size_t k = lidar_componi(1, 0x61, LIDAR_VERSIONE, AVVIO_VERO + 87 + 8, 43, out, sizeof out);
+	size_t k = lidar_build_packet(1, 0x61, LIDAR_VERSION, AVVIO_VERO + 87 + 8, 43, out, sizeof out);
 	CONTROLLA(k == 53 && memcmp(out, AVVIO_VERO + 87, 53) == 0);
 
 	/* indirizzo diverso da 1: CRC; tutte le lunghezze possibili, spedite un byte alla volta */
 	int ok = 1;
-	for (size_t n = 0; n <= LIDAR_MAX_PARAMETRI; n++) {
-		k = lidar_componi(2, 0x61, LIDAR_SCANSIONE_NUOVA, param, n, out, sizeof out);
+	for (size_t n = 0; n <= LIDAR_MAX_PARAMS; n++) {
+		k = lidar_build_packet(2, 0x61, LIDAR_SCAN_NEW, param, n, out, sizeof out);
 		lidar_deframer_t d;
 		lidar_deframer_init(&d);
 		raccolta_t r = { .n = 0 };
 		for (size_t i = 0; i < k; i++)
-			lidar_deframer_scrivi(&d, out + i, 1, raccogli, &r);
+			lidar_deframer_feed(&d, out + i, 1, raccogli, &r);
 		if (k != n + 10 || r.n != 1 || r.p[0].n_param != n || memcmp(r.p[0].param, param, n) != 0)
 			ok = 0;
 	}
 	CONTROLLA(ok);
-	CONTROLLA(lidar_componi(1, 0x61, 0xAD, param, LIDAR_MAX_PARAMETRI + 1, out, sizeof out) == 0);
+	CONTROLLA(lidar_build_packet(1, 0x61, 0xAD, param, LIDAR_MAX_PARAMS + 1, out, sizeof out) == 0);
 }
 
 /* Pacchetto troncato seguito da uno buono; checksum rovinato; len fuori dai limiti. */
 static void errori_e_risincronizzazione(void)
 {
-	uint8_t flusso[512], fr[LIDAR_MAX_PACCHETTO];
+	uint8_t flusso[512], fr[LIDAR_MAX_PACKET];
 	size_t n = 0, k;
 	memcpy(flusso, AVVIO_VERO + 87, 30);           /* versione troncata */
 	n = 30;
 	flusso[n++] = 0xaa; flusso[n++] = 0x00; flusso[n++] = 0x65;   /* len 101: troppo lungo */
-	k = lidar_componi(1, 0x61, LIDAR_VELOCITA, "\x01\x02", 2, fr, sizeof fr);
+	k = lidar_build_packet(1, 0x61, LIDAR_SPEED, "\x01\x02", 2, fr, sizeof fr);
 	memcpy(flusso + n, fr, k);
 	fr[k - 1] ^= 0xff;                               /* stesso pacchetto con checksum sbagliato */
 	memcpy(flusso + n + k, fr, k);
@@ -100,17 +100,17 @@ static void errori_e_risincronizzazione(void)
 	lidar_deframer_t d;
 	lidar_deframer_init(&d);
 	raccolta_t r = { .n = 0 };
-	lidar_deframer_scrivi(&d, flusso, n, raccogli, &r);
+	lidar_deframer_feed(&d, flusso, n, raccogli, &r);
 	CONTROLLA(r.n == 2);
-	CONTROLLA(r.n == 2 && r.p[0].cmd == LIDAR_VELOCITA && r.p[1].cmd == LIDAR_VERSIONE);
-	CONTROLLA(d.len_errati >= 1);
-	CONTROLLA(d.checksum_errati >= 2);
+	CONTROLLA(r.n == 2 && r.p[0].cmd == LIDAR_SPEED && r.p[1].cmd == LIDAR_VERSION);
+	CONTROLLA(d.bad_lengths >= 1);
+	CONTROLLA(d.bad_checksums >= 2);
 }
 
 static void nomi(void)
 {
-	CONTROLLA(strcmp(lidar_nome_cmd(LIDAR_VERSIONE), "versione") == 0);
-	CONTROLLA(lidar_nome_cmd(0x00) == NULL);
+	CONTROLLA(strcmp(lidar_cmd_name(LIDAR_VERSION), "versione") == 0);
+	CONTROLLA(lidar_cmd_name(0x00) == NULL);
 }
 
 int main(void)

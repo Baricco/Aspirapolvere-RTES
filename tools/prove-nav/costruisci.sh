@@ -39,6 +39,6 @@ fi
 if [ -n "$MODIFICA" ]; then python3 -I "$MODIFICA" $D/vac; fi
 # la cartella cloud/ (collegamento al server dell'app) vuole cJSON e la libcurl del sistema, e la sua configurazione privata
 [ -f $D/vac/cloud/config.h ] || { echo "manca tasks/vacuum/cloud/config.h: copialo da config.example.h" >&2; exit 1; }
-gcc -std=gnu11 -O2 -g -Wall -Wextra -pthread -I. -o $D/vacdbg $D/vac/*.c $D/vac/cloud/*.c third_party/cjson/cJSON.c driver/driver.c driver/scambio.c \
-    driver/batteria.c driver/lidar_giro.c driver/contatti.c driver/aggancio.c spia/registro.c rt/rt.c gd32/gd32.c gd32/sicurezza.c \
-    gd32/descrizione.c lidar/lidar.c -lm -lcurl
+gcc -std=gnu11 -O2 -g -Wall -Wextra -pthread -I. -o $D/vacdbg $D/vac/*.c $D/vac/cloud/*.c third_party/cjson/cJSON.c driver/driver.c driver/exchange.c \
+    driver/battery.c driver/lidar_scan.c driver/contacts.c driver/docking.c spia/registro.c rt/rt.c gd32/gd32.c gd32/interlock.c \
+    gd32/description.c lidar/lidar.c -lm -lcurl

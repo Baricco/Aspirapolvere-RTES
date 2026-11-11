@@ -45,7 +45,7 @@
 #include <unistd.h>
 
 #include "../gd32/gd32.h"
-#include "../gd32/sicurezza.h"
+#include "../gd32/interlock.h"
 #include "../lidar/lidar.h"
 #include "../rt/rt.h"
 #include "everest.h"
@@ -75,12 +75,12 @@ static void decod_init(decod_t *d, uint8_t protocollo)
 	everest_deframer_init(&d->everest);
 }
 
-static void decod_scrivi(decod_t *d, const uint8_t *b, size_t n, gd32_frame_cb cg, lidar_pacchetto_cb cl, void *ctx)
+static void decod_scrivi(decod_t *d, const uint8_t *b, size_t n, gd32_frame_cb cg, lidar_packet_cb cl, void *ctx)
 {
 	if (d->protocollo == REG_PROTO_GD32)
-		gd32_deframer_scrivi(&d->gd32, b, n, cg, ctx);
+		gd32_deframer_feed(&d->gd32, b, n, cg, ctx);
 	else if (d->protocollo == REG_PROTO_LIDAR)
-		lidar_deframer_scrivi(&d->lidar, b, n, cl, ctx);
+		lidar_deframer_feed(&d->lidar, b, n, cl, ctx);
 	else if (d->protocollo == REG_PROTO_EVEREST)
 		everest_deframer_scrivi(&d->everest, b, n, (cg || cl) ? decod_cb_everest : NULL, ctx);
 }
@@ -89,17 +89,17 @@ static void decod_contatori(const decod_t *d, uint64_t *ok, uint64_t *err, uint6
 {
 	*ok = *err = *scartati = 0;
 	if (d->protocollo == REG_PROTO_GD32) {
-		*ok = d->gd32.frame_ok;
-		*err = d->gd32.checksum_errati + d->gd32.len_errati;
-		*scartati = d->gd32.byte_scartati;
+		*ok = d->gd32.frames_ok;
+		*err = d->gd32.bad_checksums + d->gd32.bad_lengths;
+		*scartati = d->gd32.discarded_bytes;
 	} else if (d->protocollo == REG_PROTO_LIDAR) {
-		*ok = d->lidar.pacchetti_ok;
-		*err = d->lidar.checksum_errati + d->lidar.len_errati;
-		*scartati = d->lidar.byte_scartati;
+		*ok = d->lidar.packets_ok;
+		*err = d->lidar.bad_checksums + d->lidar.bad_lengths;
+		*scartati = d->lidar.discarded_bytes;
 	} else if (d->protocollo == REG_PROTO_EVEREST) {
 		*ok = d->everest.messaggi_ok;
 		*err = d->everest.testate_errate;
-		*scartati = d->everest.byte_scartati;
+		*scartati = d->everest.discarded_bytes;
 	}
 }
 
@@ -121,7 +121,7 @@ typedef struct {
 	FILE *out;
 	int64_t t0, inizio_apprendimento, fine_apprendimento;
 	uint8_t prec[EV_SENSORI];
-	int ha_prec;
+	int has_prev;
 	uint8_t rumoroso[EV_SENSORI];
 	int64_t finestra[EV_SENSORI];      /* inizio della finestra di 1 s per contare i cambi */
 	int cambi[EV_SENSORI];
@@ -131,48 +131,48 @@ typedef struct {
 	uint8_t win_min[EV_SENSORI], win_max[EV_SENSORI];
 	int64_t win_inizio;
 	int dir;                           /* direzione del blocco in corso */
-	int64_t adesso;
+	int64_t now;
 } eventi_t;
 
-static eventi_t ev;
+static eventi_t events;
 
 static void ev_testa(void)
 {
-	fprintf(ev.out, "%8.2f %s ", (double)(ev.adesso - ev.t0) / RT_NS_PER_S, ev.dir == REG_VERSO_SOC ? "rx" : "tx");
+	fprintf(events.out, "%8.2f %s ", (double)(events.now - events.t0) / RT_NS_PER_S, events.dir == REG_VERSO_SOC ? "rx" : "tx");
 }
 
 static void ev_frame(const gd32_frame_t *f)
 {
-	const char *nome = gd32_nome_cmd(f->cmd);
+	const char *name = gd32_cmd_name(f->cmd);
 	ev_testa();
-	fprintf(ev.out, "0x%02x %s:", f->cmd, nome ? nome : "?");
-	for (int i = 0; i < f->n_dati; i++)
-		fprintf(ev.out, " %02x", f->dati[i]);
-	fputc('\n', ev.out);
+	fprintf(events.out, "0x%02x %s:", f->cmd, name ? name : "?");
+	for (int i = 0; i < f->data_len; i++)
+		fprintf(events.out, " %02x", f->data[i]);
+	fputc('\n', events.out);
 }
 
 /* Ogni secondo riscrive il file dell'istantanea: tre righe da 96 byte esadecimali (min, max, ultimo frame). */
 static void ev_istantanea(const gd32_frame_t *f, int n)
 {
-	if (!ev.istantanea)
+	if (!events.istantanea)
 		return;
-	if (ev.win_inizio == 0) {
-		memcpy(ev.win_min, f->dati, (size_t)n);
-		memcpy(ev.win_max, f->dati, (size_t)n);
-		ev.win_inizio = ev.adesso;
+	if (events.win_inizio == 0) {
+		memcpy(events.win_min, f->data, (size_t)n);
+		memcpy(events.win_max, f->data, (size_t)n);
+		events.win_inizio = events.now;
 	}
 	for (int i = 0; i < n; i++) {
-		if (f->dati[i] < ev.win_min[i]) ev.win_min[i] = f->dati[i];
-		if (f->dati[i] > ev.win_max[i]) ev.win_max[i] = f->dati[i];
+		if (f->data[i] < events.win_min[i]) events.win_min[i] = f->data[i];
+		if (f->data[i] > events.win_max[i]) events.win_max[i] = f->data[i];
 	}
-	if (ev.adesso - ev.win_inizio < RT_S(1))
+	if (events.now - events.win_inizio < RT_S(1))
 		return;
 	char tmp[PATH_MAX];
-	snprintf(tmp, sizeof tmp, "%s.tmp", ev.istantanea);
+	snprintf(tmp, sizeof tmp, "%s.tmp", events.istantanea);
 	FILE *o = fopen(tmp, "w");
 	if (o) {
-		fprintf(o, "t %.2f\n", (double)(ev.adesso - ev.t0) / RT_NS_PER_S);
-		const uint8_t *righe[3] = { ev.win_min, ev.win_max, f->dati };
+		fprintf(o, "t %.2f\n", (double)(events.now - events.t0) / RT_NS_PER_S);
+		const uint8_t *righe[3] = { events.win_min, events.win_max, f->data };
 		const char *nomi[3] = { "min", "max", "ultimo" };
 		for (int r = 0; r < 3; r++) {
 			fprintf(o, "%s", nomi[r]);
@@ -181,64 +181,64 @@ static void ev_istantanea(const gd32_frame_t *f, int n)
 			fputc('\n', o);
 		}
 		fclose(o);
-		rename(tmp, ev.istantanea);   /* chi legge vede sempre un file completo */
+		rename(tmp, events.istantanea);   /* chi legge vede sempre un file completo */
 	}
-	ev.win_inizio = 0;
+	events.win_inizio = 0;
 }
 
 static void ev_sensori(const gd32_frame_t *f)
 {
-	int n = f->n_dati < EV_SENSORI ? f->n_dati : EV_SENSORI;
+	int n = f->data_len < EV_SENSORI ? f->data_len : EV_SENSORI;
 	ev_istantanea(f, n);
-	if (!ev.ha_prec) {
-		memcpy(ev.prec, f->dati, (size_t)n);
-		ev.ha_prec = 1;
+	if (!events.has_prev) {
+		memcpy(events.prec, f->data, (size_t)n);
+		events.has_prev = 1;
 		return;
 	}
-	if (ev.adesso < ev.inizio_apprendimento) {   /* lo stack si sta ancora avviando: si osserva e basta */
-		memcpy(ev.prec, f->dati, (size_t)n);
+	if (events.now < events.inizio_apprendimento) {   /* lo stack si sta ancora avviando: si osserva e basta */
+		memcpy(events.prec, f->data, (size_t)n);
 		return;
 	}
-	int apprendo = ev.adesso < ev.fine_apprendimento;
+	int apprendo = events.now < events.fine_apprendimento;
 	int scritto = 0;
 	for (int i = 0; i < n; i++) {
-		if (f->dati[i] == ev.prec[i] || ev.rumoroso[i])
+		if (f->data[i] == events.prec[i] || events.rumoroso[i])
 			continue;
 		if (apprendo) {
-			ev.rumoroso[i] = 1;
+			events.rumoroso[i] = 1;
 			continue;
 		}
-		if (ev.adesso - ev.finestra[i] > RT_S(1)) {
-			ev.finestra[i] = ev.adesso;
-			ev.cambi[i] = 0;
+		if (events.now - events.finestra[i] > RT_S(1)) {
+			events.finestra[i] = events.now;
+			events.cambi[i] = 0;
 		}
-		if (++ev.cambi[i] > 10) {
-			ev.rumoroso[i] = 1;
+		if (++events.cambi[i] > 10) {
+			events.rumoroso[i] = 1;
 			ev_testa();
-			fprintf(ev.out, "(byte %d dei sensori cambia troppo spesso: da ora lo ignoro)\n", i);
+			fprintf(events.out, "(byte %d dei sensori cambia troppo spesso: da ora lo ignoro)\n", i);
 			continue;
 		}
 		if (!scritto++) {
 			ev_testa();
-			fprintf(ev.out, "sensori");
+			fprintf(events.out, "sensori");
 		}
-		fprintf(ev.out, "  [%d] %02x->%02x", i, ev.prec[i], f->dati[i]);
+		fprintf(events.out, "  [%d] %02x->%02x", i, events.prec[i], f->data[i]);
 	}
 	if (scritto)
-		fputc('\n', ev.out);
-	if (apprendo == 0 && ev.fine_apprendimento && ev.t0) {
+		fputc('\n', events.out);
+	if (apprendo == 0 && events.fine_apprendimento && events.t0) {
 		/* stampa una volta sola l'elenco dei byte ignorati, alla fine dell'apprendimento */
 		static int detto;
 		if (!detto++) {
 			ev_testa();
-			fprintf(ev.out, "fine apprendimento; byte dei sensori ignorati perché cambiano da soli:");
+			fprintf(events.out, "fine apprendimento; byte dei sensori ignorati perché cambiano da soli:");
 			for (int i = 0; i < EV_SENSORI; i++)
-				if (ev.rumoroso[i])
-					fprintf(ev.out, " %d", i);
-			fputc('\n', ev.out);
+				if (events.rumoroso[i])
+					fprintf(events.out, " %d", i);
+			fputc('\n', events.out);
 		}
 	}
-	memcpy(ev.prec, f->dati, (size_t)n);
+	memcpy(events.prec, f->data, (size_t)n);
 }
 
 static void ev_gd32(const gd32_frame_t *f, void *ctx)
@@ -246,30 +246,30 @@ static void ev_gd32(const gd32_frame_t *f, void *ctx)
 	(void)ctx;
 	if (f->cmd == GD32_HEARTBEAT)
 		return;
-	if (ev.dir == REG_VERSO_SOC && f->cmd == GD32_SENSORI) {
+	if (events.dir == REG_VERSO_SOC && f->cmd == GD32_SENSORS) {
 		ev_sensori(f);
 		return;
 	}
-	if (ev.dir == REG_DAL_SOC && f->cmd == GD32_VELOCITA && f->n_dati == 8) {
-		if (ev.ha_vel && !memcmp(ev.vel_prec, f->dati, 8))
+	if (events.dir == REG_DAL_SOC && f->cmd == GD32_VELOCITY && f->data_len == 8) {
+		if (events.ha_vel && !memcmp(events.vel_prec, f->data, 8))
 			return;
-		memcpy(ev.vel_prec, f->dati, 8);
-		ev.ha_vel = 1;
+		memcpy(events.vel_prec, f->data, 8);
+		events.ha_vel = 1;
 	}
 	ev_frame(f);
 }
 
-static void ev_lidar(const lidar_pacchetto_t *p, void *ctx)
+static void ev_lidar(const lidar_packet_t *p, void *ctx)
 {
 	(void)ctx;
-	if (p->cmd == LIDAR_SCANSIONE || p->cmd == LIDAR_SCANSIONE_NUOVA)
+	if (p->cmd == LIDAR_SCAN || p->cmd == LIDAR_SCAN_NEW)
 		return;
-	const char *nome = lidar_nome_cmd(p->cmd);
+	const char *name = lidar_cmd_name(p->cmd);
 	ev_testa();
-	fprintf(ev.out, "lidar 0x%02x %s:", p->cmd, nome ? nome : "?");
+	fprintf(events.out, "lidar 0x%02x %s:", p->cmd, name ? name : "?");
 	for (int i = 0; i < p->n_param; i++)
-		fprintf(ev.out, " %02x", p->param[i]);
-	fputc('\n', ev.out);
+		fprintf(events.out, " %02x", p->param[i]);
+	fputc('\n', events.out);
 }
 
 /* ------------------------------------------------------------------------------------------------------ */
@@ -357,7 +357,7 @@ static int apri_canale(canale_t *c, int senza_mount)
 			return -1;
 		}
 		/* in /dev e non in /tmp: sul robot /tmp è montata nodev e lì un nodo di dispositivo non si apre */
-		snprintf(c->vero, sizeof c->vero, "/dev/spia-%s-vero", c->info.nome);
+		snprintf(c->vero, sizeof c->vero, "/dev/spia-%s-vero", c->info.name);
 		unlink(c->vero);
 		if (mknod(c->vero, S_IFCHR | 0600, st.st_rdev)) {
 			fprintf(stderr, "spia: mknod %s: %s\n", c->vero, strerror(errno));
@@ -416,7 +416,7 @@ static void chiudi_canale(canale_t *c)
 /* Scrive tutto il blocco su fd, aspettando al massimo attesa_ms. Ritorna i byte NON scritti. */
 static size_t scrivi_tutto(int fd, const uint8_t *b, size_t n, int attesa_ms)
 {
-	int64_t limite = rt_adesso() + RT_MS(attesa_ms);
+	int64_t limite = rt_now() + RT_MS(attesa_ms);
 	while (n > 0) {
 		ssize_t k = write(fd, b, n);
 		if (k > 0) {
@@ -426,7 +426,7 @@ static size_t scrivi_tutto(int fd, const uint8_t *b, size_t n, int attesa_ms)
 		}
 		if (k < 0 && errno != EAGAIN && errno != EINTR)
 			break;
-		int64_t resto = limite - rt_adesso();
+		int64_t resto = limite - rt_now();
 		if (resto <= 0)
 			break;
 		struct pollfd p = { .fd = fd, .events = POLLOUT };
@@ -437,10 +437,10 @@ static size_t scrivi_tutto(int fd, const uint8_t *b, size_t n, int attesa_ms)
 
 static void stampa_stato(canale_t *cc, int n, int64_t t0)
 {
-	fprintf(stderr, "[%7.1f s]", (double)(rt_adesso() - t0) / RT_NS_PER_S);
+	fprintf(stderr, "[%7.1f s]", (double)(rt_now() - t0) / RT_NS_PER_S);
 	for (int i = 0; i < n; i++) {
 		canale_t *c = &cc[i];
-		fprintf(stderr, "  %s:", c->info.nome);
+		fprintf(stderr, "  %s:", c->info.name);
 		for (int d = 0; d < 2; d++) {
 			uint64_t ok, err, sc;
 			decod_contatori(&c->decod[d], &ok, &err, &sc);
@@ -460,13 +460,13 @@ static int analizza_canale(const char *s, reg_canale_t *c, uint8_t id)
 	/* formato: nome,protocollo,dispositivo   es. gd32,gd32,/dev/ttyS3 */
 	char tmp[256];
 	snprintf(tmp, sizeof tmp, "%s", s);
-	char *nome = strtok(tmp, ","), *proto = strtok(NULL, ","), *disp = strtok(NULL, ",");
-	if (!nome || !proto || !disp || reg_protocollo_da_nome(proto) < 0)
+	char *name = strtok(tmp, ","), *proto = strtok(NULL, ","), *disp = strtok(NULL, ",");
+	if (!name || !proto || !disp || reg_protocollo_da_nome(proto) < 0)
 		return -1;
 	memset(c, 0, sizeof(*c));
 	c->id = id;
 	c->protocollo = (uint8_t)reg_protocollo_da_nome(proto);
-	snprintf(c->nome, sizeof c->nome, "%s", nome);
+	snprintf(c->name, sizeof c->name, "%s", name);
 	snprintf(c->dispositivo, sizeof c->dispositivo, "%s", disp);
 	return 0;
 }
@@ -474,7 +474,7 @@ static int analizza_canale(const char *s, reg_canale_t *c, uint8_t id)
 static int cmd_proxy(int argc, char **argv)
 {
 	const char *uscita = NULL;
-	int priorita = 80, senza_mount = 0, forza = 0, ogni_s = 10, impara_s = 10, attesa_s = 0;
+	int priority = 80, senza_mount = 0, force = 0, ogni_s = 10, impara_s = 10, attesa_s = 0;
 	const char *file_eventi = NULL;
 	static canale_t cc[REG_MAX_CANALI];
 	int n = 0;
@@ -491,14 +491,14 @@ static int cmd_proxy(int argc, char **argv)
 	while ((o = getopt_long(argc, argv, "o:c:p:s:", opz, NULL)) != -1) {
 		switch (o) {
 		case 'o': uscita = optarg; break;
-		case 'p': priorita = atoi(optarg); break;
+		case 'p': priority = atoi(optarg); break;
 		case 's': ogni_s = atoi(optarg); break;
 		case 'M': senza_mount = 1; break;
-		case 'F': forza = 1; break;
+		case 'F': force = 1; break;
 		case 'E': file_eventi = optarg; break;
 		case 'I': impara_s = atoi(optarg); break;
 		case 'A': attesa_s = atoi(optarg); break;
-		case 'T': ev.istantanea = optarg; break;
+		case 'T': events.istantanea = optarg; break;
 		case 'c':
 			if (n == REG_MAX_CANALI || analizza_canale(optarg, &cc[n].info, (uint8_t)n)) {
 				fprintf(stderr, "spia: canale non valido: %s (formato nome,gd32|lidar|grezzo,dispositivo)\n", optarg);
@@ -522,7 +522,7 @@ static int cmd_proxy(int argc, char **argv)
 		int occupati = 0;
 		for (int i = 0; i < n; i++)
 			occupati += chi_lo_usa(cc[i].info.dispositivo);
-		if (occupati && !forza) {
+		if (occupati && !force) {
 			fprintf(stderr, "spia: prima ferma chi usa i dispositivi (es. /etc/init.d/robotManager stop)\n");
 			return 1;
 		}
@@ -546,39 +546,39 @@ static int cmd_proxy(int argc, char **argv)
 	sigaction(SIGHUP, &sa, NULL);
 	signal(SIGPIPE, SIG_IGN);
 
-	int esito = 0;
+	int result = 0;
 	for (int i = 0; i < n; i++) {
 		if (apri_canale(&cc[i], senza_mount)) {
-			esito = 1;
+			result = 1;
 			goto fine;
 		}
-		printf("canale %s: %s <-> %s (pty %s)\n", cc[i].info.nome, cc[i].info.dispositivo, cc[i].vero, cc[i].slave);
+		printf("canale %s: %s <-> %s (pty %s)\n", cc[i].info.name, cc[i].info.dispositivo, cc[i].vero, cc[i].slave);
 	}
 	fflush(stdout);
 
 	/* Tempo reale: memoria bloccata e SCHED_FIFO. Se non si può (sul PC senza root) si va avanti lo stesso. */
 	if (rt_init())
 		fprintf(stderr, "spia: mlockall non riuscito (si continua)\n");
-	struct sched_param sp = { .sched_priority = priorita };
-	if (priorita > 0 && sched_setscheduler(0, SCHED_FIFO, &sp))
-		fprintf(stderr, "spia: SCHED_FIFO %d non riuscito: %s (si continua)\n", priorita, strerror(errno));
+	struct sched_param sp = { .sched_priority = priority };
+	if (priority > 0 && sched_setscheduler(0, SCHED_FIFO, &sp))
+		fprintf(stderr, "spia: SCHED_FIFO %d non riuscito: %s (si continua)\n", priority, strerror(errno));
 
 	struct pollfd pf[2 * REG_MAX_CANALI];
 	static uint8_t buf[4096];
-	int64_t t0 = rt_adesso(), prossimo_stato = t0 + RT_S(ogni_s), prossimo_flush = t0 + RT_S(1);
+	int64_t t0 = rt_now(), prossimo_stato = t0 + RT_S(ogni_s), prossimo_flush = t0 + RT_S(1);
 	static decod_t dec_ev[REG_MAX_CANALI][2];
 	if (file_eventi) {
-		ev.out = fopen(file_eventi, "w");
-		if (!ev.out) {
+		events.out = fopen(file_eventi, "w");
+		if (!events.out) {
 			fprintf(stderr, "spia: apro %s: %s\n", file_eventi, strerror(errno));
-			esito = 1;
+			result = 1;
 			goto fine;
 		}
-		setvbuf(ev.out, NULL, _IOLBF, 0);
-		ev.t0 = t0;
-		ev.inizio_apprendimento = t0 + RT_S(attesa_s);
-		ev.fine_apprendimento = ev.inizio_apprendimento + RT_S(impara_s);
-		fprintf(ev.out, "spia: tra %d s imparo per %d s quali byte dei sensori cambiano da soli (non toccare il robot)\n",
+		setvbuf(events.out, NULL, _IOLBF, 0);
+		events.t0 = t0;
+		events.inizio_apprendimento = t0 + RT_S(attesa_s);
+		events.fine_apprendimento = events.inizio_apprendimento + RT_S(impara_s);
+		fprintf(events.out, "spia: tra %d s imparo per %d s quali byte dei sensori cambiano da soli (non toccare il robot)\n",
 		        attesa_s, impara_s);
 		for (int i = 0; i < n; i++)
 			for (int d = 0; d < 2; d++)
@@ -593,10 +593,10 @@ static int cmd_proxy(int argc, char **argv)
 		int r = poll(pf, (nfds_t)(2 * n), 200);
 		if (r < 0 && errno != EINTR) {
 			perror("spia: poll");
-			esito = 1;
+			result = 1;
 			break;
 		}
-		int64_t adesso = rt_adesso();
+		int64_t now = rt_now();
 		for (int i = 0; i < n && r > 0; i++) {
 			canale_t *c = &cc[i];
 			for (int lato = 0; lato < 2; lato++) {
@@ -609,25 +609,25 @@ static int cmd_proxy(int argc, char **argv)
 				/* lato 0: dalla periferica verso il SoC; lato 1: dai programmi verso la periferica */
 				int dir = lato == 0 ? REG_VERSO_SOC : REG_DAL_SOC;
 				int dest = lato == 0 ? c->fd_master : c->fd_vero;
-				reg_scrivi_record(reg, adesso, c->info.id, (uint8_t)dir, buf, (uint16_t)k);
+				reg_scrivi_record(reg, now, c->info.id, (uint8_t)dir, buf, (uint16_t)k);
 				c->byte[dir] += (uint64_t)k;
 				c->blocchi[dir]++;
 				c->persi[dir] += scrivi_tutto(dest, buf, (size_t)k, 20);
 				decod_scrivi(&c->decod[dir], buf, (size_t)k, NULL, NULL, NULL);
-				if (ev.out) {
-					ev.dir = dir;
-					ev.adesso = adesso;
+				if (events.out) {
+					events.dir = dir;
+					events.now = now;
 					decod_scrivi(&dec_ev[i][dir], buf, (size_t)k, ev_gd32, ev_lidar, NULL);
 				}
 			}
 		}
-		if (adesso >= prossimo_flush) {
+		if (now >= prossimo_flush) {
 			fflush(reg);
-			prossimo_flush = adesso + RT_S(1);
+			prossimo_flush = now + RT_S(1);
 		}
-		if (ogni_s > 0 && adesso >= prossimo_stato) {
+		if (ogni_s > 0 && now >= prossimo_stato) {
 			stampa_stato(cc, n, t0);
-			prossimo_stato = adesso + RT_S(ogni_s);
+			prossimo_stato = now + RT_S(ogni_s);
 		}
 	}
 	stampa_stato(cc, n, t0);
@@ -635,13 +635,13 @@ static int cmd_proxy(int argc, char **argv)
 fine:
 	for (int i = 0; i < n; i++)
 		chiudi_canale(&cc[i]);
-	if (ev.out)
-		fclose(ev.out);
+	if (events.out)
+		fclose(events.out);
 	if (fclose(reg)) {
 		fprintf(stderr, "spia: chiudo %s: %s\n", uscita, strerror(errno));
-		esito = 1;
+		result = 1;
 	}
-	return esito;
+	return result;
 }
 
 
@@ -671,7 +671,7 @@ typedef struct {
 	decod_t decod[2];
 } sock_t;
 
-static int indirizzo(const char *percorso, struct sockaddr_un *a)
+static int address(const char *percorso, struct sockaddr_un *a)
 {
 	memset(a, 0, sizeof(*a));
 	a->sun_family = AF_UNIX;
@@ -700,7 +700,7 @@ static int apri_sock(sock_t *c)
 	}
 	c->rinominato = 1;
 	c->fd_ascolto = socket(AF_UNIX, (c->datagrammi ? SOCK_DGRAM : SOCK_STREAM) | SOCK_NONBLOCK, 0);
-	if (c->fd_ascolto < 0 || indirizzo(p, &a) || bind(c->fd_ascolto, (struct sockaddr *)&a, sizeof a) ||
+	if (c->fd_ascolto < 0 || address(p, &a) || bind(c->fd_ascolto, (struct sockaddr *)&a, sizeof a) ||
 	    (!c->datagrammi && listen(c->fd_ascolto, 8))) {
 		fprintf(stderr, "spia: socket su %s: %s\n", p, strerror(errno));
 		return -1;
@@ -733,15 +733,15 @@ static void chiudi_sock(sock_t *c)
 	c->rinominato = 0;
 }
 
-static void accetta(sock_t *c, int64_t adesso, FILE *reg)
+static void accetta(sock_t *c, int64_t now, FILE *reg)
 {
 	int fc = accept4(c->fd_ascolto, NULL, NULL, SOCK_NONBLOCK);
 	if (fc < 0)
 		return;
 	struct sockaddr_un a;
 	int fs = socket(AF_UNIX, SOCK_STREAM, 0);
-	if (fs < 0 || indirizzo(c->vero, &a) || connect(fs, (struct sockaddr *)&a, sizeof a)) {
-		fprintf(stderr, "spia: %s: collegamento al server %s fallito: %s\n", c->info.nome, c->vero, strerror(errno));
+	if (fs < 0 || address(c->vero, &a) || connect(fs, (struct sockaddr *)&a, sizeof a)) {
+		fprintf(stderr, "spia: %s: collegamento al server %s fallito: %s\n", c->info.name, c->vero, strerror(errno));
 		close(fc);
 		if (fs >= 0) close(fs);
 		return;
@@ -751,7 +751,7 @@ static void accetta(sock_t *c, int64_t adesso, FILE *reg)
 	while (i < SOCK_MAX_COPPIE && c->fd_client[i] >= 0)
 		i++;
 	if (i == SOCK_MAX_COPPIE) {
-		fprintf(stderr, "spia: %s: troppi client\n", c->info.nome);
+		fprintf(stderr, "spia: %s: troppi client\n", c->info.name);
 		close(fc);
 		close(fs);
 		return;
@@ -760,10 +760,10 @@ static void accetta(sock_t *c, int64_t adesso, FILE *reg)
 	c->fd_server[i] = fs;
 	c->connessioni++;
 	/* un record vuoto segna l'inizio di una nuova connessione (i deframer ripartono da capo) */
-	reg_scrivi_record(reg, adesso, c->info.id, REG_DAL_SOC, NULL, 0);
+	reg_scrivi_record(reg, now, c->info.id, REG_DAL_SOC, NULL, 0);
 	decod_init(&c->decod[0], c->info.protocollo);
 	decod_init(&c->decod[1], c->info.protocollo);
-	fprintf(stderr, "spia: %s: nuovo client collegato (coppia %d)\n", c->info.nome, i);
+	fprintf(stderr, "spia: %s: nuovo client collegato (coppia %d)\n", c->info.name, i);
 }
 
 static int cmd_socket(int argc, char **argv)
@@ -812,19 +812,19 @@ static int cmd_socket(int argc, char **argv)
 	sigaction(SIGHUP, &sa, NULL);
 	signal(SIGPIPE, SIG_IGN);
 
-	int esito = 0;
+	int result = 0;
 	for (int i = 0; i < n; i++) {
 		if (apri_sock(&cc[i])) {
-			esito = 1;
+			result = 1;
 			goto fine;
 		}
-		printf("canale %s (%s): %s <-> %s\n", cc[i].info.nome, cc[i].datagrammi ? "datagrammi" : "stream",
+		printf("canale %s (%s): %s <-> %s\n", cc[i].info.name, cc[i].datagrammi ? "datagrammi" : "stream",
 		       cc[i].info.dispositivo, cc[i].vero);
 	}
 	fflush(stdout);
 
 	static uint8_t buf[REG_MAX_BLOCCO];
-	int64_t t0 = rt_adesso(), prossimo_stato = t0 + RT_S(ogni_s), prossimo_flush = t0 + RT_S(1);
+	int64_t t0 = rt_now(), prossimo_stato = t0 + RT_S(ogni_s), prossimo_flush = t0 + RT_S(1);
 	while (!fermati) {
 		struct pollfd pf[REG_MAX_CANALI * (1 + 2 * SOCK_MAX_COPPIE)];
 		int quale[REG_MAX_CANALI * (1 + 2 * SOCK_MAX_COPPIE)][2];   /* canale, ruolo: -1 ascolto, 2i client, 2i+1 server */
@@ -844,10 +844,10 @@ static int cmd_socket(int argc, char **argv)
 		int r = poll(pf, (nfds_t)np, 200);
 		if (r < 0 && errno != EINTR) {
 			perror("spia: poll");
-			esito = 1;
+			result = 1;
 			break;
 		}
-		int64_t adesso = rt_adesso();
+		int64_t now = rt_now();
 		for (int j = 0; j < np && r > 0; j++) {
 			if (!(pf[j].revents & (POLLIN | POLLHUP | POLLERR)))
 				continue;
@@ -858,15 +858,15 @@ static int cmd_socket(int argc, char **argv)
 				if (k < 0)
 					continue;
 				struct sockaddr_un a;
-				indirizzo(c->vero, &a);
+				address(c->vero, &a);
 				sendto(c->fd_ascolto, buf, (size_t)k, MSG_DONTWAIT, (struct sockaddr *)&a, sizeof a);
-				reg_scrivi_record(reg, adesso, c->info.id, REG_VERSO_SOC, buf, (uint16_t)k);
+				reg_scrivi_record(reg, now, c->info.id, REG_VERSO_SOC, buf, (uint16_t)k);
 				c->byte[0] += (uint64_t)k;
 				decod_scrivi(&c->decod[0], buf, (size_t)k, NULL, NULL, NULL);
 				continue;
 			}
 			if (ruolo < 0) {
-				accetta(c, adesso, reg);
+				accetta(c, now, reg);
 				continue;
 			}
 			int coppia = ruolo / 2, dal_client = ruolo % 2 == 0;
@@ -876,7 +876,7 @@ static int cmd_socket(int argc, char **argv)
 				continue;
 			ssize_t k = read(da, buf, sizeof buf);
 			if (k == 0 || (k < 0 && errno != EAGAIN && errno != EINTR)) {
-				fprintf(stderr, "spia: %s: il %s ha chiuso la connessione (coppia %d)\n", c->info.nome,
+				fprintf(stderr, "spia: %s: il %s ha chiuso la connessione (coppia %d)\n", c->info.name,
 				        dal_client ? "client" : "server", coppia);
 				chiudi_coppia(c, coppia);
 				continue;
@@ -884,37 +884,37 @@ static int cmd_socket(int argc, char **argv)
 			if (k < 0)
 				continue;
 			int dir = dal_client ? REG_DAL_SOC : REG_VERSO_SOC;
-			reg_scrivi_record(reg, adesso, c->info.id, (uint8_t)dir, buf, (uint16_t)k);
+			reg_scrivi_record(reg, now, c->info.id, (uint8_t)dir, buf, (uint16_t)k);
 			c->byte[dir] += (uint64_t)k;
 			decod_scrivi(&c->decod[dir], buf, (size_t)k, NULL, NULL, NULL);
 			if (scrivi_tutto(a_fd, buf, (size_t)k, 1000))
-				fprintf(stderr, "spia: %s: byte persi inoltrando (coppia %d)\n", c->info.nome, coppia);
+				fprintf(stderr, "spia: %s: byte persi inoltrando (coppia %d)\n", c->info.name, coppia);
 		}
-		if (adesso >= prossimo_flush) {
+		if (now >= prossimo_flush) {
 			fflush(reg);
-			prossimo_flush = adesso + RT_S(1);
+			prossimo_flush = now + RT_S(1);
 		}
-		if (ogni_s > 0 && adesso >= prossimo_stato) {
-			fprintf(stderr, "[%7.1f s]", (double)(adesso - t0) / RT_NS_PER_S);
+		if (ogni_s > 0 && now >= prossimo_stato) {
+			fprintf(stderr, "[%7.1f s]", (double)(now - t0) / RT_NS_PER_S);
 			for (int i = 0; i < n; i++) {
 				uint64_t ok0, e0, s0, ok1, e1, s1;
 				decod_contatori(&cc[i].decod[0], &ok0, &e0, &s0);
 				decod_contatori(&cc[i].decod[1], &ok1, &e1, &s1);
 				fprintf(stderr, "  %s: %llu conn, server->client %llu B %llu msg, client->server %llu B %llu msg",
-				        cc[i].info.nome, (unsigned long long)cc[i].connessioni,
+				        cc[i].info.name, (unsigned long long)cc[i].connessioni,
 				        (unsigned long long)cc[i].byte[0], (unsigned long long)ok0,
 				        (unsigned long long)cc[i].byte[1], (unsigned long long)ok1);
 			}
 			fputc('\n', stderr);
-			prossimo_stato = adesso + RT_S(ogni_s);
+			prossimo_stato = now + RT_S(ogni_s);
 		}
 	}
 fine:
 	for (int i = 0; i < n; i++)
 		chiudi_sock(&cc[i]);
 	if (fclose(reg))
-		esito = 1;
-	return esito;
+		result = 1;
+	return result;
 }
 
 
@@ -930,12 +930,12 @@ fine:
  *       --sequenza FILE         comandi a tempi stabiliti (formato sotto)
  *     DATI = elementi separati da virgole: byte in esadecimale ("0a00") oppure tipo=valore con tipo
  *     i8 u8 i16 u16 i32 u32 (little-endian). Esempi: 0x0d   0x97:01   0x66:i32=1000,i32=0@20
- *   - stampa ogni secondo una riga con i sensori decodificati (gd32_sensori_t) e i contatori, e subito ogni
+ *   - stampa ogni secondo una riga con i sensori decodificati (gd32_sensors_t) e i contatori, e subito ogni
  *     frame del GD32 che non sia sensori o heartbeat; con --csv FILE scrive tutti i campi dei sensori
  *     (ogni frame, oppure ogni --csv-ogni MS);
  *   - con -o REGISTRO registra tutti i byte nelle due direzioni (formato di registro.h).
  *
- * Sicurezza (gd32/sicurezza.h): i comandi ai motori diversi da zero partono solo con --sollevato, con tutti gli
+ * Sicurezza (gd32/interlock.h): i comandi ai motori diversi da zero partono solo con --sollevato, con tutti gli
  * anti-caduta su "vuoto" e frame dei sensori recenti. Se il blocco scatta, o all'uscita (fine, Ctrl-C,
  * SIGTERM, SIGHUP), manda i frame che fermano tutti i motori. Pompa dell'acqua e alimentazione del SoC sono
  * rifiutate già alla lettura delle opzioni. Con --tensione-minima DV, se la tensione media dell'ultimo secondo
@@ -959,7 +959,7 @@ fine:
 typedef struct {
 	uint8_t cmd;
 	uint8_t n;
-	uint8_t dati[GD32_MAX_DATI];
+	uint8_t data[GD32_MAX_DATA];
 } comando_t;
 
 typedef struct {
@@ -973,7 +973,7 @@ typedef enum { PASSO_UNA, PASSO_OGNI, PASSO_BASTA, PASSO_FINE } tipo_passo_t;
 
 typedef struct {
 	int64_t t;
-	tipo_passo_t tipo;
+	tipo_passo_t type;
 	int64_t periodo;
 	comando_t c;
 } passo_t;
@@ -997,23 +997,23 @@ static int analizza_comando(const char *testo, comando_t *c)
 		char *uguale = strchr(el, '=');
 		if (uguale) {
 			*uguale = 0;
-			int dim = !strcmp(el, "i8") || !strcmp(el, "u8") ? 1 :
+			int size = !strcmp(el, "i8") || !strcmp(el, "u8") ? 1 :
 			          !strcmp(el, "i16") || !strcmp(el, "u16") ? 2 :
 			          !strcmp(el, "i32") || !strcmp(el, "u32") ? 4 : 0;
 			long long v = strtoll(uguale + 1, &fine, 0);
-			if (!dim || fine == uguale + 1 || *fine || c->n + dim > GD32_MAX_DATI)
+			if (!size || fine == uguale + 1 || *fine || c->n + size > GD32_MAX_DATA)
 				return -1;
-			for (int i = 0; i < dim; i++)
-				c->dati[c->n++] = (uint8_t)((unsigned long long)v >> (8 * i));
+			for (int i = 0; i < size; i++)
+				c->data[c->n++] = (uint8_t)((unsigned long long)v >> (8 * i));
 		} else {
 			size_t l = strlen(el);
 			if (l == 0 || l % 2)
 				return -1;
 			for (size_t i = 0; i < l; i += 2) {
 				char h[3] = { el[i], el[i + 1], 0 };
-				if (!isxdigit((unsigned char)h[0]) || !isxdigit((unsigned char)h[1]) || c->n >= GD32_MAX_DATI)
+				if (!isxdigit((unsigned char)h[0]) || !isxdigit((unsigned char)h[1]) || c->n >= GD32_MAX_DATA)
 					return -1;
-				c->dati[c->n++] = (uint8_t)strtol(h, NULL, 16);
+				c->data[c->n++] = (uint8_t)strtol(h, NULL, 16);
 			}
 		}
 	}
@@ -1021,23 +1021,23 @@ static int analizza_comando(const char *testo, comando_t *c)
 }
 
 /* Controlli alla lettura delle opzioni: vietati sempre; motori diversi da zero solo con --sollevato. */
-static int comando_ammesso(const comando_t *c, int sollevato, const char *testo)
+static int comando_ammesso(const comando_t *c, int lifted, const char *testo)
 {
 	int zero = 1;
 	for (int i = 0; i < c->n; i++)
-		zero &= c->dati[i] == 0;
-	if (sic_e_vietato(c->cmd)) {
+		zero &= c->data[i] == 0;
+	if (interlock_is_forbidden(c->cmd)) {
 		fprintf(stderr, "spia guida: %s: comando vietato (pompa dell'acqua o alimentazione del SoC)\n", testo);
 		return 0;
 	}
-	if (sic_e_motore(c->cmd) && !zero && !sollevato) {
+	if (interlock_is_motor(c->cmd) && !zero && !lifted) {
 		fprintf(stderr, "spia guida: %s: comando a un motore, serve --sollevato (robot sollevato da terra)\n", testo);
 		return 0;
 	}
 	return 1;
 }
 
-static int leggi_sequenza(const char *percorso, passo_t *p, int max, int sollevato)
+static int leggi_sequenza(const char *percorso, passo_t *p, int max, int lifted)
 {
 	FILE *f = fopen(percorso, "r");
 	if (!f) {
@@ -1046,7 +1046,7 @@ static int leggi_sequenza(const char *percorso, passo_t *p, int max, int solleva
 	}
 	char riga[1100];
 	int n = 0, nr = 0;
-	int64_t ultimo = 0;
+	int64_t last = 0;
 	while (fgets(riga, sizeof riga, f)) {
 		nr++;
 		char *c = strchr(riga, '#');
@@ -1057,27 +1057,27 @@ static int leggi_sequenza(const char *percorso, passo_t *p, int max, int solleva
 		int k = sscanf(riga, "%lld %1023s %1023s %1023s", &t, a, b, d);
 		if (k <= 0)
 			continue;
-		if (n == max || k < 2 || t < 0 || t * RT_NS_PER_MS < ultimo)
+		if (n == max || k < 2 || t < 0 || t * RT_NS_PER_MS < last)
 			goto errore;
-		p[n].t = ultimo = t * RT_NS_PER_MS;
+		p[n].t = last = t * RT_NS_PER_MS;
 		const char *testo = a;
 		if (!strcmp(a, "fine")) {
-			p[n].tipo = PASSO_FINE;
+			p[n].type = PASSO_FINE;
 			n++;
 			continue;
 		} else if (!strcmp(a, "basta")) {
-			p[n].tipo = PASSO_BASTA;
+			p[n].type = PASSO_BASTA;
 			testo = b;
 		} else if (!strcmp(a, "ogni")) {
-			p[n].tipo = PASSO_OGNI;
+			p[n].type = PASSO_OGNI;
 			p[n].periodo = atoll(b) * RT_NS_PER_MS;
 			if (p[n].periodo <= 0)
 				goto errore;
 			testo = d;
 		} else {
-			p[n].tipo = PASSO_UNA;
+			p[n].type = PASSO_UNA;
 		}
-		if (analizza_comando(testo, &p[n].c) || !comando_ammesso(&p[n].c, sollevato, testo))
+		if (analizza_comando(testo, &p[n].c) || !comando_ammesso(&p[n].c, lifted, testo))
 			goto errore;
 		n++;
 	}
@@ -1094,16 +1094,16 @@ typedef struct {
 	int fd;
 	FILE *reg, *csv;
 	int64_t t0, csv_ogni, csv_prossimo;
-	sicurezza_t sic;
+	interlock_t sic;
 	int scattato_ora;                   /* la callback ha fatto scattare il blocco: arresto da mandare */
-	gd32_sensori_t s;                   /* ultimo frame dei sensori decodificato */
-	int ha_sensori;
+	gd32_sensors_t s;                   /* ultimo frame dei sensori decodificato */
+	int has_sensors;
 	uint64_t sensori, hb_gd32, altri;
 	long somma_dv, n_dv;                /* tensione media dell'ultimo secondo */
 	uint64_t mandati_cmd[256];
 } guida_t;
 
-static double guida_t_s(const guida_t *g, int64_t adesso) { return (double)(adesso - g->t0) / RT_NS_PER_S; }
+static double guida_t_s(const guida_t *g, int64_t now) { return (double)(now - g->t0) / RT_NS_PER_S; }
 
 static void guida_csv_testa(FILE *f)
 {
@@ -1112,33 +1112,33 @@ static void guida_csv_testa(FILE *f)
 	           "b2,b4,b5,b6,controllo,led,b66,b67,b68,b69x100,acqua,g72,c74,c76,c78,c80,c82,c84,b88,mag_x,mag_y,mag_z\n");
 }
 
-static void guida_csv_riga(FILE *f, double t, const gd32_sensori_t *s, const uint8_t *d)
+static void guida_csv_riga(FILE *f, double t, const gd32_sensors_t *s, const uint8_t *d)
 {
 	fprintf(f, "%.3f,%u,%u,%u,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%u,%u,%u,%u,%u,%u,%u,%d,%u,%d,%u,%u",
-	        t, s->stato, s->bumper_bit, d[3], s->cassetto, s->in_carica, s->sulla_base, s->tensione_dv,
-	        s->temperatura_c, s->encoder_sx, s->encoder_dx, s->vel_sx, s->vel_dx, s->vel_angolare[0], s->vel_angolare[1], s->vel_angolare[2],
-	        s->angolo[0], s->angolo[1], s->angolo[2], s->gravita[0], s->gravita[1], s->gravita[2], s->tasto_accensione_ms,
-	        s->tasto_casa_ms, s->byte2, d[4], s->byte5, d[6], s->controllo, s->led, s->byte66, s->byte67, s->byte68,
-	        s->byte69_x100, s->acqua, s->grezzo72);
+	        t, s->status, s->bumper_raw, d[3], s->dustbin, s->charging, s->on_base, s->voltage_dv,
+	        s->temperature_c, s->encoder_left, s->encoder_right, s->v_measured, s->w_measured, s->angular_velocity[0], s->angular_velocity[1], s->angular_velocity[2],
+	        s->angle[0], s->angle[1], s->angle[2], s->gravity[0], s->gravity[1], s->gravity[2], s->power_button_ms,
+	        s->home_button_ms, s->byte2, d[4], s->byte5, d[6], s->control, s->led, s->byte66, s->byte67, s->byte68,
+	        s->fan_rpm, s->water, s->raw72);
 	for (int i = 0; i < 6; i++)
-		fprintf(f, ",%u", s->correnti[i]);
-	fprintf(f, ",%d,%d,%d,%d\n", s->byte88, s->magnetico[0], s->magnetico[1], s->magnetico[2]);
+		fprintf(f, ",%u", s->currents[i]);
+	fprintf(f, ",%d,%d,%d,%d\n", s->byte88, s->magnetic[0], s->magnetic[1], s->magnetic[2]);
 }
 
 static void guida_frame(const gd32_frame_t *f, void *ctx)
 {
 	guida_t *g = ctx;
-	int64_t adesso = rt_adesso();
-	if (sic_ricevuto(&g->sic, f, adesso))
+	int64_t now = rt_now();
+	if (interlock_received(&g->sic, f, now))
 		g->scattato_ora = 1;
-	if (f->cmd == GD32_SENSORI && gd32_leggi_sensori(f, &g->s) == 0) {
-		g->ha_sensori = 1;
+	if (f->cmd == GD32_SENSORS && gd32_read_sensors(f, &g->s) == 0) {
+		g->has_sensors = 1;
 		g->sensori++;
-		g->somma_dv += g->s.tensione_dv;
+		g->somma_dv += g->s.voltage_dv;
 		g->n_dv++;
-		if (g->csv && adesso >= g->csv_prossimo) {
-			guida_csv_riga(g->csv, guida_t_s(g, adesso), &g->s, f->dati);
-			g->csv_prossimo = g->csv_ogni ? adesso + g->csv_ogni : 0;
+		if (g->csv && now >= g->csv_prossimo) {
+			guida_csv_riga(g->csv, guida_t_s(g, now), &g->s, f->data);
+			g->csv_prossimo = g->csv_ogni ? now + g->csv_ogni : 0;
 		}
 		return;
 	}
@@ -1147,18 +1147,18 @@ static void guida_frame(const gd32_frame_t *f, void *ctx)
 		return;
 	}
 	g->altri++;
-	const char *nome = gd32_nome_cmd(f->cmd);
-	printf("%8.3f rx 0x%02x %s:", guida_t_s(g, adesso), f->cmd, nome ? nome : "?");
-	for (int i = 0; i < f->n_dati; i++)
-		printf(" %02x", f->dati[i]);
+	const char *name = gd32_cmd_name(f->cmd);
+	printf("%8.3f rx 0x%02x %s:", guida_t_s(g, now), f->cmd, name ? name : "?");
+	for (int i = 0; i < f->data_len; i++)
+		printf(" %02x", f->data[i]);
 	putchar('\n');
 	fflush(stdout);
 }
 
-static void guida_scrivi(guida_t *g, const uint8_t *fr, size_t k, int64_t adesso)
+static void guida_scrivi(guida_t *g, const uint8_t *fr, size_t k, int64_t now)
 {
 	if (scrivi_tutto(g->fd, fr, k, 50) == 0 && g->reg)
-		reg_scrivi_record(g->reg, adesso, 0, REG_DAL_SOC, fr, (uint16_t)k);
+		reg_scrivi_record(g->reg, now, 0, REG_DAL_SOC, fr, (uint16_t)k);
 }
 
 /*
@@ -1167,24 +1167,24 @@ static void guida_scrivi(guida_t *g, const uint8_t *fr, size_t k, int64_t adesso
  */
 static int guida_manda(guida_t *g, const comando_t *c, int stampa)
 {
-	int64_t adesso = rt_adesso();
-	sic_esito_t e = sic_permesso(&g->sic, c->cmd, c->dati, c->n, adesso);
-	if (e != SIC_PERMESSO) {
-		if (stampa || g->sic.rifiutati == 1)
-			printf("%8.3f RIFIUTATO 0x%02x (%s)\n", guida_t_s(g, adesso), c->cmd,
-			       g->sic.scattato ? g->sic.motivo : "il robot non risulta sollevato");
+	int64_t now = rt_now();
+	interlock_result_t e = interlock_permit(&g->sic, c->cmd, c->data, c->n, now);
+	if (e != INTERLOCK_ALLOWED) {
+		if (stampa || g->sic.refused == 1)
+			printf("%8.3f RIFIUTATO 0x%02x (%s)\n", guida_t_s(g, now), c->cmd,
+			       g->sic.tripped ? g->sic.reason : "il robot non risulta sollevato");
 		fflush(stdout);
 		return 0;
 	}
 	uint8_t fr[GD32_MAX_FRAME];
-	size_t k = gd32_componi(c->cmd, c->dati, c->n, fr, sizeof fr);
-	guida_scrivi(g, fr, k, adesso);
+	size_t k = gd32_build_frame(c->cmd, c->data, c->n, fr, sizeof fr);
+	guida_scrivi(g, fr, k, now);
 	g->mandati_cmd[c->cmd]++;
 	if (stampa) {
-		const char *nome = gd32_nome_cmd(c->cmd);
-		printf("%8.3f tx 0x%02x %s:", guida_t_s(g, adesso), c->cmd, nome ? nome : "?");
+		const char *name = gd32_cmd_name(c->cmd);
+		printf("%8.3f tx 0x%02x %s:", guida_t_s(g, now), c->cmd, name ? name : "?");
 		for (int i = 0; i < c->n; i++)
-			printf(" %02x", c->dati[i]);
+			printf(" %02x", c->data[i]);
 		putchar('\n');
 		fflush(stdout);
 	}
@@ -1194,37 +1194,37 @@ static int guida_manda(guida_t *g, const comando_t *c, int stampa)
 static void guida_arresto(guida_t *g, const char *perche)
 {
 	uint8_t buf[256];
-	int64_t adesso = rt_adesso();
-	size_t k = sic_frame_arresto(buf, sizeof buf);
-	guida_scrivi(g, buf, k, adesso);
-	printf("%8.3f ARRESTO DEI MOTORI: %s\n", guida_t_s(g, adesso), perche);
+	int64_t now = rt_now();
+	size_t k = interlock_stop_frames(buf, sizeof buf);
+	guida_scrivi(g, buf, k, now);
+	printf("%8.3f ARRESTO DEI MOTORI: %s\n", guida_t_s(g, now), perche);
 	fflush(stdout);
 }
 
-static void guida_riga_stato(guida_t *g, int64_t adesso, const periodico_t *per, int n_per)
+static void guida_riga_stato(guida_t *g, int64_t now, const periodico_t *per, int n_per)
 {
-	const gd32_sensori_t *s = &g->s;
-	printf("%8.3f ", guida_t_s(g, adesso));
-	if (g->ha_sensori)
+	const gd32_sensors_t *s = &g->s;
+	printf("%8.3f ", guida_t_s(g, now));
+	if (g->has_sensors)
 		printf("%4.1f V %d°C cliff %x bump %x base %d/%d enc %d/%d vel %d/%d corr %u %u %u %u %u %u led %02x |",
-		       s->tensione_dv / 10.0, s->temperatura_c, g->sic.cliff, s->bumper_bit, s->sulla_base, s->in_carica,
-		       s->encoder_sx, s->encoder_dx, s->vel_sx, s->vel_dx, s->correnti[0], s->correnti[1],
-		       s->correnti[2], s->correnti[3], s->correnti[4], s->correnti[5], s->led);
+		       s->voltage_dv / 10.0, s->temperature_c, g->sic.cliff, s->bumper_raw, s->on_base, s->charging,
+		       s->encoder_left, s->encoder_right, s->v_measured, s->w_measured, s->currents[0], s->currents[1],
+		       s->currents[2], s->currents[3], s->currents[4], s->currents[5], s->led);
 	else
 		printf("nessun frame dei sensori |");
 	printf(" rx sens %llu hb %llu altri %llu | tx", (unsigned long long)g->sensori,
 	       (unsigned long long)g->hb_gd32, (unsigned long long)g->altri);
 	for (int i = 0; i < n_per; i++)
 		printf(" %02x:%llu", per[i].c.cmd, (unsigned long long)per[i].mandati);
-	if (g->sic.rifiutati)
-		printf(" | rifiutati %llu", (unsigned long long)g->sic.rifiutati);
-	if (g->sic.scattato)
+	if (g->sic.refused)
+		printf(" | rifiutati %llu", (unsigned long long)g->sic.refused);
+	if (g->sic.tripped)
 		printf(" | BLOCCATO");
 	putchar('\n');
 	fflush(stdout);
 }
 
-static void aggiungi_periodico(periodico_t *per, int *n, const comando_t *c, int64_t periodo, int64_t adesso)
+static void aggiungi_periodico(periodico_t *per, int *n, const comando_t *c, int64_t periodo, int64_t now)
 {
 	int i;
 	for (i = 0; i < *n && per[i].c.cmd != c->cmd; i++)
@@ -1237,7 +1237,7 @@ static void aggiungi_periodico(periodico_t *per, int *n, const comando_t *c, int
 	}
 	per[i].c = *c;
 	per[i].periodo = periodo;
-	per[i].prossimo = adesso;
+	per[i].prossimo = now;
 	per[i].solo_se_ricevi = 0;
 }
 
@@ -1254,8 +1254,8 @@ static void togli_periodico(periodico_t *per, int *n, uint8_t cmd)
 static int cmd_guida(int argc, char **argv)
 {
 	const char *disp = "/dev/ttyS3", *uscita = NULL, *file_seq = NULL, *file_csv = NULL, *file_comandi = NULL;
-	int durata = 0, solo_se_ricevi = 0, forza = 0, sollevato = 0, keepalive = 1, heartbeat = 1;
-	int tensione_minima = 0, csv_ogni_ms = 0, cliff_atteso = -1;
+	int durata = 0, solo_se_ricevi = 0, force = 0, lifted = 0, keepalives = 1, heartbeats = 1;
+	int tensione_minima = 0, csv_ogni_ms = 0, expected_cliff = -1;
 	static periodico_t per[GUIDA_MAX_PERIODICI];
 	static passo_t passi[GUIDA_MAX_PASSI];
 	static comando_t una[32];
@@ -1280,11 +1280,11 @@ static int cmd_guida(int argc, char **argv)
 		case 't': durata = atoi(optarg); break;
 		case 'r': solo_se_ricevi = 1; break;
 		case 'o': uscita = optarg; break;
-		case 'F': forza = 1; break;
-		case 'S': sollevato = 1; break;
-		case 'A': cliff_atteso = (int)strtol(optarg, NULL, 0) & 0x0f; break;
-		case 'K': keepalive = 0; break;
-		case 'H': heartbeat = 0; break;
+		case 'F': force = 1; break;
+		case 'S': lifted = 1; break;
+		case 'A': expected_cliff = (int)strtol(optarg, NULL, 0) & 0x0f; break;
+		case 'K': keepalives = 0; break;
+		case 'H': heartbeats = 0; break;
 		case 'v': tensione_minima = atoi(optarg); break;
 		case 'c': file_csv = optarg; break;
 		case 'C': csv_ogni_ms = atoi(optarg); break;
@@ -1309,15 +1309,15 @@ static int cmd_guida(int argc, char **argv)
 	}
 	/* i controlli dei comandi si fanno dopo aver letto tutte le opzioni (--sollevato può venire dopo) */
 	for (int i = 0; i < n_una; i++)
-		if (!comando_ammesso(&una[i], sollevato, "--una"))
+		if (!comando_ammesso(&una[i], lifted, "--una"))
 			return 2;
-	int64_t ora = rt_adesso();
-	if (keepalive) {
+	int64_t ora = rt_now();
+	if (keepalives) {
 		comando_t c = { .cmd = GD32_KEEPALIVE };
 		aggiungi_periodico(per, &n_per, &c, RT_MS(3000), ora);
 		per[n_per - 1].solo_se_ricevi = solo_se_ricevi;
 	}
-	if (heartbeat) {
+	if (heartbeats) {
 		comando_t c = { .cmd = GD32_HEARTBEAT };
 		aggiungi_periodico(per, &n_per, &c, RT_MS(200), ora);
 	}
@@ -1333,14 +1333,14 @@ static int cmd_guida(int argc, char **argv)
 			fprintf(stderr, "spia guida: --invia CMD[:DATI]@MS non valido: %s\n", testi_invia[i]);
 			return 2;
 		}
-		if (!comando_ammesso(&c, sollevato, testi_invia[i]))
+		if (!comando_ammesso(&c, lifted, testi_invia[i]))
 			return 2;
 		aggiungi_periodico(per, &n_per, &c, RT_MS(ms), ora);
 	}
-	if (file_seq && (n_passi = leggi_sequenza(file_seq, passi, GUIDA_MAX_PASSI, sollevato)) < 0)
+	if (file_seq && (n_passi = leggi_sequenza(file_seq, passi, GUIDA_MAX_PASSI, lifted)) < 0)
 		return 2;
 
-	if (chi_lo_usa(disp) && !forza) {
+	if (chi_lo_usa(disp) && !force) {
 		fprintf(stderr, "spia guida: prima ferma lo stack originale\n");
 		return 1;
 	}
@@ -1401,59 +1401,59 @@ static int cmd_guida(int argc, char **argv)
 	struct sched_param sp = { .sched_priority = 80 };
 	sched_setscheduler(0, SCHED_FIFO, &sp);
 
-	sic_init(&g.sic, sollevato, RT_MS(100));
-	if (cliff_atteso >= 0) {
-		sic_cliff_atteso(&g.sic, (uint8_t)cliff_atteso);
+	interlock_init(&g.sic, lifted, RT_MS(100));
+	if (expected_cliff >= 0) {
+		interlock_set_expected_cliff(&g.sic, (uint8_t)expected_cliff);
 		printf("guida: ATTENZIONE, \"sollevato\" = anti-caduta 0x%x invece di 0x%x (--cliff-atteso)\n",
-		       cliff_atteso, GD32_CLIFF_TUTTI_VUOTO);
+		       expected_cliff, GD32_CLIFF_ALL_VOID);
 	}
 	gd32_deframer_t dfr;
 	gd32_deframer_init(&dfr);
 	static uint8_t buf[4096];
-	g.t0 = rt_adesso();
+	g.t0 = rt_now();
 	int64_t prossima_riga = g.t0 + RT_S(1);
 	uint64_t frame_da_invio = 0;
-	int esito = 0, ip = 0;
+	int result = 0, ip = 0;
 	for (int i = 0; i < n_per; i++)
 		per[i].prossimo = g.t0;
 	printf("guida: %s, %d periodici, %d singoli, %d passi%s%s\n", disp, n_per, n_una, n_passi,
-	       sollevato ? ", motori ammessi (--sollevato)" : ", motori NON ammessi",
+	       lifted ? ", motori ammessi (--sollevato)" : ", motori NON ammessi",
 	       tensione_minima ? ", con tensione minima" : "");
 	fflush(stdout);
 	for (int i = 0; i < n_una; i++)
 		guida_manda(&g, &una[i], 1);
 
 	while (!fermati) {
-		int64_t adesso = rt_adesso();
-		if (durata > 0 && adesso - g.t0 >= RT_S(durata))
+		int64_t now = rt_now();
+		if (durata > 0 && now - g.t0 >= RT_S(durata))
 			break;
 		/* passi della sequenza arrivati al loro tempo */
 		int fine = 0;
-		while (ip < n_passi && adesso - g.t0 >= passi[ip].t) {
+		while (ip < n_passi && now - g.t0 >= passi[ip].t) {
 			passo_t *p = &passi[ip++];
-			if (p->tipo == PASSO_FINE) {
+			if (p->type == PASSO_FINE) {
 				fine = 1;
 				break;
-			} else if (p->tipo == PASSO_UNA) {
+			} else if (p->type == PASSO_UNA) {
 				guida_manda(&g, &p->c, 1);
-			} else if (p->tipo == PASSO_OGNI) {
-				aggiungi_periodico(per, &n_per, &p->c, p->periodo, adesso);
-				printf("%8.3f ogni %lld ms: 0x%02x\n", guida_t_s(&g, adesso), (long long)(p->periodo / RT_NS_PER_MS), p->c.cmd);
+			} else if (p->type == PASSO_OGNI) {
+				aggiungi_periodico(per, &n_per, &p->c, p->periodo, now);
+				printf("%8.3f ogni %lld ms: 0x%02x\n", guida_t_s(&g, now), (long long)(p->periodo / RT_NS_PER_MS), p->c.cmd);
 			} else {
 				togli_periodico(per, &n_per, p->c.cmd);
-				printf("%8.3f basta 0x%02x\n", guida_t_s(&g, adesso), p->c.cmd);
+				printf("%8.3f basta 0x%02x\n", guida_t_s(&g, now), p->c.cmd);
 			}
 			fflush(stdout);
 		}
 		if (fine)
 			break;
 		/* comandi periodici */
-		int64_t prossimo_evento = adesso + RT_MS(10);
+		int64_t prossimo_evento = now + RT_MS(10);
 		for (int i = 0; i < n_per; i++) {
-			if (adesso >= per[i].prossimo) {
+			if (now >= per[i].prossimo) {
 				per[i].prossimo += per[i].periodo;
-				if (per[i].prossimo <= adesso)         /* in ritardo di più di un periodo: niente raffiche */
-					per[i].prossimo = adesso + per[i].periodo;
+				if (per[i].prossimo <= now)         /* in ritardo di più di un periodo: niente raffiche */
+					per[i].prossimo = now + per[i].periodo;
 				if (!per[i].solo_se_ricevi || frame_da_invio) {
 					per[i].mandati += (uint64_t)guida_manda(&g, &per[i].c, 0);
 				}
@@ -1466,9 +1466,9 @@ static int cmd_guida(int argc, char **argv)
 		if (ip < n_passi && g.t0 + passi[ip].t < prossimo_evento)
 			prossimo_evento = g.t0 + passi[ip].t;
 		/* ricezione */
-		int attesa = (int)((prossimo_evento - rt_adesso()) / RT_NS_PER_MS);
+		int pending = (int)((prossimo_evento - rt_now()) / RT_NS_PER_MS);
 		struct pollfd p[2] = { { .fd = g.fd, .events = POLLIN }, { .fd = fd_cmd, .events = POLLIN } };
-		poll(p, fd_cmd >= 0 ? 2 : 1, attesa < 0 ? 0 : attesa);
+		poll(p, fd_cmd >= 0 ? 2 : 1, pending < 0 ? 0 : pending);
 		if (fd_cmd >= 0 && (p[1].revents & POLLIN)) {
 			ssize_t r = read(fd_cmd, cmd_buf + cmd_n, sizeof cmd_buf - 1 - cmd_n);
 			if (r > 0)
@@ -1479,10 +1479,10 @@ static int cmd_guida(int argc, char **argv)
 				comando_t c;
 				char *riga = cmd_buf + strspn(cmd_buf, " \t");
 				if (*riga && *riga != '#') {
-					if (analizza_comando(riga, &c) == 0 && comando_ammesso(&c, sollevato, riga))
+					if (analizza_comando(riga, &c) == 0 && comando_ammesso(&c, lifted, riga))
 						guida_manda(&g, &c, 1);
 					else
-						printf("%8.3f comando non valido: %s\n", guida_t_s(&g, rt_adesso()), riga);
+						printf("%8.3f comando non valido: %s\n", guida_t_s(&g, rt_now()), riga);
 					fflush(stdout);
 				}
 				size_t usati = (size_t)(nl - cmd_buf) + 1;
@@ -1493,25 +1493,25 @@ static int cmd_guida(int argc, char **argv)
 				cmd_n = 0;
 		}
 		ssize_t k = read(g.fd, buf, sizeof buf);
-		adesso = rt_adesso();
+		now = rt_now();
 		if (k > 0) {
 			if (g.reg)
-				reg_scrivi_record(g.reg, adesso, 0, REG_VERSO_SOC, buf, (uint16_t)k);
-			uint64_t prima = dfr.frame_ok;
-			gd32_deframer_scrivi(&dfr, buf, (size_t)k, guida_frame, &g);
-			frame_da_invio += dfr.frame_ok - prima;
+				reg_scrivi_record(g.reg, now, 0, REG_VERSO_SOC, buf, (uint16_t)k);
+			uint64_t prima = dfr.frames_ok;
+			gd32_deframer_feed(&dfr, buf, (size_t)k, guida_frame, &g);
+			frame_da_invio += dfr.frames_ok - prima;
 		}
-		if (g.scattato_ora || sic_controlla(&g.sic, adesso)) {
+		if (g.scattato_ora || interlock_check(&g.sic, now)) {
 			g.scattato_ora = 0;
-			guida_arresto(&g, g.sic.motivo);
-			esito = 4;
+			guida_arresto(&g, g.sic.reason);
+			result = 4;
 		}
-		if (adesso >= prossima_riga) {
-			guida_riga_stato(&g, adesso, per, n_per);
+		if (now >= prossima_riga) {
+			guida_riga_stato(&g, now, per, n_per);
 			if (tensione_minima && g.n_dv && g.somma_dv < (long)tensione_minima * g.n_dv) {
-				printf("%8.3f tensione media %.2f V sotto la minima %.1f V: esco\n", guida_t_s(&g, adesso),
+				printf("%8.3f tensione media %.2f V sotto la minima %.1f V: esco\n", guida_t_s(&g, now),
 				       (double)g.somma_dv / g.n_dv / 10.0, tensione_minima / 10.0);
-				esito = 3;
+				result = 3;
 				break;
 			}
 			g.somma_dv = g.n_dv = 0;
@@ -1523,7 +1523,7 @@ static int cmd_guida(int argc, char **argv)
 		}
 	}
 	guida_arresto(&g, fermati ? "segnale ricevuto, uscita" : "uscita");
-	guida_riga_stato(&g, rt_adesso(), per, n_per);
+	guida_riga_stato(&g, rt_now(), per, n_per);
 	if (g.reg)
 		fclose(g.reg);
 	if (g.csv)
@@ -1531,7 +1531,7 @@ static int cmd_guida(int argc, char **argv)
 	if (fd_cmd >= 0)
 		close(fd_cmd);
 	close(g.fd);
-	return esito;
+	return result;
 }
 
 
@@ -1546,8 +1546,8 @@ typedef struct {
 
 static void stampa_testa(const ctx_leggi_t *x)
 {
-	fprintf(x->out, "%.6f %s %s ", (double)x->rec->tempo_ns / RT_NS_PER_S, x->can->nome,
-	        x->rec->direzione == REG_VERSO_SOC ? "rx" : "tx");
+	fprintf(x->out, "%.6f %s %s ", (double)x->rec->tempo_ns / RT_NS_PER_S, x->can->name,
+	        x->rec->direction == REG_VERSO_SOC ? "rx" : "tx");
 }
 
 static void stampa_hex(FILE *out, const uint8_t *b, size_t n)
@@ -1560,18 +1560,18 @@ static void stampa_hex(FILE *out, const uint8_t *b, size_t n)
 static void leggi_gd32(const gd32_frame_t *f, void *ctx)
 {
 	const ctx_leggi_t *x = ctx;
-	const char *nome = gd32_nome_cmd(f->cmd);
+	const char *name = gd32_cmd_name(f->cmd);
 	stampa_testa(x);
-	fprintf(x->out, "0x%02x %s %u ", f->cmd, nome ? nome : "?", f->n_dati);
-	stampa_hex(x->out, f->dati, f->n_dati);
+	fprintf(x->out, "0x%02x %s %u ", f->cmd, name ? name : "?", f->data_len);
+	stampa_hex(x->out, f->data, f->data_len);
 }
 
-static void leggi_lidar(const lidar_pacchetto_t *p, void *ctx)
+static void leggi_lidar(const lidar_packet_t *p, void *ctx)
 {
 	const ctx_leggi_t *x = ctx;
-	const char *nome = lidar_nome_cmd(p->cmd);
+	const char *name = lidar_cmd_name(p->cmd);
 	stampa_testa(x);
-	fprintf(x->out, "0x%02x %s %u ", p->cmd, nome ? nome : "?", p->n_param);
+	fprintf(x->out, "0x%02x %s %u ", p->cmd, name ? name : "?", p->n_param);
 	stampa_hex(x->out, p->param, p->n_param);
 }
 
@@ -1580,14 +1580,14 @@ static void leggi_everest(const everest_msg_t *m, void *ctx)
 	const ctx_leggi_t *x = ctx;
 	stampa_testa(x);
 	fprintf(x->out, "cmd %d len %d c12 %d t %llu: ", m->comando, m->lunghezza, m->campo12, (unsigned long long)m->tempo);
-	stampa_hex(x->out, m->dati, m->n_dati < 256 ? m->n_dati : 256);
+	stampa_hex(x->out, m->data, m->data_len < 256 ? m->data_len : 256);
 }
 
 /* Statistiche per (canale, direzione, cmd). */
 typedef struct {
 	uint64_t n;
 	unsigned len_min, len_max;
-	int64_t primo, ultimo, dt_min, dt_max;
+	int64_t primo, last, dt_min, dt_max;
 } stat_cmd_t;
 
 static stat_cmd_t statistiche[REG_MAX_CANALI][2][256];
@@ -1604,26 +1604,26 @@ static void conta_cmd(uint8_t can, uint8_t dir, uint8_t cmd, unsigned len, int64
 		s->primo = t;
 		s->dt_min = INT64_MAX;
 	} else {
-		int64_t dt = t - s->ultimo;
+		int64_t dt = t - s->last;
 		if (dt < s->dt_min) s->dt_min = dt;
 		if (dt > s->dt_max) s->dt_max = dt;
 		if (len < s->len_min) s->len_min = len;
 		if (len > s->len_max) s->len_max = len;
 	}
-	s->ultimo = t;
+	s->last = t;
 	s->n++;
 }
 
 static void riep_gd32(const gd32_frame_t *f, void *ctx)
 {
 	const reg_record_t *r = ((ctx_riep_t *)ctx)->rec;
-	conta_cmd(r->canale, r->direzione, f->cmd, f->n_dati, r->tempo_ns);
+	conta_cmd(r->canale, r->direction, f->cmd, f->data_len, r->tempo_ns);
 }
 
-static void riep_lidar(const lidar_pacchetto_t *p, void *ctx)
+static void riep_lidar(const lidar_packet_t *p, void *ctx)
 {
 	const reg_record_t *r = ((ctx_riep_t *)ctx)->rec;
-	conta_cmd(r->canale, r->direzione, p->cmd, p->n_param, r->tempo_ns);
+	conta_cmd(r->canale, r->direction, p->cmd, p->n_param, r->tempo_ns);
 }
 
 /* I comandi everest sono int32: si tengono in una tabella a parte. */
@@ -1635,13 +1635,13 @@ static void riep_everest(const everest_msg_t *m, void *ctx)
 {
 	const reg_record_t *r = ((ctx_riep_t *)ctx)->rec;
 	int i = 0;
-	while (i < n_stat_everest && !(stat_everest[i].can == r->canale && stat_everest[i].dir == r->direzione &&
+	while (i < n_stat_everest && !(stat_everest[i].can == r->canale && stat_everest[i].dir == r->direction &&
 	                                stat_everest[i].cmd == m->comando))
 		i++;
 	if (i == n_stat_everest) {
 		if (n_stat_everest == EV_MAX_CMD)
 			return;
-		stat_everest[n_stat_everest++] = (typeof(stat_everest[0])){ r->canale, r->direzione, m->comando, { 0 } };
+		stat_everest[n_stat_everest++] = (typeof(stat_everest[0])){ r->canale, r->direction, m->comando, { 0 } };
 	}
 	stat_cmd_t *s = &stat_everest[i].s;
 	unsigned len = (unsigned)m->lunghezza;
@@ -1650,13 +1650,13 @@ static void riep_everest(const everest_msg_t *m, void *ctx)
 		s->primo = r->tempo_ns;
 		s->dt_min = INT64_MAX;
 	} else {
-		int64_t dt = r->tempo_ns - s->ultimo;
+		int64_t dt = r->tempo_ns - s->last;
 		if (dt < s->dt_min) s->dt_min = dt;
 		if (dt > s->dt_max) s->dt_max = dt;
 		if (len < s->len_min) s->len_min = len;
 		if (len > s->len_max) s->len_max = len;
 	}
-	s->ultimo = r->tempo_ns;
+	s->last = r->tempo_ns;
 	s->n++;
 }
 
@@ -1691,53 +1691,53 @@ static int cmd_leggi(int argc, char **argv, int riepilogo)
 
 	static reg_record_t r;
 	int64_t t_primo = -1, t_ultimo = 0;
-	int esito;
-	while ((esito = reg_leggi_record(f, &r)) == 1) {
-		if (r.canale >= h.n_canali || r.direzione > 1)
+	int result;
+	while ((result = reg_leggi_record(f, &r)) == 1) {
+		if (r.canale >= h.n_canali || r.direction > 1)
 			continue;
 		const reg_canale_t *c = &h.canali[r.canale];
-		if (solo && strcmp(solo, c->nome))
+		if (solo && strcmp(solo, c->name))
 			continue;
 		if (t_primo < 0) t_primo = r.tempo_ns;
 		t_ultimo = r.tempo_ns;
-		byte[r.canale][r.direzione] += r.n;
+		byte[r.canale][r.direction] += r.n;
 		if (r.n == 0 && c->protocollo == REG_PROTO_EVEREST) {   /* nuova connessione: i deframer ripartono */
 			decod_init(&dec[r.canale][0], c->protocollo);
 			decod_init(&dec[r.canale][1], c->protocollo);
 			if (!riepilogo)
-				printf("%.6f %s --- nuova connessione ---\n", (double)r.tempo_ns / RT_NS_PER_S, c->nome);
+				printf("%.6f %s --- nuova connessione ---\n", (double)r.tempo_ns / RT_NS_PER_S, c->name);
 			continue;
 		}
 		decod_cb_everest = riepilogo ? riep_everest : leggi_everest;
 		if (riepilogo) {
 			ctx_riep_t x = { &r };
-			decod_scrivi(&dec[r.canale][r.direzione], r.dati, r.n, riep_gd32, riep_lidar, &x);
+			decod_scrivi(&dec[r.canale][r.direction], r.data, r.n, riep_gd32, riep_lidar, &x);
 		} else {
 			ctx_leggi_t x = { &r, c, stdout };
 			if (c->protocollo == REG_PROTO_GREZZO) {
 				stampa_testa(&x);
 				fprintf(stdout, "grezzo %u ", r.n);
-				stampa_hex(stdout, r.dati, r.n);
+				stampa_hex(stdout, r.data, r.n);
 			} else {
-				decod_scrivi(&dec[r.canale][r.direzione], r.dati, r.n, leggi_gd32, leggi_lidar, &x);
+				decod_scrivi(&dec[r.canale][r.direction], r.data, r.n, leggi_gd32, leggi_lidar, &x);
 			}
 		}
 	}
 	fclose(f);
-	if (esito < 0)
+	if (result < 0)
 		fprintf(stderr, "spia: il registro finisce a metà di un record (copiato mentre la spia scriveva?)\n");
 
 	if (riepilogo) {
 		printf("durata %.1f s\n", t_primo < 0 ? 0.0 : (double)(t_ultimo - t_primo) / RT_NS_PER_S);
 		for (int i = 0; i < h.n_canali; i++) {
 			const reg_canale_t *c = &h.canali[i];
-			if (solo && strcmp(solo, c->nome))
+			if (solo && strcmp(solo, c->name))
 				continue;
 			for (int d = 0; d < 2; d++) {
 				uint64_t ok, err, sc;
 				decod_contatori(&dec[i][d], &ok, &err, &sc);
 				printf("\n== %s (%s, %s) %s: %llu byte, %llu frame, %llu errori, %llu byte scartati\n",
-				       c->nome, c->dispositivo, reg_nome_protocollo(c->protocollo),
+				       c->name, c->dispositivo, reg_nome_protocollo(c->protocollo),
 				       strncmp(c->dispositivo, "/dev/", 5) == 0
 				               ? (d == REG_VERSO_SOC ? "periferica -> SoC" : "SoC -> periferica")
 				               : (d == REG_VERSO_SOC ? "server -> client" : "client -> server"),
@@ -1753,7 +1753,7 @@ static int cmd_leggi(int argc, char **argv, int riepilogo)
 							printf("  cmd          messaggi   dati(byte)     periodo medio/min/max (ms)\n");
 						printf("  %-10d %10llu   %5u-%-5u", stat_everest[k].cmd, (unsigned long long)s->n, s->len_min, s->len_max);
 						if (s->n > 1)
-							printf("  %9.1f %9.1f %9.1f", (double)(s->ultimo - s->primo) / (double)(s->n - 1) / 1e6,
+							printf("  %9.1f %9.1f %9.1f", (double)(s->last - s->primo) / (double)(s->n - 1) / 1e6,
 							       (double)s->dt_min / 1e6, (double)s->dt_max / 1e6);
 						putchar('\n');
 					}
@@ -1765,19 +1765,19 @@ static int cmd_leggi(int argc, char **argv, int riepilogo)
 						continue;
 					if (!titolo++)
 						printf("  cmd  nome                    frame   dati(byte)   periodo medio/min/max (ms)\n");
-					const char *nome = c->protocollo == REG_PROTO_LIDAR ? lidar_nome_cmd((uint8_t)k)
-					                                                    : gd32_nome_cmd((uint8_t)k);
-					printf("  0x%02x %-22s %7llu   %3u-%-3u", k, nome ? nome : "?", (unsigned long long)s->n,
+					const char *name = c->protocollo == REG_PROTO_LIDAR ? lidar_cmd_name((uint8_t)k)
+					                                                    : gd32_cmd_name((uint8_t)k);
+					printf("  0x%02x %-22s %7llu   %3u-%-3u", k, name ? name : "?", (unsigned long long)s->n,
 					       s->len_min, s->len_max);
 					if (s->n > 1)
-						printf("    %9.1f %9.1f %9.1f", (double)(s->ultimo - s->primo) / (double)(s->n - 1) / 1e6,
+						printf("    %9.1f %9.1f %9.1f", (double)(s->last - s->primo) / (double)(s->n - 1) / 1e6,
 						       (double)s->dt_min / 1e6, (double)s->dt_max / 1e6);
 					putchar('\n');
 				}
 			}
 		}
 	}
-	return esito < 0 ? 1 : 0;
+	return result < 0 ? 1 : 0;
 }
 
 /* ------------------------------------------------------------------------------------------------------ */
@@ -1795,13 +1795,13 @@ static long velocita(speed_t s)
 
 static int cmd_termios(int argc, char **argv)
 {
-	int esito = 0;
+	int result = 0;
 	for (int i = 1; i < argc; i++) {
 		int fd = open(argv[i], O_RDONLY | O_NOCTTY | O_NONBLOCK);
 		struct termios t;
 		if (fd < 0 || tcgetattr(fd, &t)) {
 			fprintf(stderr, "spia: %s: %s\n", argv[i], strerror(errno));
-			esito = 1;
+			result = 1;
 			if (fd >= 0) close(fd);
 			continue;
 		}
@@ -1818,7 +1818,7 @@ static int cmd_termios(int argc, char **argv)
 		       t.c_cc[VMIN], t.c_cc[VTIME],
 		       (unsigned)t.c_iflag, (unsigned)t.c_oflag, (unsigned)t.c_cflag, (unsigned)t.c_lflag);
 	}
-	return esito;
+	return result;
 }
 
 /* ------------------------------------------------------------------------------------------------------ */

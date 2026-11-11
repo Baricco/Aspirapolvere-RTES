@@ -19,7 +19,7 @@
 #include <string.h>
 #include <unistd.h>
 
-#include "../rt/rt_tempo.h"
+#include "../rt/rt_time.h"
 
 #define MAX_CORE 64
 
@@ -37,7 +37,7 @@ static void *gira(void *arg)
 		fprintf(stderr, "core %d: affinità non impostata (%s)\n", cpu, strerror(r));
 		return NULL;
 	}
-	while (rt_adesso() < fine_ns)
+	while (rt_now() < fine_ns)
 		for (int i = 0; i < 10000; i++)
 			carico_contatore++;
 	return NULL;
@@ -46,13 +46,13 @@ static void *gira(void *arg)
 int main(int argc, char **argv)
 {
 	char *lista = NULL;
-	int durata_s = 10, priorita = 0;
+	int durata_s = 10, priority = 0;
 	int o;
 	while ((o = getopt(argc, argv, "c:d:P:h")) != -1) {
 		switch (o) {
 		case 'c': lista = optarg; break;
 		case 'd': durata_s = atoi(optarg); break;
-		case 'P': priorita = atoi(optarg); break;
+		case 'P': priority = atoi(optarg); break;
 		default:
 			fprintf(stderr, "Uso: %s -c core[,core...] [-d durata_s] [-P priorita_fifo]\n", argv[0]);
 			return 2;
@@ -63,14 +63,14 @@ int main(int argc, char **argv)
 		return 2;
 	}
 
-	fine_ns = rt_adesso() + RT_S(durata_s);
+	fine_ns = rt_now() + RT_S(durata_s);
 	pthread_t th[MAX_CORE];
 	int n = 0;
 	for (char *tok = strtok(lista, ","); tok && n < MAX_CORE; tok = strtok(NULL, ",")) {
 		pthread_attr_t a;
 		pthread_attr_init(&a);
-		if (priorita > 0) {
-			struct sched_param p = { .sched_priority = priorita };
+		if (priority > 0) {
+			struct sched_param p = { .sched_priority = priority };
 			pthread_attr_setinheritsched(&a, PTHREAD_EXPLICIT_SCHED);
 			pthread_attr_setschedpolicy(&a, SCHED_FIFO);
 			pthread_attr_setschedparam(&a, &p);
@@ -83,7 +83,7 @@ int main(int argc, char **argv)
 		}
 		n++;
 	}
-	printf("carico: %d thread %s per %d s\n", n, priorita > 0 ? "SCHED_FIFO" : "SCHED_OTHER", durata_s);
+	printf("carico: %d thread %s per %d s\n", n, priority > 0 ? "SCHED_FIFO" : "SCHED_OTHER", durata_s);
 	fflush(stdout);
 	for (int i = 0; i < n; i++)
 		pthread_join(th[i], NULL);

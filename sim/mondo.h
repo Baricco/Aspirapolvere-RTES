@@ -36,8 +36,8 @@ typedef enum { OGG_RETTANGOLO = 0, OGG_CERCHIO, OGG_VUOTO } ogg_forma_t;
 typedef struct {
 	ogg_forma_t forma;
 	int muro;                     /* rettangolo nato da "muro da= a=" (si riscrive così) */
-	char nome[MONDO_NOME], gruppo[MONDO_NOME];
-	double x, y, angolo;          /* centro, rotazione (radianti) */
+	char name[MONDO_NOME], group[MONDO_NOME];
+	double x, y, angle;          /* centro, rotazione (radianti) */
 	double larghezza, profondita; /* rettangolo; per il muro: lunghezza e spessore */
 	double raggio;                /* cerchio */
 	double quota_da, quota_a;     /* metri dal pavimento */
@@ -46,7 +46,7 @@ typedef struct {
 } oggetto_t;
 
 typedef struct {
-	char nome[64];
+	char name[64];
 	double larghezza, profondita;           /* rettangolo della stanza, da (0,0) */
 	double robot_x, robot_y, robot_dir;     /* posizione iniziale (radianti) */
 	int ha_base;
@@ -59,8 +59,8 @@ typedef struct {
 void mondo_nuovo(mondo_t *m, double larghezza, double profondita);
 
 /* Lettura e scrittura del formato di testo. Ritorna 0, oppure -1 con il motivo in errore. */
-int mondo_leggi_testo(mondo_t *m, const char *testo, char *errore, size_t dim);
-int mondo_leggi_file(mondo_t *m, const char *percorso, char *errore, size_t dim);
+int mondo_leggi_testo(mondo_t *m, const char *testo, char *errore, size_t size);
+int mondo_leggi_file(mondo_t *m, const char *percorso, char *errore, size_t size);
 /* Scrive la stanza in un buffer allocato con malloc (da liberare), o NULL. */
 char *mondo_testo(const mondo_t *m);
 

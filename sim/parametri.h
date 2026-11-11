@@ -33,7 +33,7 @@ typedef struct {
 
 	/* valori a riposo e attuatori */
 	int corrente_riposo_laterale, corrente_riposo_centrale, corrente_riposo_aspirazione, byte84;
-	int temperatura_c;
+	int temperature_c;
 	double corrente_centrale_accesa, corrente_centrale_sblocco;
 	double aspirazione_giri_per_pwm, aspirazione_corrente_max, aspirazione_giri_max, aspirazione_esponente;
 	uint8_t frame_riposo[96];                 /* un frame vero: i byte non calcolati dal simulatore vengono da qui */

@@ -85,7 +85,7 @@ case "${1:-}" in
     nav=$((16#$(simbolo nav_state)))
     ind() { printf %x $((nav + $(campo "$1"))); }
     ind_stato=$(printf %x $((nav + $(campo_prima state mission))))
-    arg="$(simbolo navigation_map_data) $ind_stato $(ind mission) $(ind clean_cell_mask) $(ind strip_axis_x) $(simbolo sc_posa) $(simbolo buf_posa)"
+    arg="$(simbolo navigation_map_data) $ind_stato $(ind mission) $(ind clean_cell_mask) $(ind strip_axis_x) $(simbolo pose_exchange) $(simbolo pose_buffers)"
     copia osserva-robot
     AMBIENTE="RTES_REGISTRA=$nome.reg ${*:3}" avvia vacuum "$nome"
     robot "cd $D; start-stop-daemon -S -b -m -p $D/osserva.pid -x $D/osserva-robot -- \$(pidof vacuum) $nome $arg; sleep 1; tail -n 2 $nome.oss"

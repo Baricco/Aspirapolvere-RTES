@@ -2,7 +2,7 @@
  * rt.h - Task periodici real-time su Linux (SCHED_FIFO), in stile FreeRTOS.
  *
  * Modello (quello classico della teoria RT):
- *   - un task periodico rilascia un "job" ogni `periodo_ns`;
+ *   - un task periodico rilascia un "job" ogni `period_ns`;
  *   - il k-esimo job è rilasciato all'istante  istante_zero + fase + k*periodo;
  *   - deve terminare entro  rilascio + deadline  (deadline relativa).
  *
@@ -10,7 +10,7 @@
  * periodo. Il ciclo "aspetta il rilascio -> esegui il job -> misura" lo gestisce
  * questo modulo. In FreeRTOS lo stesso schema si scrive a mano:
  *
- *     for (;;) { lavoro(); vTaskDelayUntil(&ultimo_risveglio, periodo); }
+ *     for (;;) { work(); vTaskDelayUntil(&ultimo_risveglio, periodo); }
  *
  * Ogni task è un thread POSIX con:
  *   - politica SCHED_FIFO e priorità fissa 1..99 (99 = la più alta).
@@ -21,14 +21,14 @@
  * Uso tipico:
  *
  *     rt_init();                                  // una volta, all'avvio
- *     int64_t t0 = rt_adesso() + RT_MS(100);      // istante zero comune
- *     rt_task_cfg_t cfg = { .nome = "controllo", .priorita = 80, .cpu = 2,
- *                           .periodo_ns = RT_MS(20), .job = controllo_job };
+ *     int64_t t0 = rt_now() + RT_MS(100);      // istante zero comune
+ *     rt_task_cfg_t cfg = { .name = "controllo", .priority = 80, .cpu = 2,
+ *                           .period_ns = RT_MS(20), .job = controllo_job };
  *     rt_task_t controllo;
- *     rt_task_avvia(&controllo, &cfg, t0);
+ *     rt_task_start(&controllo, &cfg, t0);
  *     ...
- *     rt_task_ferma(&controllo);
- *     rt_stats_stampa(&controllo);
+ *     rt_task_stop(&controllo);
+ *     rt_stats_print(&controllo);
  */
 #ifndef RT_H
 #define RT_H
@@ -39,14 +39,14 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#include "rt_tempo.h"
+#include "rt_time.h"
 
 #define RT_PRIO_MIN 1
 #define RT_PRIO_MAX 99
-#define RT_CPU_QUALSIASI (-1)
+#define RT_CPU_ANY (-1)
 
 /* Convenzione del progetto (docs/PIANO.md): il driver sta a 99, fuori dallo scheduling dei task; i task usano le
- * priorità da RT_PRIO_TASK_MAX in giù (rt_priorita_rm le assegna con Rate Monotonic). */
+ * priorità da RT_PRIO_TASK_MAX in giù (rt_priority_rm le assegna con Rate Monotonic). */
 #define RT_PRIO_DRIVER   99
 #define RT_PRIO_TASK_MAX 90
 
@@ -57,75 +57,75 @@
 
 /* Una misura per ogni job (facoltativa, per i grafici e il calcolo del WCET). */
 typedef struct {
-	int64_t latenza_ns;     /* inizio effettivo - rilascio teorico */
-	int64_t esecuzione_ns;  /* fine - inizio: quanto è durato il job */
-} rt_campione_t;
+	int64_t latency_ns;     /* inizio effettivo - rilascio teorico */
+	int64_t execution_ns;  /* fine - inizio: quanto è durato il job */
+} rt_sample_t;
 
 typedef struct {
-	const char *nome;
-	int priorita;            /* SCHED_FIFO, RT_PRIO_MIN..RT_PRIO_MAX */
-	int cpu;                 /* core a cui fissare il task, o RT_CPU_QUALSIASI */
+	const char *name;
+	int priority;            /* SCHED_FIFO, RT_PRIO_MIN..RT_PRIO_MAX */
+	int cpu;                 /* core a cui fissare il task, o RT_CPU_ANY */
 	/*
-	 * Task periodico (sporadico = 0): un job ogni periodo_ns, a istanti fissi.
-	 * Task sporadico (sporadico = 1): un job per ogni rt_task_sveglia() (es. a ogni frame dei sensori, vedi
-	 * drv_sveglia_ai_sensori). periodo_ns è allora l'intervallo MINIMO fra due attivazioni: è il T da usare
+	 * Task periodico (sporadico = 0): un job ogni period_ns, a istanti fissi.
+	 * Task sporadico (sporadico = 1): un job per ogni rt_task_wake() (es. a ogni frame dei sensori, vedi
+	 * drv_wake_on_sensors). period_ns è allora l'intervallo MINIMO fra due attivazioni: è il T da usare
 	 * nell'analisi e nell'assegnazione delle priorità; il rilascio di ogni job è l'istante della sveglia.
 	 */
-	int sporadico;
-	int64_t periodo_ns;      /* > 0 */
+	int sporadic;
+	int64_t period_ns;      /* > 0 */
 	int64_t deadline_ns;     /* deadline relativa; 0 = uguale al periodo */
-	int64_t fase_ns;         /* ritardo del primo rilascio rispetto all'istante zero */
+	int64_t phase_ns;         /* ritardo del primo rilascio rispetto all'istante zero */
 	void (*job)(void *arg);  /* il lavoro di un periodo */
 	void *arg;               /* passato a job() */
 	uint64_t max_job;        /* si ferma da solo dopo questi job; 0 = mai */
-	size_t stack_byte;       /* dimensione dello stack; 0 = RT_STACK_DEFAULT */
+	size_t stack_bytes;       /* dimensione dello stack; 0 = RT_STACK_DEFAULT */
 
 	/* Facoltativo: buffer preallocato in cui salvare le misure di ogni job.
 	 * Va allocato prima di avviare il task: nel ciclo RT non si alloca memoria. */
-	rt_campione_t *campioni;
-	size_t max_campioni;
+	rt_sample_t *samples;
+	size_t max_samples;
 } rt_task_cfg_t;
 
-/* Statistiche aggiornate a ogni job. Vanno lette dopo rt_task_ferma():
+/* Statistiche aggiornate a ogni job. Vanno lette dopo rt_task_stop():
  * mentre il task gira i valori potrebbero essere a metà di un aggiornamento. */
 typedef struct {
 	uint64_t job;               /* job completati */
-	uint64_t deadline_mancate;  /* job finiti dopo rilascio + deadline */
-	int64_t latenza_min_ns, latenza_max_ns, latenza_somma_ns;
-	int64_t esec_min_ns, esec_max_ns, esec_somma_ns;
+	uint64_t missed_deadlines;  /* job finiti dopo rilascio + deadline */
+	int64_t latency_min_ns, latency_max_ns, latency_sum_ns;
+	int64_t exec_min_ns, exec_max_ns, exec_sum_ns;
 	int64_t cpu_max_ns;         /* il tempo di CPU peggiore di un job: esecuzione meno il tempo passato senza girare */
-	int64_t risposta_max_ns;    /* max(fine - rilascio): il tempo di risposta peggiore osservato */
-	size_t n_campioni;          /* campioni effettivamente salvati */
+	int64_t response_max_ns;    /* max(fine - rilascio): il tempo di risposta peggiore osservato */
+	size_t n_samples;          /* campioni effettivamente salvati */
 } rt_stats_t;
 
 typedef struct {
 	rt_task_cfg_t cfg;
-	int64_t primo_rilascio_ns;
+	int64_t first_release_ns;
 	pthread_t thread;
 	atomic_int stop;
-	sem_t avviato;      /* il thread segnala qui l'esito della sua configurazione */
-	int errore_avvio;   /* 0 oppure un codice errno */
-	int attivo;
-	int senza_rt;       /* partito senza SCHED_FIFO (solo sul PC, vedi rt_consenti_senza_privilegi) */
+	sem_t started;      /* il thread segnala qui l'esito della sua configurazione */
+	int start_error;   /* 0 oppure un codice errno */
+	int active;
+	int without_rt;       /* partito senza SCHED_FIFO (solo sul PC, vedi rt_allow_without_privileges) */
 	rt_stats_t stats;
 
 	/* Task sporadici: la sveglia e l'istante dell'attivazione non ancora servita (0 = nessuna). */
-	sem_t sveglia;
-	_Atomic int64_t rilascio_pendente_ns;
-	_Atomic uint64_t attivazioni_perse;     /* sveglie arrivate mentre la precedente non era ancora partita */
+	sem_t wakeup;
+	_Atomic int64_t pending_release_ns;
+	_Atomic uint64_t lost_activations;     /* sveglie arrivate mentre la precedente non era ancora partita */
 
 	/* Per il watchdog del driver (letti da un altro thread mentre il task gira, quindi atomici). */
-	_Atomic int64_t battito_ns;             /* fine dell'ultimo job (all'avvio: il primo rilascio) */
-	_Atomic int64_t job_iniziato_ns;        /* inizio del job in corso, 0 se il task aspetta */
-	_Atomic uint64_t mancate_di_fila;       /* deadline mancate consecutive */
-	_Atomic uint64_t mancate_totali;
+	_Atomic int64_t heartbeat_ns;             /* fine dell'ultimo job (all'avvio: il primo rilascio) */
+	_Atomic int64_t job_started_ns;        /* inizio del job in corso, 0 se il task aspetta */
+	_Atomic uint64_t consecutive_misses;       /* deadline mancate consecutive */
+	_Atomic uint64_t total_misses;
 	/* La PRIMA deadline mancata, per spiegarla: quelle dopo possono essere solo l'effetto del ritardo della prima. Scritta
-	 * dal task una volta sola, PRIMA di aumentare mancate_totali. Il tempo perso fra esecuzione e CPU è quello in cui il
+	 * dal task una volta sola, PRIMA di aumentare total_misses. Il tempo perso fra esecuzione e CPU è quello in cui il
 	 * job non girava (interrotto, o fermo su un mutex). */
 	struct {
 		uint64_t job;           /* numero del job, da 1 */
-		int64_t latenza_ns, esecuzione_ns, cpu_ns, risposta_ns;
-	} prima_mancata;
+		int64_t latency_ns, execution_ns, cpu_ns, response_ns;
+	} first_miss;
 } rt_task_t;
 
 /*
@@ -144,36 +144,36 @@ int rt_init(void);
 
 /*
  * Crea il thread del task e lo avvia. Il primo job viene rilasciato a
- * istante_zero + cfg->fase_ns. Usare lo stesso istante_zero per tutti i task
+ * istante_zero + cfg->phase_ns. Usare lo stesso istante_zero per tutti i task
  * li fa partire insieme (l'"istante critico" dell'analisi rate-monotonic).
  * Ritorna 0 oppure un codice errno (EPERM: servono i permessi di root o un
  * limite rtprio sufficiente; EINVAL: configurazione non valida).
  */
-int rt_task_avvia(rt_task_t *t, const rt_task_cfg_t *cfg, int64_t istante_zero_ns);
+int rt_task_start(rt_task_t *t, const rt_task_cfg_t *cfg, int64_t zero_time_ns);
 
 /* Chiede al task di fermarsi dopo il job corrente e aspetta che finisca. */
-void rt_task_ferma(rt_task_t *t);
+void rt_task_stop(rt_task_t *t);
 
 /* Aspetta che il task finisca da solo (serve cfg.max_job > 0). */
-void rt_task_attendi(rt_task_t *t);
+void rt_task_join(rt_task_t *t);
 
 /* Stampa le statistiche del task su stdout, in microsecondi. */
-void rt_stats_stampa(const rt_task_t *t);
+void rt_stats_print(const rt_task_t *t);
 
 /*
- * Attiva un task sporadico: il suo prossimo job viene rilasciato all'istante `rilascio_ns` (di solito adesso).
+ * Attiva un task sporadico: il suo prossimo job viene rilasciato all'istante `release_ns` (di solito adesso).
  * Non si blocca mai (si può chiamare dal driver). Se l'attivazione precedente non è ancora partita, questa va
- * persa: si conta in attivazioni_perse e la funzione ritorna 0; altrimenti ritorna 1.
+ * persa: si conta in lost_activations e la funzione ritorna 0; altrimenti ritorna 1.
  */
-int rt_task_sveglia(rt_task_t *t, int64_t rilascio_ns);
+int rt_task_wake(rt_task_t *t, int64_t release_ns);
 
 /*
- * Per il watchdog: 1 se il task sembra bloccato all'istante `adesso`, cioè se da più di `soglia_ns`
+ * Per il watchdog: 1 se il task sembra bloccato all'istante `adesso`, cioè se da più di `threshold_ns`
  *   - un suo job è iniziato e non è ancora finito, oppure
  *   - (sporadico) un'attivazione aspetta e il job non è partito, oppure
  *   - (periodico) non finisce un job (oltre al suo periodo).
  */
-int rt_task_bloccato(rt_task_t *t, int64_t adesso, int64_t soglia_ns);
+int rt_task_is_stuck(rt_task_t *t, int64_t now, int64_t threshold_ns);
 
 /*
  * Assegna le priorità con Rate Monotonic: periodo (o intervallo minimo) più corto = priorità più alta.
@@ -181,14 +181,14 @@ int rt_task_bloccato(rt_task_t *t, int64_t adesso, int64_t soglia_ns);
  * stessa priorità. Ritorna 0, oppure EINVAL se le priorità scenderebbero sotto RT_PRIO_MIN.
  * L'analisi di schedulabilità (fattore di utilizzo, tempi di risposta) resta a chi scrive i task.
  */
-int rt_priorita_rm(rt_task_cfg_t *cfg[], int n, int prio_max);
+int rt_priority_rm(rt_task_cfg_t *cfg[], int n, int prio_max);
 
 /*
- * Sul PC, senza i permessi per SCHED_FIFO, rt_task_avvia fallirebbe con EPERM. Con si = 1 invece fa partire il
- * thread con lo scheduling normale (t->senza_rt = 1) e lo scrive una volta su stderr. Utile solo per provare la
+ * Sul PC, senza i permessi per SCHED_FIFO, rt_task_start fallirebbe con EPERM. Con si = 1 invece fa partire il
+ * thread con lo scheduling normale (t->without_rt = 1) e lo scrive una volta su stderr. Utile solo per provare la
  * LOGICA nel simulatore: i tempi non valgono niente. Sul robot non serve (si gira da root).
  */
-void rt_consenti_senza_privilegi(int si);
+void rt_allow_without_privileges(int enable);
 
 /*
  * Task APERIODICO: un thread che esegue un job ogni volta che qualcuno lo sveglia, senza periodo, senza intervallo
@@ -198,62 +198,62 @@ void rt_consenti_senza_privilegi(int si);
  * che stanno sugli altri core, e non può affamare gli altri thread normali del suo core (per esempio quelli del
  * kernel che scrivono sulla flash).
  *
- * Sveglie: rt_aperiodico_sveglia() non si blocca mai e si può chiamare da qualsiasi thread, anche real-time. Se il
+ * Sveglie: rt_aperiodic_wake() non si blocca mai e si può chiamare da qualsiasi thread, anche real-time. Se il
  * task aspetta, parte un job; se sta già eseguendo un job, ne parte un altro appena finisce; più sveglie arrivate
  * prima che il job parta valgono come una sola. Quindi COSA fare non lo dice la sveglia: lo dicono i dati che chi
  * chiede ha scritto prima di svegliarlo (nel progetto, i doppi buffer delle richieste con un numero progressivo).
  *
- *     rt_aperiodico_cfg_t cfg = { .nome = "aperiodico", .cpu = 3, .job = lavoro };
- *     rt_aperiodico_t a;
- *     rt_aperiodico_avvia(&a, &cfg);
+ *     rt_aperiodic_cfg_t cfg = { .name = "aperiodico", .cpu = 3, .job = lavoro };
+ *     rt_aperiodic_t a;
+ *     rt_aperiodic_start(&a, &cfg);
  *     ...
- *     rt_aperiodico_sveglia(&a);        // da qualsiasi thread
+ *     rt_aperiodic_wake(&a);        // da qualsiasi thread
  *     ...
- *     rt_aperiodico_ferma(&a);
- *     rt_aperiodico_stampa(&a);
+ *     rt_aperiodic_stop(&a);
+ *     rt_aperiodic_print(&a);
  */
 typedef struct {
-	const char *nome;
-	int cpu;                 /* core a cui fissare il thread, o RT_CPU_QUALSIASI */
+	const char *name;
+	int cpu;                 /* core a cui fissare il thread, o RT_CPU_ANY */
 	void (*job)(void *arg);  /* il lavoro da fare a ogni sveglia */
 	void *arg;               /* passato a job() */
-	size_t stack_byte;       /* dimensione dello stack; 0 = RT_STACK_DEFAULT */
-} rt_aperiodico_cfg_t;
+	size_t stack_bytes;       /* dimensione dello stack; 0 = RT_STACK_DEFAULT */
+} rt_aperiodic_cfg_t;
 
-/* Statistiche: vanno lette dopo rt_aperiodico_ferma(). */
+/* Statistiche: vanno lette dopo rt_aperiodic_stop(). */
 typedef struct {
 	uint64_t job;               /* job completati */
-	uint64_t sveglie;           /* sveglie ricevute (più sveglie possono finire nello stesso job) */
-	int64_t esec_max_ns, esec_somma_ns;
+	uint64_t wakeups;           /* sveglie ricevute (più sveglie possono finire nello stesso job) */
+	int64_t exec_max_ns, exec_sum_ns;
 	int64_t cpu_max_ns;         /* tempo di CPU peggiore di un job (senza le attese, per esempio della flash) */
-	int64_t risposta_max_ns;    /* max(fine del job - prima sveglia che il job ha servito) */
-} rt_aperiodico_stats_t;
+	int64_t response_max_ns;    /* max(fine del job - prima sveglia che il job ha servito) */
+} rt_aperiodic_stats_t;
 
 typedef struct {
-	rt_aperiodico_cfg_t cfg;
+	rt_aperiodic_cfg_t cfg;
 	pthread_t thread;
 	atomic_int stop;
-	sem_t avviato;
-	int errore_avvio;
-	int attivo;
-	sem_t sveglia;
-	_Atomic int64_t richiesta_ns;       /* istante della prima sveglia non ancora servita, 0 = nessuna */
-	_Atomic uint64_t sveglie;
-	rt_aperiodico_stats_t stats;
-} rt_aperiodico_t;
+	sem_t started;
+	int start_error;
+	int active;
+	sem_t wakeup;
+	_Atomic int64_t request_ns;       /* istante della prima sveglia non ancora servita, 0 = nessuna */
+	_Atomic uint64_t wakeups;
+	rt_aperiodic_stats_t stats;
+} rt_aperiodic_t;
 
 /* Crea il thread (scheduling normale, fissato a cfg->cpu) e lo mette in attesa della prima sveglia.
  * Ritorna 0 oppure un codice errno (EINVAL: configurazione non valida). */
-int rt_aperiodico_avvia(rt_aperiodico_t *a, const rt_aperiodico_cfg_t *cfg);
+int rt_aperiodic_start(rt_aperiodic_t *a, const rt_aperiodic_cfg_t *cfg);
 
 /* Sveglia il task. Non si blocca mai. */
-void rt_aperiodico_sveglia(rt_aperiodico_t *a);
+void rt_aperiodic_wake(rt_aperiodic_t *a);
 
 /* Chiede al task di fermarsi (dopo il job in corso, se c'è) e aspetta che finisca. */
-void rt_aperiodico_ferma(rt_aperiodico_t *a);
+void rt_aperiodic_stop(rt_aperiodic_t *a);
 
 /* Stampa le statistiche su stdout, in microsecondi. */
-void rt_aperiodico_stampa(const rt_aperiodico_t *a);
+void rt_aperiodic_print(const rt_aperiodic_t *a);
 
 /*
  * Inizializza un mutex con priority inheritance: se un task a bassa

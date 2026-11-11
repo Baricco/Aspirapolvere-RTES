@@ -9,8 +9,8 @@ static void andata_e_ritorno(void)
 {
 	FILE *f = tmpfile();
 	reg_intestazione_t h = { .n_canali = 2 };
-	h.canali[0] = (reg_canale_t){ .id = 0, .protocollo = REG_PROTO_GD32, .nome = "gd32", .dispositivo = "/dev/ttyS3" };
-	h.canali[1] = (reg_canale_t){ .id = 1, .protocollo = REG_PROTO_LIDAR, .nome = "lidar", .dispositivo = "/dev/ttyS1" };
+	h.canali[0] = (reg_canale_t){ .id = 0, .protocollo = REG_PROTO_GD32, .name = "gd32", .dispositivo = "/dev/ttyS3" };
+	h.canali[1] = (reg_canale_t){ .id = 1, .protocollo = REG_PROTO_LIDAR, .name = "lidar", .dispositivo = "/dev/ttyS1" };
 	CONTROLLA(reg_scrivi_intestazione(f, &h) == 0);
 	static uint8_t grande[REG_MAX_BLOCCO];
 	for (size_t i = 0; i < sizeof grande; i++)
@@ -24,14 +24,14 @@ static void andata_e_ritorno(void)
 	static reg_record_t r;
 	CONTROLLA(reg_leggi_intestazione(f, &l) == 1);
 	CONTROLLA(l.n_canali == 2 && l.canali[1].protocollo == REG_PROTO_LIDAR);
-	CONTROLLA(!strcmp(l.canali[0].nome, "gd32") && !strcmp(l.canali[1].dispositivo, "/dev/ttyS1"));
+	CONTROLLA(!strcmp(l.canali[0].name, "gd32") && !strcmp(l.canali[1].dispositivo, "/dev/ttyS1"));
 	CONTROLLA(reg_leggi_record(f, &r) == 1);
-	CONTROLLA(r.tempo_ns == 123456789012345LL && r.canale == 0 && r.direzione == REG_VERSO_SOC && r.n == 6);
-	CONTROLLA(memcmp(r.dati, "\xfa\xfb\x03\x06\x00\x06", 6) == 0);
+	CONTROLLA(r.tempo_ns == 123456789012345LL && r.canale == 0 && r.direction == REG_VERSO_SOC && r.n == 6);
+	CONTROLLA(memcmp(r.data, "\xfa\xfb\x03\x06\x00\x06", 6) == 0);
 	CONTROLLA(reg_leggi_record(f, &r) == 1);
-	CONTROLLA(r.tempo_ns == -5 && r.n == REG_MAX_BLOCCO && memcmp(r.dati, grande, REG_MAX_BLOCCO) == 0);
+	CONTROLLA(r.tempo_ns == -5 && r.n == REG_MAX_BLOCCO && memcmp(r.data, grande, REG_MAX_BLOCCO) == 0);
 	CONTROLLA(reg_leggi_record(f, &r) == 1);
-	CONTROLLA(r.n == 0 && r.direzione == REG_DAL_SOC);
+	CONTROLLA(r.n == 0 && r.direction == REG_DAL_SOC);
 	CONTROLLA(reg_leggi_record(f, &r) == 0);
 	fclose(f);
 }

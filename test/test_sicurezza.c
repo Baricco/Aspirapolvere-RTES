@@ -1,9 +1,9 @@
-/* Test del blocco di sicurezza dei motori (gd32/sicurezza.h). */
+/* Test del blocco di sicurezza dei motori (gd32/interlock.h). */
 #include <string.h>
 
 #include "test.h"
 #include "../gd32/gd32.h"
-#include "../gd32/sicurezza.h"
+#include "../gd32/interlock.h"
 
 #define MS(x) ((int64_t)(x) * 1000000)
 
@@ -13,150 +13,150 @@ static const uint8_t SPAZZOLA[1] = { 50 };
 
 static gd32_frame_t sensori(uint8_t cliff)
 {
-	gd32_frame_t f = { .cmd = GD32_SENSORI, .n_dati = 96 };
-	memset(f.dati, 0, 96);
-	f.dati[3] = cliff;
-	f.dati[64] = 0x62;          /* sensori alimentati (bit 5), come nei frame veri fuori dalla base */
+	gd32_frame_t f = { .cmd = GD32_SENSORS, .data_len = 96 };
+	memset(f.data, 0, 96);
+	f.data[3] = cliff;
+	f.data[64] = 0x62;          /* sensori alimentati (bit 5), come nei frame veri fuori dalla base */
 	return f;
 }
 
 /* Anti-caduta su "vuoto" ma sulla base, oppure con i sensori spenti: non vale come "sollevato". */
 static void base_e_sensori_spenti(void)
 {
-	sicurezza_t s;
-	sic_init(&s, 1, MS(100));
+	interlock_t s;
+	interlock_init(&s, 1, MS(100));
 	gd32_frame_t f = sensori(0x0f);
-	f.dati[7] = 0x03;           /* sulla base, in carica */
-	CONTROLLA(sic_ricevuto(&s, &f, MS(0)) == 0);
-	CONTROLLA(sic_permesso(&s, GD32_VELOCITA, V_AVANTI, 8, MS(1)) == SIC_RIFIUTATO);
+	f.data[7] = 0x03;           /* sulla base, in carica */
+	CONTROLLA(interlock_received(&s, &f, MS(0)) == 0);
+	CONTROLLA(interlock_permit(&s, GD32_VELOCITY, V_AVANTI, 8, MS(1)) == INTERLOCK_REFUSED);
 	f = sensori(0x0f);
-	f.dati[64] = 0x42;          /* sensori spenti (0x9d 00) */
-	sic_ricevuto(&s, &f, MS(20));
-	CONTROLLA(sic_permesso(&s, GD32_VELOCITA, V_AVANTI, 8, MS(21)) == SIC_RIFIUTATO);
-	CONTROLLA(!s.scattato);
+	f.data[64] = 0x42;          /* sensori spenti (0x9d 00) */
+	interlock_received(&s, &f, MS(20));
+	CONTROLLA(interlock_permit(&s, GD32_VELOCITY, V_AVANTI, 8, MS(21)) == INTERLOCK_REFUSED);
+	CONTROLLA(!s.tripped);
 	/* sollevato davvero, poi i sensori si spengono durante la prova: scatta */
 	f = sensori(0x0f);
-	sic_ricevuto(&s, &f, MS(40));
-	CONTROLLA(sic_permesso(&s, GD32_VELOCITA, V_AVANTI, 8, MS(41)) == SIC_PERMESSO);
-	f.dati[64] = 0x42;
-	CONTROLLA(sic_ricevuto(&s, &f, MS(60)) == 1);
+	interlock_received(&s, &f, MS(40));
+	CONTROLLA(interlock_permit(&s, GD32_VELOCITY, V_AVANTI, 8, MS(41)) == INTERLOCK_ALLOWED);
+	f.data[64] = 0x42;
+	CONTROLLA(interlock_received(&s, &f, MS(60)) == 1);
 	/* e lo stesso se lo si appoggia sulla base */
-	sic_init(&s, 1, MS(100));
+	interlock_init(&s, 1, MS(100));
 	f = sensori(0x0f);
-	sic_ricevuto(&s, &f, MS(0));
-	f.dati[7] = 0x02;
-	CONTROLLA(sic_ricevuto(&s, &f, MS(20)) == 1);
-	CONTROLLA(sic_permesso(&s, GD32_VELOCITA, V_AVANTI, 8, MS(21)) == SIC_RIFIUTATO);
+	interlock_received(&s, &f, MS(0));
+	f.data[7] = 0x02;
+	CONTROLLA(interlock_received(&s, &f, MS(20)) == 1);
+	CONTROLLA(interlock_permit(&s, GD32_VELOCITY, V_AVANTI, 8, MS(21)) == INTERLOCK_REFUSED);
 	/* frame corto: ignorato */
-	sic_init(&s, 1, MS(100));
+	interlock_init(&s, 1, MS(100));
 	f = sensori(0x0f);
-	f.n_dati = 10;
-	sic_ricevuto(&s, &f, MS(0));
-	CONTROLLA(!s.ha_sensori);
+	f.data_len = 10;
+	interlock_received(&s, &f, MS(0));
+	CONTROLLA(!s.has_sensors);
 }
 
 static void senza_sollevato_niente_motori(void)
 {
-	sicurezza_t s;
-	sic_init(&s, 0, MS(100));
+	interlock_t s;
+	interlock_init(&s, 0, MS(100));
 	gd32_frame_t f = sensori(0x0f);
-	CONTROLLA(sic_ricevuto(&s, &f, MS(0)) == 0);
-	CONTROLLA(sic_permesso(&s, GD32_VELOCITA, V_AVANTI, 8, MS(1)) == SIC_RIFIUTATO);
-	CONTROLLA(sic_permesso(&s, GD32_SPAZZOLA_LATERALE, SPAZZOLA, 1, MS(1)) == SIC_RIFIUTATO);
-	CONTROLLA(s.rifiutati == 2);
+	CONTROLLA(interlock_received(&s, &f, MS(0)) == 0);
+	CONTROLLA(interlock_permit(&s, GD32_VELOCITY, V_AVANTI, 8, MS(1)) == INTERLOCK_REFUSED);
+	CONTROLLA(interlock_permit(&s, GD32_SIDE_BRUSH, SPAZZOLA, 1, MS(1)) == INTERLOCK_REFUSED);
+	CONTROLLA(s.refused == 2);
 	/* fermare si può sempre, e gli altri comandi passano */
-	CONTROLLA(sic_permesso(&s, GD32_VELOCITA, ZERO8, 8, MS(1)) == SIC_PERMESSO);
-	CONTROLLA(sic_permesso(&s, GD32_KEEPALIVE, NULL, 0, MS(1)) == SIC_PERMESSO);
+	CONTROLLA(interlock_permit(&s, GD32_VELOCITY, ZERO8, 8, MS(1)) == INTERLOCK_ALLOWED);
+	CONTROLLA(interlock_permit(&s, GD32_KEEPALIVE, NULL, 0, MS(1)) == INTERLOCK_ALLOWED);
 	uint8_t uno = 1;
-	CONTROLLA(sic_permesso(&s, GD32_ALIMENTAZIONE_LIDAR, &uno, 1, MS(1)) == SIC_PERMESSO);
-	CONTROLLA(sic_permesso(&s, GD32_MOTORE_LIDAR, V_AVANTI, 4, MS(1)) == SIC_PERMESSO);
+	CONTROLLA(interlock_permit(&s, GD32_LIDAR_POWER, &uno, 1, MS(1)) == INTERLOCK_ALLOWED);
+	CONTROLLA(interlock_permit(&s, GD32_LIDAR_MOTOR, V_AVANTI, 4, MS(1)) == INTERLOCK_ALLOWED);
 }
 
 static void senza_sensori_niente_motori(void)
 {
-	sicurezza_t s;
-	sic_init(&s, 1, MS(100));
-	CONTROLLA(sic_permesso(&s, GD32_VELOCITA, V_AVANTI, 8, MS(0)) == SIC_RIFIUTATO);
+	interlock_t s;
+	interlock_init(&s, 1, MS(100));
+	CONTROLLA(interlock_permit(&s, GD32_VELOCITY, V_AVANTI, 8, MS(0)) == INTERLOCK_REFUSED);
 	/* frame diversi dai sensori non contano */
-	gd32_frame_t hb = { .cmd = GD32_HEARTBEAT, .n_dati = 0 };
-	CONTROLLA(sic_ricevuto(&s, &hb, MS(1)) == 0);
-	CONTROLLA(sic_permesso(&s, GD32_VELOCITA, V_AVANTI, 8, MS(1)) == SIC_RIFIUTATO);
-	CONTROLLA(sic_controlla(&s, MS(10000)) == 0);    /* mai visto 0x0f: non c'è niente da far scattare */
+	gd32_frame_t hb = { .cmd = GD32_HEARTBEAT, .data_len = 0 };
+	CONTROLLA(interlock_received(&s, &hb, MS(1)) == 0);
+	CONTROLLA(interlock_permit(&s, GD32_VELOCITY, V_AVANTI, 8, MS(1)) == INTERLOCK_REFUSED);
+	CONTROLLA(interlock_check(&s, MS(10000)) == 0);    /* mai visto 0x0f: non c'è niente da far scattare */
 }
 
 static void appoggiato_niente_motori(void)
 {
-	sicurezza_t s;
-	sic_init(&s, 1, MS(100));
+	interlock_t s;
+	interlock_init(&s, 1, MS(100));
 	gd32_frame_t f = sensori(0x00);                  /* tutti gli anti-caduta vedono il pavimento */
-	CONTROLLA(sic_ricevuto(&s, &f, MS(0)) == 0);     /* non scatta: non è mai stato sollevato */
-	CONTROLLA(sic_permesso(&s, GD32_VELOCITA, V_AVANTI, 8, MS(1)) == SIC_RIFIUTATO);
+	CONTROLLA(interlock_received(&s, &f, MS(0)) == 0);     /* non scatta: non è mai stato sollevato */
+	CONTROLLA(interlock_permit(&s, GD32_VELOCITY, V_AVANTI, 8, MS(1)) == INTERLOCK_REFUSED);
 	f = sensori(0x07);                               /* uno solo vede il pavimento */
-	sic_ricevuto(&s, &f, MS(20));
-	CONTROLLA(sic_permesso(&s, GD32_VELOCITA, V_AVANTI, 8, MS(21)) == SIC_RIFIUTATO);
+	interlock_received(&s, &f, MS(20));
+	CONTROLLA(interlock_permit(&s, GD32_VELOCITY, V_AVANTI, 8, MS(21)) == INTERLOCK_REFUSED);
 	/* poi lo si solleva: da quel momento i motori sono permessi */
 	f = sensori(0x0f);
-	CONTROLLA(sic_ricevuto(&s, &f, MS(40)) == 0);
-	CONTROLLA(sic_permesso(&s, GD32_VELOCITA, V_AVANTI, 8, MS(41)) == SIC_PERMESSO);
-	CONTROLLA(!s.scattato);
+	CONTROLLA(interlock_received(&s, &f, MS(40)) == 0);
+	CONTROLLA(interlock_permit(&s, GD32_VELOCITY, V_AVANTI, 8, MS(41)) == INTERLOCK_ALLOWED);
+	CONTROLLA(!s.tripped);
 }
 
 static void cambia_durante_la_prova(void)
 {
-	sicurezza_t s;
-	sic_init(&s, 1, MS(100));
+	interlock_t s;
+	interlock_init(&s, 1, MS(100));
 	gd32_frame_t f = sensori(0x0f);
-	sic_ricevuto(&s, &f, MS(0));
-	CONTROLLA(sic_permesso(&s, GD32_VELOCITA, V_AVANTI, 8, MS(1)) == SIC_PERMESSO);
-	CONTROLLA(sic_permesso(&s, GD32_SPAZZOLA_CENTRALE, SPAZZOLA, 1, MS(1)) == SIC_PERMESSO);
+	interlock_received(&s, &f, MS(0));
+	CONTROLLA(interlock_permit(&s, GD32_VELOCITY, V_AVANTI, 8, MS(1)) == INTERLOCK_ALLOWED);
+	CONTROLLA(interlock_permit(&s, GD32_MAIN_BRUSH, SPAZZOLA, 1, MS(1)) == INTERLOCK_ALLOWED);
 	/* un solo bit cambia: scatta subito, una volta sola */
 	f = sensori(0x0e);
-	CONTROLLA(sic_ricevuto(&s, &f, MS(20)) == 1);
-	CONTROLLA(s.scattato && s.motivo != NULL && s.quando == MS(20));
-	CONTROLLA(sic_ricevuto(&s, &f, MS(40)) == 0);
-	CONTROLLA(sic_permesso(&s, GD32_VELOCITA, V_AVANTI, 8, MS(41)) == SIC_RIFIUTATO);
+	CONTROLLA(interlock_received(&s, &f, MS(20)) == 1);
+	CONTROLLA(s.tripped && s.reason != NULL && s.tripped_ns == MS(20));
+	CONTROLLA(interlock_received(&s, &f, MS(40)) == 0);
+	CONTROLLA(interlock_permit(&s, GD32_VELOCITY, V_AVANTI, 8, MS(41)) == INTERLOCK_REFUSED);
 	/* anche se torna 0x0f, resta bloccato fino alla fine */
 	f = sensori(0x0f);
-	CONTROLLA(sic_ricevuto(&s, &f, MS(60)) == 0);
-	CONTROLLA(sic_permesso(&s, GD32_VELOCITA, V_AVANTI, 8, MS(61)) == SIC_RIFIUTATO);
-	CONTROLLA(sic_permesso(&s, GD32_ASPIRAZIONE, V_AVANTI, 2, MS(61)) == SIC_RIFIUTATO);
+	CONTROLLA(interlock_received(&s, &f, MS(60)) == 0);
+	CONTROLLA(interlock_permit(&s, GD32_VELOCITY, V_AVANTI, 8, MS(61)) == INTERLOCK_REFUSED);
+	CONTROLLA(interlock_permit(&s, GD32_SUCTION, V_AVANTI, 2, MS(61)) == INTERLOCK_REFUSED);
 	/* fermare resta permesso */
-	CONTROLLA(sic_permesso(&s, GD32_VELOCITA, ZERO8, 8, MS(61)) == SIC_PERMESSO);
+	CONTROLLA(interlock_permit(&s, GD32_VELOCITY, ZERO8, 8, MS(61)) == INTERLOCK_ALLOWED);
 }
 
 static void sensori_vecchi(void)
 {
-	sicurezza_t s;
-	sic_init(&s, 1, MS(100));
+	interlock_t s;
+	interlock_init(&s, 1, MS(100));
 	gd32_frame_t f = sensori(0x0f);
-	sic_ricevuto(&s, &f, MS(0));
-	CONTROLLA(sic_controlla(&s, MS(100)) == 0);      /* 100 ms esatti: ancora buono */
-	CONTROLLA(sic_permesso(&s, GD32_VELOCITA, V_AVANTI, 8, MS(100)) == SIC_PERMESSO);
-	CONTROLLA(sic_controlla(&s, MS(101)) == 1);      /* poi scatta */
-	CONTROLLA(sic_controlla(&s, MS(200)) == 0);      /* una volta sola */
-	sic_ricevuto(&s, &f, MS(210));
-	CONTROLLA(sic_permesso(&s, GD32_VELOCITA, V_AVANTI, 8, MS(211)) == SIC_RIFIUTATO);
+	interlock_received(&s, &f, MS(0));
+	CONTROLLA(interlock_check(&s, MS(100)) == 0);      /* 100 ms esatti: ancora buono */
+	CONTROLLA(interlock_permit(&s, GD32_VELOCITY, V_AVANTI, 8, MS(100)) == INTERLOCK_ALLOWED);
+	CONTROLLA(interlock_check(&s, MS(101)) == 1);      /* poi scatta */
+	CONTROLLA(interlock_check(&s, MS(200)) == 0);      /* una volta sola */
+	interlock_received(&s, &f, MS(210));
+	CONTROLLA(interlock_permit(&s, GD32_VELOCITY, V_AVANTI, 8, MS(211)) == INTERLOCK_REFUSED);
 
-	/* se nessuno chiama sic_controlla, ci pensa sic_permesso */
-	sic_init(&s, 1, MS(100));
-	sic_ricevuto(&s, &f, MS(0));
-	CONTROLLA(sic_permesso(&s, GD32_VELOCITA, V_AVANTI, 8, MS(150)) == SIC_RIFIUTATO);
-	CONTROLLA(s.scattato);
+	/* se nessuno chiama interlock_check, ci pensa interlock_permit */
+	interlock_init(&s, 1, MS(100));
+	interlock_received(&s, &f, MS(0));
+	CONTROLLA(interlock_permit(&s, GD32_VELOCITY, V_AVANTI, 8, MS(150)) == INTERLOCK_REFUSED);
+	CONTROLLA(s.tripped);
 }
 
-static void vietati(void)
+static void forbidden(void)
 {
-	sicurezza_t s;
-	sic_init(&s, 1, MS(100));
+	interlock_t s;
+	interlock_init(&s, 1, MS(100));
 	gd32_frame_t f = sensori(0x0f);
-	sic_ricevuto(&s, &f, MS(0));
+	interlock_received(&s, &f, MS(0));
 	uint8_t zero = 0, uno = 1;
-	CONTROLLA(sic_permesso(&s, GD32_POMPA_ACQUA, &zero, 1, MS(1)) == SIC_VIETATO);   /* anche a zero */
-	CONTROLLA(sic_permesso(&s, GD32_ALIMENTAZIONE_SOC, &uno, 1, MS(1)) == SIC_VIETATO);
-	CONTROLLA(sic_permesso(&s, GD32_RIAVVIA_SOC, NULL, 0, MS(1)) == SIC_VIETATO);
-	CONTROLLA(s.vietati == 3 && s.rifiutati == 0);
-	CONTROLLA(sic_e_motore(GD32_ASPIRAZIONE_PWM_BAT) && sic_e_motore(GD32_VELOCITA_RUOTE));
-	CONTROLLA(!sic_e_motore(GD32_MOTORE_LIDAR) && !sic_e_motore(GD32_LED_TASTO));
+	CONTROLLA(interlock_permit(&s, GD32_WATER_PUMP, &zero, 1, MS(1)) == INTERLOCK_FORBIDDEN);   /* anche a zero */
+	CONTROLLA(interlock_permit(&s, GD32_SOC_POWER, &uno, 1, MS(1)) == INTERLOCK_FORBIDDEN);
+	CONTROLLA(interlock_permit(&s, GD32_SOC_RESTART, NULL, 0, MS(1)) == INTERLOCK_FORBIDDEN);
+	CONTROLLA(s.forbidden == 3 && s.refused == 0);
+	CONTROLLA(interlock_is_motor(GD32_SUCTION_PWM_BATTERY) && interlock_is_motor(GD32_WHEEL_SPEED));
+	CONTROLLA(!interlock_is_motor(GD32_LIDAR_MOTOR) && !interlock_is_motor(GD32_BUTTON_LED));
 }
 
 /* I frame di arresto devono essere frame validi, uno per motore, con dati tutti a zero. */
@@ -167,56 +167,56 @@ static void raccogli(const gd32_frame_t *f, void *ctx) { (void)ctx; if (n_visti 
 static void frame_arresto(void)
 {
 	uint8_t buf[256];
-	size_t n = sic_frame_arresto(buf, sizeof buf);
+	size_t n = interlock_stop_frames(buf, sizeof buf);
 	CONTROLLA(n > 0);
 	gd32_deframer_t d;
 	gd32_deframer_init(&d);
 	n_visti = 0;
-	gd32_deframer_scrivi(&d, buf, n, raccogli, NULL);
-	CONTROLLA(n_visti == 6 && d.checksum_errati == 0 && d.byte_scartati == 0);
-	int velocita = 0, spazzole = 0, aspirazione = 0;
+	gd32_deframer_feed(&d, buf, n, raccogli, NULL);
+	CONTROLLA(n_visti == 6 && d.bad_checksums == 0 && d.discarded_bytes == 0);
+	int velocita = 0, spazzole = 0, suction = 0;
 	for (size_t i = 0; i < n_visti; i++) {
-		CONTROLLA(sic_e_motore(visti[i].cmd));
-		for (int k = 0; k < visti[i].n_dati; k++)
-			CONTROLLA(visti[i].dati[k] == 0);
-		velocita += visti[i].cmd == GD32_VELOCITA && visti[i].n_dati == 8;
-		spazzole += visti[i].cmd == GD32_SPAZZOLA_LATERALE || visti[i].cmd == GD32_SPAZZOLA_CENTRALE;
-		aspirazione += visti[i].cmd == GD32_ASPIRAZIONE && visti[i].n_dati == 2;
+		CONTROLLA(interlock_is_motor(visti[i].cmd));
+		for (int k = 0; k < visti[i].data_len; k++)
+			CONTROLLA(visti[i].data[k] == 0);
+		velocita += visti[i].cmd == GD32_VELOCITY && visti[i].data_len == 8;
+		spazzole += visti[i].cmd == GD32_SIDE_BRUSH || visti[i].cmd == GD32_MAIN_BRUSH;
+		suction += visti[i].cmd == GD32_SUCTION && visti[i].data_len == 2;
 	}
-	CONTROLLA(velocita == 1 && spazzole == 2 && aspirazione == 1);
-	CONTROLLA(sic_frame_arresto(buf, 10) == 0);      /* buffer troppo piccolo */
+	CONTROLLA(velocita == 1 && spazzole == 2 && suction == 1);
+	CONTROLLA(interlock_stop_frames(buf, 10) == 0);      /* buffer troppo piccolo */
 }
 
 /* Eccezione del banco di prova (2026-10-05): scatole sotto il muso, anti-caduta 0x09 invece di 0x0f. */
-static void cliff_atteso(void)
+static void expected_cliff(void)
 {
-	sicurezza_t s;
-	sic_init(&s, 1, MS(100));
+	interlock_t s;
+	interlock_init(&s, 1, MS(100));
 	gd32_frame_t f = sensori(0x09);
-	sic_ricevuto(&s, &f, MS(0));
-	CONTROLLA(sic_permesso(&s, GD32_VELOCITA, V_AVANTI, 8, MS(1)) == SIC_RIFIUTATO);   /* di regola serve 0x0f */
-	sic_init(&s, 1, MS(100));
-	sic_cliff_atteso(&s, 0x09);
-	CONTROLLA(sic_ricevuto(&s, &f, MS(0)) == 0);
-	CONTROLLA(sic_permesso(&s, GD32_VELOCITA, V_AVANTI, 8, MS(1)) == SIC_PERMESSO);
+	interlock_received(&s, &f, MS(0));
+	CONTROLLA(interlock_permit(&s, GD32_VELOCITY, V_AVANTI, 8, MS(1)) == INTERLOCK_REFUSED);   /* di regola serve 0x0f */
+	interlock_init(&s, 1, MS(100));
+	interlock_set_expected_cliff(&s, 0x09);
+	CONTROLLA(interlock_received(&s, &f, MS(0)) == 0);
+	CONTROLLA(interlock_permit(&s, GD32_VELOCITY, V_AVANTI, 8, MS(1)) == INTERLOCK_ALLOWED);
 	/* ora 0x0f (lo sollevano dalle scatole) è un cambiamento: scatta */
 	f = sensori(0x0f);
-	CONTROLLA(sic_ricevuto(&s, &f, MS(20)) == 1);
-	CONTROLLA(sic_permesso(&s, GD32_VELOCITA, V_AVANTI, 8, MS(21)) == SIC_RIFIUTATO);
+	CONTROLLA(interlock_received(&s, &f, MS(20)) == 1);
+	CONTROLLA(interlock_permit(&s, GD32_VELOCITY, V_AVANTI, 8, MS(21)) == INTERLOCK_REFUSED);
 	/* e se lo appoggiano (0x00) idem */
-	sic_init(&s, 1, MS(100));
-	sic_cliff_atteso(&s, 0x09);
+	interlock_init(&s, 1, MS(100));
+	interlock_set_expected_cliff(&s, 0x09);
 	f = sensori(0x09);
-	sic_ricevuto(&s, &f, MS(0));
+	interlock_received(&s, &f, MS(0));
 	f = sensori(0x00);
-	CONTROLLA(sic_ricevuto(&s, &f, MS(20)) == 1);
+	CONTROLLA(interlock_received(&s, &f, MS(20)) == 1);
 	/* sulla base resta vietato anche con lo schema giusto */
-	sic_init(&s, 1, MS(100));
-	sic_cliff_atteso(&s, 0x09);
+	interlock_init(&s, 1, MS(100));
+	interlock_set_expected_cliff(&s, 0x09);
 	f = sensori(0x09);
-	f.dati[7] = 0x02;
-	sic_ricevuto(&s, &f, MS(0));
-	CONTROLLA(sic_permesso(&s, GD32_VELOCITA, V_AVANTI, 8, MS(1)) == SIC_RIFIUTATO);
+	f.data[7] = 0x02;
+	interlock_received(&s, &f, MS(0));
+	CONTROLLA(interlock_permit(&s, GD32_VELOCITY, V_AVANTI, 8, MS(1)) == INTERLOCK_REFUSED);
 }
 
 int main(void)
@@ -227,8 +227,8 @@ int main(void)
 	ESEGUI(cambia_durante_la_prova);
 	ESEGUI(sensori_vecchi);
 	ESEGUI(base_e_sensori_spenti);
-	ESEGUI(vietati);
+	ESEGUI(forbidden);
 	ESEGUI(frame_arresto);
-	ESEGUI(cliff_atteso);
+	ESEGUI(expected_cliff);
 	return TEST_FINE();
 }
