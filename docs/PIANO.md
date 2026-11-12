@@ -985,6 +985,25 @@ lidar → /dev/ttyS1 → AuxCtrl
 5. **Task aperiodico e app** — task aperiodico sul core 3 (salvataggio della mappa, ricerca della posizione), poi l'app (comandi e telemetria, in più).
 6. **Installazione persistente e relazione** — avvio automatico del nostro software con ritorno all'originale,
    eventuale rilancio automatico, SSH solo con chiave, documentazione finale.
+   **Verifica dei software attivi** (richiesta dell'utente, 2026-11-12): rifare sul robot vero l'elenco di tutto
+   ciò che gira (processi, script in `/etc/rc.d`, porte aperte), disattivare gli inutili e decidere insieme cosa
+   personalizzare. Si disattiva solo dopo l'OK dell'utente. Elenco preliminare, fatto sul backup (`Estratto/nandd-rootfs`):
+   - **stack di fabbrica** (`S90robotManager` → Monitor → AuxCtrl, RobotApp, everest-server, log-server): parte a
+     ogni accensione e suona le voci originali; lo sostituisce il nostro avvio. Con lui sparisce anche il
+     **collegamento al cloud del produttore** (RobotApp verso 43.158.121.228:9090);
+   - **aggiornamenti del produttore**: `/usr/sbin/upgrade` (`S95robotUpgrade`, sempre attivo, anche col nostro
+     driver; scarica pacchetti via HTTP), `auto_upgrade_status=1` in `device_config.ini`, `S99aw_upgrade_autorun`:
+     da disattivare, potrebbero sovrascrivere il sistema;
+   - **`sayeye`** (socket in `/dev/socket`) e **`healthd`**: servizi di fabbrica mai analizzati, da capire prima di
+     decidere;
+   - da tenere: `wifiManager`, dropbear, adbd; da valutare: cron, dnsmasq, sysntpd, log;
+   - **audio personalizzati**: l'utente vuole suonare i suoi mp3 nelle occasioni che decide lui. `tinyplayer`
+     suona gli mp3 (gli originali sono MP3 44,1 kHz stereo 256 kbps), il volume si regola con `amixer`. Oggi anche il
+     nostro guasto usa un file originale (`sound_erro_harefault`, percorso fisso in `driver/driver.c`). Da fare: i file
+     in una cartella persistente (es. `/mnt/UDISK/audio/`), il percorso del driver, le chiamate `drv_suono` nei task.
+     Limiti del driver attuale: un solo suono in attesa (se ne arriva un altro prima che parta, il primo si perde), e
+     il thread di servizio aspetta la fine del suono, quindi stampa degli eventi e registrazione si fermano per tutta
+     la durata (con file lunghi o ravvicinati serve una coda di suoni).
 
 Fasi trasversali: simulatore (a livello di protocollo, con i dati delle catture) e test sul PC.
 

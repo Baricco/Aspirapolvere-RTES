@@ -211,6 +211,32 @@ sempre con il mutex `d.mx` (priority inheritance, sezioni di decine di microseco
 C'è poi un terzo thread, **di servizio**, non real-time: stampa gli eventi, suona, scrive la registrazione su file.
 Così i thread real-time non fanno mai I/O lento.
 
+
+1. Thread "tempo" (timer_loop, driver/driver.c:1163, priorità 99)
+Dorme con clock_nanosleep fino all'evento più vicino tra tre scadenze fisse:
+- heartbeat 0x06 ogni 200 ms: senza heartbeat il GD32 spegne i motori dopo circa 2 s;
+- keepalive 0x0d ogni 3 s: senza keepalive il GD32 riavvia tutto il robot;
+- ciclo da 20 ms (tick), il lavoro periodico del driver:
+  - all'accensione fa la sequenza di avvio del GD32;
+  - controlla che il GD32 continui a mandare i sensori;
+  - fa il watchdog dei task: scadenze mancate e task bloccati portano al guasto;
+  - legge i tasti e lo stato della base;
+  - gestisce le richieste di guasto che arrivano dai task;
+  - ripete i comandi a ruote, spazzole e aspirazione;
+  - regola la velocità del lidar;
+  - pubblica lo stato del driver.
+
+All'inizio, prima di ogni altra cosa, mette il robot in stato sicuro: tutti i motori a zero.
+
+2. Thread "ricezione" (receiver_loop, driver/driver.c:1217, priorità 98)
+Dorme in ppoll su tre cose e si sveglia quando una di queste ha dati:
+- seriale del GD32: decodifica il frame dei sensori (ne arriva uno ogni 20 ms), lo pubblica per i task e sveglia i task a 20 ms. Se un sensore cambia il comando permesso (un bumper premuto, un anti-caduta sul vuoto), manda subito il nuovo comando alle ruote, senza aspettare il ciclo da 20 ms;
+- seriale del lidar: decodifica le misure e ricompone il giro;
+- eventfd dei comandi: un task ha appena dato un comando nuovo (velocità, spazzole...) e il thread lo manda subito al GD32.
+
+3. Thread "di servizio" (non real-time)
+Quello che avevi già capito: stampa gli eventi, suona e scrive la registrazione su file. Così i due thread real-time non fanno mai operazioni lente.
+
 ### Configurazione e avvio (`driver.h`)
 
 - **`drv_config_t`**: `dev_gd32`, `dev_lidar` (seriali), `cpu` (core del driver), `cpu_flash` (core su cui spostare
