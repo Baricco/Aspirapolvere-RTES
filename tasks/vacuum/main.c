@@ -94,6 +94,8 @@ int main(void) {
        drv_config_default(&c);
 	if (drv_start(&c)) return 1;
 
+       drv_sound("power_on");
+
 	rt_allow_without_privileges(c.without_rt);   /* sul PC senza permessi per SCHED_FIFO i task partono lo stesso */
 
 

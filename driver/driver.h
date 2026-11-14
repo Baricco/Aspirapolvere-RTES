@@ -209,7 +209,7 @@ void drv_stuck(int enable);
  * spalle, 1 fa partire la manovra e 0 la annulla. Da quel momento il driver ignora drv_velocity e i task leggono
  * l'esito in drv_status_t.docking. Prima di chiamarla: drv_leave_base(0), e spazzole e aspirazione spente. */
 void drv_dock(int enable);
-void drv_sound(const char *name);                   /* es. "sound_beep_beep" (file in /usr/share/audio/english) */
+void drv_sound(const char *name);                   /* es. "clean_start": /mnt/UDISK/audio/<name>.mp3, altrimenti /usr/share/audio/english */
 
 /* Why a task asks for the fault state. To add a reason: add a value here and its case in drv_task_fault_text
  * (driver.c); if the case is missing the build stops with an error. */

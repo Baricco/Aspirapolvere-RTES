@@ -2232,6 +2232,8 @@ static nav_command_type_t read_commands(const drv_status_t *cur_drv_state) {
 // L'attesa poi fa uscire il robot dalla base, se ci si trova
 static void start_new_mission(void) {
 
+    drv_sound("clean_start");
+
     memset(nav_state.clean_cell_mask, 0, sizeof nav_state.clean_cell_mask);
     nav_state.is_axis = false;
     nav_state.is_clean_started = false;
@@ -2296,6 +2298,8 @@ static void go_home_now(void) {
 
     drv_led(DRV_LED_BLUE);
 
+    drv_sound("go_home");
+
     set_state(NAV_STATE_RETURN_HOME);
 }
 
@@ -2303,6 +2307,8 @@ static void go_home_now(void) {
 // la missione finisce, la mappatura annulla la ricerca e aspetta la base, e il driver fa l'aggancio a infrarossi da dove
 // si trova il robot (senza percorso: la posizione non c'è). Se l'aggancio non riesce il robot va in guasto
 static void start_blind_hook_up(void) {
+
+    drv_sound("go_home");
 
     send_objective(OBJ_STOP, 0, 0, 0, 0, 0);
 
@@ -2648,7 +2654,10 @@ static void job_navigation_body(void *arg) {
 
         // aggancio alla cieca in corso (tasto premuto con la posizione persa): si aspetta solo l'esito del driver
         if (nav_state.state == NAV_STATE_HOOK_UP && nav_state.hook_has_started) {
-            if (cur_drv_state.docking == DOCK_DONE) set_state(NAV_STATE_SLEEP);
+            if (cur_drv_state.docking == DOCK_DONE) {
+                set_state(NAV_STATE_SLEEP);
+                drv_sound("docked");
+            }
             else if (cur_drv_state.docking == DOCK_FAILED) stop_and_fail(DRV_FAULT_DOCKING_FAILED);
             return;
         }
@@ -2718,6 +2727,8 @@ static void job_navigation_body(void *arg) {
         
         // salva la missione attuale
         nav_state.interrupted_mission = nav_state.mission;
+
+        drv_sound("battery_low");
 
         // ferma il robot
         send_objective(OBJ_STOP, 0, 0, 0, 0, 0);
@@ -3163,6 +3174,7 @@ static void job_navigation_body(void *arg) {
                 // agganciato: riposo sulla base, e la mappa si salva
                 if (cur_drv_state.docking == DOCK_DONE) {
                     set_state(NAV_STATE_SLEEP);
+                    drv_sound("docked");
                     request_map_save_if_allowed();
                 }
                 else if (cur_drv_state.docking == DOCK_FAILED) stop_and_fail(DRV_FAULT_DOCKING_FAILED);
@@ -3275,6 +3287,8 @@ static void job_navigation_body(void *arg) {
 
                 // azzera interrupted_mission
                 nav_state.interrupted_mission = 0;
+
+                drv_sound("clean_start");
 
                 nav_state.has_left_base = false;
 

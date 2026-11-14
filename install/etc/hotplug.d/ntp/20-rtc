@@ -1,0 +1,3 @@
+# Chiamato da ntpd (tramite /usr/sbin/ntpd-hotplug e hotplug-call) quando cambia lo strato, cioè quando si
+# sincronizza: scrive l'ora giusta nell'orologio hardware, in UTC (vedi /etc/init.d/sysfixtime).
+[ "$ACTION" = stratum ] && /sbin/hwclock -w -u -f /dev/rtc0

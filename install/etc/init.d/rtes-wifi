@@ -1,0 +1,56 @@
+#!/bin/sh /etc/rc.common
+# Wi-Fi del robot senza il wifiManager di fabbrica: wpa_supplicant con la rete salvata in WPA_CONF e udhcpc per
+# l'indirizzo (rtes-wifi-dhcp), wpa_cli che a ogni collegamento sblocca udhcpc (rtes-wifi-event). procd li fa
+# ripartire se si chiudono. Il chip lo accende il kernel all'avvio e il modulo lo carica
+# /etc/modules.d (net-rtl8189es); qui lo si carica solo se manca.
+# All'avvio parte anche rtes-wifi-check: se wlan0 non ottiene un indirizzo, rimette il wifiManager di fabbrica,
+# perché SSH via Wi-Fi è l'unico modo per entrare nel robot.
+
+START=21
+STOP=99
+USE_PROCD=1
+
+WIFI_MODULE=/lib/modules/3.4.39/8189es.ko
+WPA_CONF=/etc/wifi/wpa_supplicant.conf
+WLAN_WAIT_S=10        # attesa massima della comparsa di wlan0 dopo il caricamento del modulo
+CHECK_SCRIPT=/usr/sbin/rtes-wifi-check
+
+start_service() {
+    if [ ! -d /sys/class/net/wlan0 ]; then
+        insmod "$WIFI_MODULE"
+        i=0
+        while [ ! -d /sys/class/net/wlan0 ] && [ $i -lt $WLAN_WAIT_S ]; do
+            sleep 1
+            i=$((i + 1))
+        done
+    fi
+    ifconfig wlan0 up
+
+    # respawn: soglia 3600 s, attesa 5 s, nessun limite ai tentativi
+    procd_open_instance wpa
+    procd_set_param command /usr/sbin/wpa_supplicant -i wlan0 -D nl80211 -c "$WPA_CONF"
+    procd_set_param oom_adj -17
+    procd_set_param respawn 3600 5 0
+    procd_close_instance
+
+    procd_open_instance dhcp
+    procd_set_param command /usr/sbin/rtes-wifi-dhcp
+    procd_set_param oom_adj -17
+    procd_set_param respawn 3600 5 0
+    procd_close_instance
+
+    # a ogni nuovo collegamento al router controlla che udhcpc non sia rimasto bloccato
+    procd_open_instance events
+    procd_set_param command /usr/sbin/wpa_cli -p /etc/wifi/sockets -i wlan0 -a /usr/sbin/rtes-wifi-event
+    procd_set_param respawn 3600 5 0
+    procd_close_instance
+}
+
+stop_service() {
+    ifconfig wlan0 down
+}
+
+boot() {
+    start "$@"
+    start-stop-daemon -S -b -x "$CHECK_SCRIPT"
+}

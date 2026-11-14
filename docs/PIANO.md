@@ -997,13 +997,95 @@ lidar → /dev/ttyS1 → AuxCtrl
    - **`sayeye`** (socket in `/dev/socket`) e **`healthd`**: servizi di fabbrica mai analizzati, da capire prima di
      decidere;
    - da tenere: `wifiManager`, dropbear, adbd; da valutare: cron, dnsmasq, sysntpd, log;
-   - **audio personalizzati**: l'utente vuole suonare i suoi mp3 nelle occasioni che decide lui. `tinyplayer`
-     suona gli mp3 (gli originali sono MP3 44,1 kHz stereo 256 kbps), il volume si regola con `amixer`. Oggi anche il
-     nostro guasto usa un file originale (`sound_erro_harefault`, percorso fisso in `driver/driver.c`). Da fare: i file
-     in una cartella persistente (es. `/mnt/UDISK/audio/`), il percorso del driver, le chiamate `drv_suono` nei task.
-     Limiti del driver attuale: un solo suono in attesa (se ne arriva un altro prima che parta, il primo si perde), e
-     il thread di servizio aspetta la fine del suono, quindi stampa degli eventi e registrazione si fermano per tutta
-     la durata (con file lunghi o ravvicinati serve una coda di suoni).
+   - **audio personalizzati** (decisi e preparati il 2026-11-13/14): 6 frasi di Maurice di *Madagascar*, in italiano,
+     in `audio/finali/` (registrati dagli episodi, tagliati dall'utente, normalizzati). Gli stessi file sono in
+     `install/mnt/UDISK/audio/` e già copiati sul robot in `/mnt/UDISK/audio/` (provati con `tinyplayer`): stesso
+     volume delle voci di fabbrica (−14 LUFS), passa-alto 150 Hz, MP3 44,1 kHz stereo 256 kbps, 416 KB in tutto.
+
+     | File | Quando | Frase |
+     |---|---|---|
+     | `power_on` | avvio del programma (anche al riavvio per cambio di mappa) | "Vostra maestà, sono qui per aiutarvi" |
+     | `fault` | il driver entra in guasto (già nel driver) | "Re Julien, siamo nei guai. In guai enormi!" |
+     | `clean_start` | nuova pulizia, e ripresa dopo la ricarica | *I Like to Move It* |
+     | `go_home` | comando Casa | "Sogni d'oro" |
+     | `docked` | aggancio riuscito | "Centro perfetto, Maurice!" |
+     | `battery_low` | batteria scarica, la pulizia si interrompe | "Ne ho abbastanza! Voglio andare a letto! Sono stanco morto!" |
+
+     Driver: cerca `/mnt/UDISK/audio/<nome>.mp3`, altrimenti `/usr/share/audio/english/<nome>.mp3` (così i suoni di
+     fabbrica restano usabili nelle prove); il guasto suona `fault`. **Da fare:** le chiamate `drv_sound` nei task
+     (le scrive l'utente) e `power_on` nel `main`; il volume all'avvio quando sparisce AuxCtrl (punto 7 della
+     proposta qui sotto). Limiti del driver: un solo suono in attesa, e il thread di servizio aspetta la fine del suono
+     (stampa degli eventi e registrazione ferme per la durata: al massimo 3,7 s).
+
+   **Decisioni del 2026-11-13** (inizio della fase 6): il **ritorno all'originale non serve più**. Conta solo avere il
+   nostro software installato e comandato dall'app col backend sul server; nel caso peggiore si reinstalla dal backup.
+   **SSH resta sempre raggiungibile e con la password** (niente "solo chiave"): è l'unico accesso al robot, anche a
+   progetto finito (il micro-USB è rovinato). Password di root cambiata dall'utente. File di sistema nostri in
+   `install/` (stessi percorsi del robot).
+
+   Fatto il 2026-11-13:
+   - **aggiornamenti del produttore spenti**: `robotUpgrade` e `aw_upgrade_autorun` disabilitati, i due server
+     (`cecotec-ota.3irobotix.net`, `ota.3irobotics.net`) in `/etc/hosts` verso `127.0.0.1`. `auto_upgrade_status=0`
+     non regge: lo stack di fabbrica lo riscrive a 1 a ogni avvio; va rimesso a 0 quando lo stack sparisce;
+   - **wifiManager sostituito** da `/etc/init.d/rtes-wifi` (procd, START=21): `wpa_supplicant`, `rtes-wifi-dhcp`
+     (lancia `udhcpc` solo con `operstate` = `up`: `udhcpc` 1.24 partito prima del collegamento riceve "Network is
+     down" e non manda più richieste) e `wpa_cli -a rtes-wifi-event` (a ogni collegamento senza indirizzo fa ripartire
+     `udhcpc`). All'avvio `rtes-wifi-check` aspetta l'indirizzo per 60 s e, se non arriva, avvia il wifiManager di
+     fabbrica (resoconto in `/tmp/rtes-wifi-check.log`). Provati: avvio (indirizzo ~10 s dopo l'accensione),
+     riavvio automatico di `udhcpc`, perdita dell'indirizzo con ricollegamento. Persa la rete propria del robot
+     (192.168.5.1, abbinamento dell'app originale): la rete Wi-Fi si cambia via SSH in
+     `/etc/wifi/wpa_supplicant.conf`.
+   - **dnsmasq, sayeye, healthd disabilitati**, uno alla volta con riavvio e confronto dello stato (processi, porte,
+     script di avvio, rete, impostazioni del processore, alimentazione): unica differenza ogni volta il servizio
+     tolto. Processore invariato (`performance` è il default del kernel, `autohotplug` 0 non lo metteva sayeye). Dopo
+     healthd, missione `f6-carica` (`build/robot/fase3/f6-carica/`): uscita, pulizia, rientro con batteria bassa
+     simulata, aggancio riuscito al primo tentativo (`DOCK_DONE`), in carica; 0 scadenze mancate in tutti i task.
+     Da tenere d'occhio: nel primo tentativo il lidar, acceso subito dopo `prepara`, non ha mandato dati per 4 s
+     ("il lidar non manda dati da 0,5 s"); nelle prove dopo, tutto normale (forse il primo avvio dopo 12 giorni fermo);
+   - **ntpd attivo** (cron invece resta com'è: abilitato, parte quando c'è un file in `/etc/crontabs/`): in
+     `/etc/config/system` `enabled` al posto di `enable` (errore del produttore), server `0-3.it.pool.ntp.org`, fuso
+     `Europe/Rome` (`CET-1CEST,M3.5.0,M10.5.0/3`); orologio hardware in UTC (`hwclock -u` in `/etc/init.d/sysfixtime`).
+     L'orologio del robot andava avanti di ~3 s al giorno (+38 s il 13/11). **Problema trovato:** a ogni avvio
+     RobotApp fa "Sync RTC time to system" con le sue regole in ora cinese (`/dev/rtc1`, `sync_time_diff=28800`) e
+     sposta l'ora di sistema di un'ora indietro dopo che ntpd l'ha già corretta; ntpd, ormai sincronizzato, non
+     rifà il salto. Il problema sparisce con lo stack di fabbrica. **`/etc/hotplug.d/ntp/20-rtc` (scrive l'ora
+     nell'orologio hardware quando ntpd si sincronizza) è SOSPESO**: con RobotApp attivo copiava nell'orologio
+     hardware l'ora sbagliata e a ogni avvio se ne perdeva un'altra. Da rimettere (copia in `install/`) e
+     riprovare con un riavvio dopo aver tolto lo stack. `date -k` su questo sistema non cambia il fuso del kernel
+     (strace: `settimeofday(NULL, NULL)`);
+   - **PROPOSTA (2026-11-13, da approvare; si fa dopo gli audio): avvio automatico al posto dello stack di fabbrica.**
+     1. *Dove:* eseguibili in `/mnt/UDISK/rt/bin/` (`vacuum`, `spia` per il custode): la partizione di sistema ha
+        solo 8 MB liberi, UDISK 96 MB. Script in `/etc/init.d/rtes` e `/usr/sbin/rtes-run` (copie in `install/`).
+        Copia con nome temporaneo e rinomina, come `tools/driver-robot.sh`, così un programma in esecuzione non si
+        rovina.
+     2. *Avvio:* `/etc/init.d/rtes`, procd, START=95 (dopo rete, ntpd non serve aspettarlo: i task usano
+        `CLOCK_MONOTONIC`). Il GD32 riavvia il robot se per ~190 s nessuno manda `0x0d`: oggi il nostro script
+        partirebbe ~10 s dopo l'accensione.
+     3. *`rtes-run`* (il ciclo che oggi è in `tools/driver-robot.sh avvia`): lancia `vacuum`; codice 3 → lo rilancia
+        subito (cambio di mappa, `docs/app.md` 7.5); altra uscita o chiusura per errore → lo rilancia dopo qualche
+        secondo, ma al massimo N volte in M minuti (da decidere, es. 3 in 10); oltre, avvia il **custode** (`spia
+        guida`: keepalive e heartbeat, motori a zero) e si ferma lì, con il LED di guasto, finché non si riavvia
+        il robot o non si entra in SSH. Così un difetto che fa chiudere il programma non diventa un ciclo infinito
+        di avvii con i motori.
+     4. *Uscita del programma:* niente file che crescono. L'uscita va al registro di sistema (`logread`, in RAM),
+        con il buffer portato da 16 KB a qualche centinaio di KB (`log_size` in `/etc/config/system`), perché i
+        messaggi del Wi-Fi del kernel lo riempiono in pochi minuti. Le registrazioni (`RTES_REGISTRA`) e i comandi
+        di prova (`RTES_COMMANDS`) restano solo per le prove.
+     5. *Stack di fabbrica:* `/etc/init.d/robotManager disable` nello **stesso passo** in cui si abilita `rtes`
+        (i file restano, e comunque c'è il backup). Poi `auto_upgrade_status=0`, che nessuno riscriverà più, e si
+        rimette `/etc/hotplug.d/ntp/20-rtc`.
+     6. *Cosa resta uguale:* rete (`rtes-wifi`), SSH, adbd, ntpd, cron. Nessun passo tocca la rete.
+     7. *Da coordinare con gli audio:* AuxCtrl all'avvio impostava il volume (`volume=` in `device_config.ini`,
+        mixer `speaker volume control`); senza di lui il volume lo deve impostare il nostro avvio o il driver.
+     8. *`./rtes.sh install`* (oggi "da fare"): compila per ARM, copia eseguibili e file di `install/`, abilita i
+        servizi; `uninstall` il contrario.
+     9. *Prova:* (a) installazione con `rtes` abilitato e riavvio: il programma parte da solo, robot a riposo sulla
+        base, ora giusta, SSH ok; (b) pressione del tasto: missione e rientro; (c) `kill` del programma: si riavvia;
+        (d) programma che esce subito (eseguibile di prova): dopo N tentativi resta il custode e il robot non si
+        riavvia; (e) cambio di mappa simulato (codice 3): riavvio immediato.
+   - **ULTIMISSIMA COSA del progetto** (richiesta dell'utente, 2026-11-13): riguardare il **cambio della rete Wi-Fi
+     dall'app**, oggi possibile solo via SSH. All'utente dispiace averlo perso: va ripensato quando tutto il resto è
+     finito.
 
 Fasi trasversali: simulatore (a livello di protocollo, con i dati delle catture) e test sul PC.
 

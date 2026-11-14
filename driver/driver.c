@@ -385,7 +385,7 @@ static void enter_fault(const char *reason)
 	full_stop();
 	send_u8(GD32_BUTTON_LED, LED_FAULT);
 	d.led_sent = LED_FAULT;
-	atomic_store(&cmd.sound, "sound_erro_harefault");
+	atomic_store(&cmd.sound, "fault");
 	event("GUASTO: %s. Motori fermi, LED 8", reason);
 }
 
@@ -1340,8 +1340,11 @@ void drv_config_default(drv_config_t *c)
 	c->expected_cliff = -1;
 	c->lidar_rev_s = 6.0;
 	c->lidar_offset_cdeg = LIDAR_OFFSET_CDEG;
-	c->sound_cmd = access("/bin/tinyplayer", X_OK) == 0 ? "tinyplayer /usr/share/audio/english/%s.mp3 >/dev/null 2>&1"
-	                                                     : NULL;
+	/* i nostri suoni in /mnt/UDISK/audio (copie in install/mnt/UDISK/audio), altrimenti quelli di fabbrica con lo stesso nome */
+	c->sound_cmd = access("/bin/tinyplayer", X_OK) == 0
+	                   ? "n=%s; f=/mnt/UDISK/audio/$n.mp3; [ -f $f ] || f=/usr/share/audio/english/$n.mp3; "
+	                     "tinyplayer $f >/dev/null 2>&1"
+	                   : NULL;
 														 
 }
 
