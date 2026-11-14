@@ -56,6 +56,13 @@ tar -xjf "$archivio" -C "$SRC/mbedtls" --strip-components=1
         sed -i "s|^//#define $opzione\$|#define $opzione|" include/mbedtls/mbedtls_config.h
         grep -q "^#define $opzione\$" include/mbedtls/mbedtls_config.h || { echo "non trovo $opzione in mbedtls_config.h" >&2; exit 1; }
     done
+    # Il kernel del robot (3.4) non ha getrandom(): mbedTLS ripiega su un file, che di default è /dev/random. Lì si
+    # blocca anche per minuti (entropia ~37 bit, nessun generatore hardware) e il 2026-11-14 ha fermato il thread
+    # principale di vacuum dentro start_network. /dev/urandom non si blocca mai; è meno sicuro solo nei primi istanti
+    # dopo l'accensione, e il collegamento al server parte dopo l'avvio del sistema (vedi la nota in mbedtls_config.h)
+    sed -i 's|^//#define MBEDTLS_PLATFORM_DEV_RANDOM "/dev/random"$|#define MBEDTLS_PLATFORM_DEV_RANDOM "/dev/urandom"|' include/mbedtls/mbedtls_config.h
+    grep -q '^#define MBEDTLS_PLATFORM_DEV_RANDOM "/dev/urandom"$' include/mbedtls/mbedtls_config.h ||
+        { echo "non trovo MBEDTLS_PLATFORM_DEV_RANDOM in mbedtls_config.h" >&2; exit 1; }
     make -s -j"$JOBS" -C library CC="$CC_ARM" AR="$AR_ARM" CFLAGS="$CFLAGS_ARM" libmbedcrypto.a libmbedx509.a libmbedtls.a
     cp library/libmbedcrypto.a library/libmbedx509.a library/libmbedtls.a "$OUT/lib/"
     rm -rf "$OUT/include/mbedtls" "$OUT/include/psa"

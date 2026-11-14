@@ -253,10 +253,6 @@ int main(void) {
        // thread della coda dei comandi (comandi JSON per le prove): se non parte, il programma va avanti senza
        start_commands();
 
-       // collegamento al server dell'app: parte dopo i task, come i comandi. Senza il file del token non parte, e il
-       // robot funziona come prima
-       start_network();
-
        // sveglia il task del moto con l'arrivo del frame dai sensori
        drv_wake_on_sensors(&movement_task);
 
@@ -271,6 +267,11 @@ int main(void) {
        drv_watch(&safety_task, 1, 0);
        drv_watch(&navigation_task, 1, 0);
        drv_watch(&mapping_task, 1, 0);
+
+       // collegamento al server dell'app: parte per ultimo, quando i task sono già svegliati dai sensori e sorvegliati,
+       // così un blocco nella rete (il 2026-11-14 una lettura da /dev/random) non ferma la loro preparazione. Senza il
+       // file del token non parte, e il robot funziona come prima
+       start_network();
 
 
 	// ciclo di esecuzione main loop:

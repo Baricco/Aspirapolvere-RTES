@@ -19,7 +19,7 @@ In tutto il documento `<server>` sta al posto del dominio vero, che non va scrit
 9. [Robot](#9-robot)
 10. [App](#10-app)
 11. [Sviluppo e prove](#11-sviluppo-e-prove)
-12. [Deploy (rimandato)](#12-deploy-rimandato)
+12. [Deploy](#12-deploy)
 13. [Ordine di lavoro proposto](#13-ordine-di-lavoro-proposto)
 
 ---
@@ -704,9 +704,35 @@ rilanciano il programma con codice di uscita 3.
 - **Prove automatiche:** backend (client di prova di Flask), interprete dei comandi e confronto della mappa dal vivo in
   C (cartella `test/`), decodifica RTM1 e differenze nell'app.
 
-## 12. Deploy (rimandato)
+## 12. Deploy
 
-Si fa al momento del deploy, non prima:
+**Fatto il 2026-11-14** (passo passo, comandi lanciati dall'utente sul server in produzione):
+- codice: `git clone` della repo in `~/maurice/repo`, venv in `backend/.venv` (Python 3.13), dati in `~/maurice/data`
+  (permessi 700), configurazione in `~/maurice/maurice.env` (solo `MAURICE_DATA_DIR`, permessi 600);
+- servizio `maurice-backend.service` (stile degli altri servizi Flask del server, log in journald),
+  gunicorn su `127.0.0.1:8730`, socket di controllo di gunicorn spento (`deploy/gunicorn.conf.py`: il percorso di
+  default è lo stesso per tutte le istanze dello stesso utente);
+- versione web dell'app (`flutter build web`, indirizzi relativi `/api/...`) copiata con `rsync` in `/var/www/maurice`;
+- VirtualHost `maurice.conf` (80 → HTTPS; 443: app su `/`, `/api/` a gunicorn, `timeout=60` per le richieste lunghe);
+- certificato comune esteso con `certbot certonly --apache --cert-name ... --expand` e **tutti** i nomi, prima con
+  `--dry-run`; copia di `/etc/letsencrypt` fatta prima; rinnovo sempre `authenticator = apache`, `installer = apache`;
+- utente creato con `admin.py`. **Token del robot non ancora generato**: si genera quando si collega il robot (si
+  vede una volta sola e va scritto subito in `/mnt/UDISK/rt/robot-token`).
+
+Aggiornare: `git pull` in `~/maurice/repo` e `sudo systemctl restart maurice-backend`; per l'app web `flutter build
+web` sul PC e `rsync -av --delete app/build/web/ <server>:/var/www/maurice/`.
+
+**App Android** (2026-11-14): `flutter build apk --release --dart-define-from-file=../../config-app-server.json`
+(dalla cartella `app/`). Il file con l'indirizzo vero sta **fuori dalla repo** (`~/Aspirapolvere/config-app-server.json`);
+`app/config.json` resta quello di sviluppo (`http://localhost:5000`, usato da `app/dev/run-web.sh`). L'APK è firmato con
+la chiave di debug del PC (`~/.android/debug.keystore`): gli aggiornamenti vanno compilati sullo stesso PC, altrimenti
+Android li rifiuta e bisogna disinstallare l'app prima.
+
+**Robot:** indirizzo vero in `tasks/vacuum/cloud/config.h` (privato), token in `/mnt/UDISK/rt/robot-token` (permessi
+600), poi `./rtes.sh install`. mbedTLS va compilata con `MBEDTLS_PLATFORM_DEV_RANDOM "/dev/urandom"`
+(`tools/build-net-libs.sh`): il kernel 3.4 del robot non ha `getrandom()` e `/dev/random` bloccava l'avvio della rete.
+
+Piano originale:
 - estendere il certificato con il nuovo sottodominio (`certbot certonly --cert-name ... --expand` con tutti i nomi);
 - VirtualHost di Apache che passa `/api` a gunicorn su `127.0.0.1` e serve la versione web dell'app su `/`, copiando
   la configurazione di uno dei servizi Flask già attivi;

@@ -1053,7 +1053,8 @@ lidar → /dev/ttyS1 → AuxCtrl
      hardware l'ora sbagliata e a ogni avvio se ne perdeva un'altra. Da rimettere (copia in `install/`) e
      riprovare con un riavvio dopo aver tolto lo stack. `date -k` su questo sistema non cambia il fuso del kernel
      (strace: `settimeofday(NULL, NULL)`);
-   - **PROPOSTA (2026-11-13, da approvare; si fa dopo gli audio): avvio automatico al posto dello stack di fabbrica.**
+   - **FATTO il 2026-11-14: avvio automatico al posto dello stack di fabbrica** (proposta del 2026-11-13, approvata;
+     risultati delle prove in fondo al punto 9).
      1. *Dove:* eseguibili in `/mnt/UDISK/rt/bin/` (`vacuum`, `spia` per il custode): la partizione di sistema ha
         solo 8 MB liberi, UDISK 96 MB. Script in `/etc/init.d/rtes` e `/usr/sbin/rtes-run` (copie in `install/`).
         Copia con nome temporaneo e rinomina, come `tools/driver-robot.sh`, così un programma in esecuzione non si
@@ -1083,6 +1084,21 @@ lidar → /dev/ttyS1 → AuxCtrl
         base, ora giusta, SSH ok; (b) pressione del tasto: missione e rientro; (c) `kill` del programma: si riavvia;
         (d) programma che esce subito (eseguibile di prova): dopo N tentativi resta il custode e il robot non si
         riavvia; (e) cambio di mappa simulato (codice 3): riavvio immediato.
+     **Come è fatto** (2026-11-14): `install/etc/init.d/rtes` (procd, START=95, STOP=10, uscita nel registro:
+     `logread -e rtes`, buffer portato a 512 KB in `/etc/config/system`) lancia `install/usr/sbin/rtes-run`: imposta il
+     volume (50, quello di AuxCtrl), aspetta che un programma precedente lasci le seriali (fino a 15 s), lancia
+     `/mnt/UDISK/rt/bin/vacuum` da `/mnt/UDISK/rt`; codice 3 → subito di nuovo; altre uscite → dopo 5 s, ma 3 uscite
+     in 10 min → custode (`spia guida --una 0x8d:08`: keepalive, heartbeat, motori a zero, LED 8). `./rtes.sh install`
+     compila, copia eseguibili e `install/` (solo i file cambiati, nome temporaneo + rinomina), mette
+     `auto_upgrade_status=0`, disabilita `robotManager`, abilita `rtes`, e riavvia `rtes` se gira già. `uninstall` non
+     c'è (niente ritorno all'originale). `20-rtc` rimesso.
+     **Prove sul robot (2026-11-14):** (a) riavvio: SSH dopo ~10 s, `vacuum` partito da solo, stack di fabbrica
+     assente, `auto_upgrade_status` resta 0, mixer identico a quello con AuxCtrl, ora di sistema e orologio hardware
+     giusti; (c) `kill -9` di `vacuum`: rilanciato dopo ~7 s; (e) programma di prova che esce con 3: rilancio
+     immediato; (d) programma di prova che esce sempre con 1: dopo 3 uscite parte il custode e il robot resta acceso
+     oltre i 190 s del GD32. Difetto trovato e corretto: con `restart` il nuovo `rtes-run` partiva mentre il
+     `vacuum` di prima chiudeva ancora le seriali ("/dev/ttyS3 è già aperto"), e quella falsa uscita contava per il
+     custode. Da fare con l'utente: (b) tasto: missione e rientro, con i suoni.
    - **ULTIMISSIMA COSA del progetto** (richiesta dell'utente, 2026-11-13): riguardare il **cambio della rete Wi-Fi
      dall'app**, oggi possibile solo via SSH. All'utente dispiace averlo perso: va ripensato quando tutto il resto è
      finito.

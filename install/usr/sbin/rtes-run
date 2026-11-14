@@ -37,6 +37,14 @@ while pidof vacuum spia >/dev/null && [ "$i" -lt "$PREVIOUS_WAIT_S" ]; do
     sleep 1
     i=$((i + 1))
 done
+# Se il programma di prima non si è chiuso col SIGTERM (il 2026-11-14 il thread principale era fermo in una lettura
+# da /dev/random e il segnale non lo sbloccava), lo si chiude a forza: altrimenti tiene le seriali, il nuovo esce
+# subito MAX_FAILS volte e si finisce nel custode. Dopo questa attesa non comanda comunque più niente
+if pidof vacuum spia >/dev/null; then
+    echo "rtes-run: il programma di prima non si è chiuso in $PREVIOUS_WAIT_S s: lo chiudo a forza"
+    kill -KILL $(pidof vacuum spia) 2>/dev/null
+    sleep 1
+fi
 
 cd "$WORK_DIR" || exit 1
 fails=""                      # istanti (uptime, in s) delle uscite dentro la finestra
