@@ -33,11 +33,17 @@
 #define STALL_TIME RT_MS(1000)          // per quanto tempo deve durare lo stallo prima che venga considerato come tale
 
 
-#define TRAIL_SIZE 8            // lunghezza del buffer delle ultime posizioni percorse, serve per permettere al robot di indietreggiare, nel caso di problemi
+#define TRAIL_SIZE 120          // lunghezza del buffer delle ultime posizioni percorse (120 punti a TRAIL_STEP = 6 m), serve per indietreggiare negli sblocchi e per ripercorrere la strada fatta quando il robot è fuori dalla zona collegata alla base
+#define RETRACE_STEP 0.15       // distanza minima fra due punti della scia ripercorsa, per non fermarsi ogni 5 cm, espressa in m
+#define RETRACE_REVERSE_ANGLE DEG_TO_RAD(90)    // se la scia sta oltre questo angolo dal muso il robot la ripercorre in retromarcia, altrimenti si gira e va avanti
+#define RETRACE_LOOK_BACK 0.3   // per decidere da che parte sta la scia si guarda il punto a questa distanza di strada, espressa in m
+#define RETRACE_SPEED 0.15      // velocità con cui il robot ripercorre la scia, in avanti e in retromarcia, espressa in m/s
 #define TRAIL_STEP 0.05         // distanza minima in metri tra le ultime posizioni salvate nel buffer        
 #define UNLOCK_MAX_ATTEMPTS 10  // tentativi di sblocco prima di andare in guasto (ne mettiamo tanti, per essere sicuri che il robot tenti di uscire tante volte prima di fermarsi e arrendersi)
 
 #define UNLOCK_PHASE_TIMEOUT RT_MS(5000)    // durata massima di ogni fase
+#define UNLOCK_PLACE_MAX_ATTEMPTS 3         // sblocchi di fila nello stesso posto, seguendo un percorso, dopo cui la cella in cui il robot cercava di entrare si chiude: lì c'è qualcosa che la mappa non vede (oggetti neri, vetri, gambe sottili)
+#define UNLOCK_PLACE_RADIUS 1               // due sblocchi sono nello stesso posto se le celle del robot distano al massimo così, in celle di navigazione
 
 // il task di navigazione ha celle 20x20cm l'idea è che per non avere strisce non pulite, ogni cella viene divisa in 
 // due "corsie" durante la fase di pulizia, questo significa che ogni cella verrà divisa in due parti 10x20 
@@ -84,11 +90,15 @@
 
 #define CHARGING_STATION_CELL coord_to_nav_index(DOCK_POINT_X_M, 0)          // cella che si trova davanti alla base di ricarica 
 #define NO_PATH_HOME_TIMEOUT RT_MS(30000)       // tempo per cui il ritorno alla base riprova a cercare il percorso (per esempio se una persona blocca il passaggio) prima che il robot vada in guasto
+#define NO_PROGRESS_DISTANCE 0.25              // strada minima, in linea d'aria, che il robot deve fare in NO_PROGRESS_TIMEOUT mentre la navigazione lo muove, espressa in metri
+#define NO_PROGRESS_TIMEOUT RT_S(30)            // tempo senza fare NO_PROGRESS_DISTANCE dopo cui parte uno sblocco: rete di sicurezza contro i cicli in cui il robot resta fermo per sempre
 #define HOOK_UP_TIMEOUT RT_MS(30000)            // tempo massimo che può impiegare il robot ad agganciarsi alla base di ricarica prima che vada in stato di guasto
 
 #define BATTERY_LOW_CONFIRM_TIME RT_S(20)       // la batteria deve restare bassa per tutto questo tempo prima del rientro, altrimenti un carico forte potrebbe farla scendere sotto la soglia per qualche istante, causando un rientro inutile
 #define HOME_IR_DOCK_DIST 1.0                   // se la cella davanti alla base non si raggiunge, da questa distanza dal punto di aggancio (o meno) l'aggancio a infrarossi parte da dove si trova il robot, espressa in metri
 #define BATTERY_RESUME_PERCENT 90               // percentuale di carica della batteria che deve raggiungere il robot prima che ricominci a pulire
+#define BATTERY_MAX_TEMPERATURE_C 55           // sopra questa temperatura della batteria (byte 9 del GD32) il robot interrompe la missione e torna alla base: protezione delle celle (nelle prove 29-36 gradi); l'originale aveva il controllo ma spento
+#define BATTERY_RETURN_PERCENT 15               // sotto questa percentuale (stima del driver, che tiene conto del carico) il robot interrompe la missione e torna a caricarsi; la tensione bassa del driver resta come protezione delle celle
 
 #define ALIGN_TIMEOUT RT_MS(15000)              // tempo massimo che può durare l'allineamento al centro di una cella, prima che il robot vada in guasto
 
@@ -251,6 +261,22 @@ typedef struct {
     bool remote_brushes, remote_suction;    // telecomando: spazzole e aspirazione chieste dall'app
     int64_t remote_last_move;               // telecomando: istante dell'ultimo comando di movimento
     int64_t remote_last_command;            // telecomando: istante dell'ultimo comando del telecomando (anche il segno di vita)
+
+    uint8_t home_region[NAV_MAP_CELL_NUMBER * NAV_MAP_CELL_NUMBER / 8];    // zona della base: un bit per cella, a 1 se la cella si raggiunge dalla cella davanti alla base con le regole normali della ricerca
+    bool is_home_region_valid;              // true se la zona della base ha senso: sessione partita dalla base e cella davanti alla base libera
+    bool is_home_region_computed;           // true se la zona della base è già stata calcolata almeno una volta
+    uint32_t home_region_map_version;       // versione della mappa con cui è stata calcolata la zona della base
+    uint32_t home_region_closed_num;        // celle chiuse quando è stata calcolata la zona della base (le celle chiuse cambiano la copia locale senza cambiare la versione)
+    uint8_t escape_level;                   // ricerca della strada per rientrare nella zona della base (regole più larghe, cell_can_enter): 0 ricerca normale, 1 senza zone proibite, 2 anche attraverso le zone proibite
+
+    bool is_retrace_reverse;                // true se la scia si ripercorre in retromarcia
+    bool is_retrace_exhausted;              // true se la scia non è bastata per rientrare nella zona della base: si passa alla ricerca sulla mappa
+
+    uint16_t unlock_place_cell;             // cella del robot all'ultimo sblocco
+    uint8_t unlock_place_count;             // sblocchi di fila nello stesso posto (entro UNLOCK_PLACE_RADIUS da unlock_place_cell)
+
+    double progress_x, progress_y;          // posizione da cui si misura se il robot avanza
+    int64_t progress_start;                 // istante in cui il robot era in progress_x, progress_y
 
 } navigation_state_t;
 
@@ -590,8 +616,9 @@ static bool is_battery_dead() {
 
     drv_status(&cur_state);
 
-    // da quanto tempo la batteria è bassa: un calo di qualche istante (carico forte) non conta
-    if (cur_state.battery == BAT_OK) nav_state.battery_low_since = 0;
+    // da quanto tempo la batteria è bassa: un calo di qualche istante (carico forte) non conta. Bassa vuol dire
+    // percentuale sotto BATTERY_RETURN_PERCENT, tensione sotto la soglia di protezione del driver o batteria troppo calda
+    if (cur_state.battery == BAT_OK && cur_state.percentage > BATTERY_RETURN_PERCENT && cur_state.temperature_c < BATTERY_MAX_TEMPERATURE_C) nav_state.battery_low_since = 0;
     else if (nav_state.battery_low_since == 0) nav_state.battery_low_since = rt_now();
 
     // se la batteria è scarica da almeno BATTERY_LOW_CONFIRM_TIME e la missione attuale è di esplorazione o pulizia
@@ -770,6 +797,7 @@ typedef enum {
     GOAL_FREE,      // l'obiettivo della ricerca è trovare una cella libera, partendo da una bloccata
     GOAL_EDGE,      // l'obiettivo della ricerca è trovare una cella con un quadrante di bordo ancora non pulito
     GOAL_NEAR_HOME, // l'obiettivo della ricerca è trovare una cella libera entro HOME_IR_DOCK_DIST dal punto di aggancio
+    GOAL_HOME_REGION, // l'obiettivo della ricerca è trovare una cella della zona della base (collegata alla cella davanti alla base)
 } nav_search_goal_t;
 
 
@@ -894,6 +922,13 @@ static bool is_clean_half_near(const double x, const double y) {
     return false;
 }
 
+// funzione helper che dice se una cella è nella zona della base, cioè se dalla cella davanti alla base ci si arriva con le
+// regole normali della ricerca. Se la zona non ha senso (sessione non partita dalla base) vale "cella libera", come prima
+static inline bool is_in_home_region(const uint16_t cell) {
+    if (!nav_state.is_home_region_valid) return is_nav_cell_free(cell);
+    return (nav_state.home_region[cell >> 3] & (1u << (cell & 7))) != 0;
+}
+
 // Funzione helper per stabilire se la cella fornita corrisponde all'obiettivo della ricerca
 // la ricerca guarda le 8 celle vicine (anche in diagonale), il percorso verrà poi tagliato usando l'algoritmo di
 // bresenham; la frontiera invece guarda solo le 4 celle con un lato in comune (una vicina sconosciuta da un lato)
@@ -929,6 +964,8 @@ static bool cell_is_goal(const nav_search_goal_t goal, const uint16_t cell, cons
             nav_index_to_coord(cell, &x, &y);
             return hypot(x - DOCK_POINT_X_M, y) <= HOME_IR_DOCK_DIST;
         }
+        case GOAL_HOME_REGION:
+            return is_in_home_region(cell);
         case GOAL_EDGE:
            
             if (!is_nav_cell_free(cell)) return false;          // se la cella non è libera non è un bordo
@@ -975,6 +1012,20 @@ static bool cell_can_enter(const uint16_t cur_cell, const uint16_t next_cell, co
     if (next_cell_y == 0 || next_cell_y == NAV_MAP_CELL_NUMBER - 1) return false;   // bordo superiore e inferiore
 
     uint8_t quad_corridor1, quad_corridor2;
+
+    // ricerca della strada per rientrare nella zona della base: il robot è fuori dalla parte collegata alla base (ci è
+    // arrivato seguendo un muro, o la mappa è cambiata attorno a lui), quindi la strada può passare anche da celle che la
+    // ricerca normale evita. Libere e troppo strette si attraversano sempre, le proibite solo al secondo tentativo (la zona
+    // proibita è un divieto, non un ostacolo: si attraversa solo se non c'è un'altra strada); in diagonale solo con i
+    // quadranti affacciati liberi, così la strada non taglia lo spigolo di un muro. Le bloccate restano permesse solo
+    // vicino alla partenza, con la regola di sotto
+    if (nav_state.escape_level > 0) {
+        const mapping_nav_cell_state next_state = get_nav_cell_state(nav_state.map[next_cell]);
+        const int delta = (int)next_cell - (int)cur_cell;
+        const bool is_straight = delta == 1 || delta == -1 || delta == NAV_MAP_CELL_NUMBER || delta == -NAV_MAP_CELL_NUMBER;
+        if ((next_state == NAV_CELL_FREE || next_state == NAV_CELL_TOO_NARROW || (next_state == NAV_CELL_FORBIDDEN && nav_state.escape_level == 2)) &&
+            (is_straight || get_contact_quads(cur_cell, next_cell, &quad_corridor1, &quad_corridor2))) return true;
+    }
 
     // se next_cell è libera, può entrare
     if (is_nav_cell_free(next_cell) && (!is_nav_cell_free(cur_cell) || get_contact_quads(cur_cell, next_cell, &quad_corridor1, &quad_corridor2))) return true;
@@ -1657,6 +1708,33 @@ static bool append_unknown_neighbor(void) {
 
 }
 
+// funzione helper che ricalcola la zona della base se la mappa è cambiata dall'ultima volta: tutte le celle raggiungibili
+// dalla cella davanti alla base con le regole normali. Usa la ricerca, quindi rovina il percorso: va chiamata solo
+// quando si sta per cercare un percorso nuovo
+static void update_home_region(void) {
+
+    const bool is_valid = read_started_on_base() && is_nav_cell_free(CHARGING_STATION_CELL);
+
+    if (nav_state.is_home_region_computed && nav_state.home_region_map_version == nav_state.map_version &&
+        nav_state.home_region_closed_num == nav_state.closed_cells.num && nav_state.is_home_region_valid == is_valid) return;
+
+    nav_state.is_home_region_computed = true;
+    nav_state.home_region_map_version = nav_state.map_version;
+    nav_state.home_region_closed_num = nav_state.closed_cells.num;
+    nav_state.is_home_region_valid = is_valid;
+
+    if (!is_valid) return;
+
+    // una ricerca che non trova niente visita tutte le celle raggiungibili e le lascia nella coda
+    search_cell(CHARGING_STATION_CELL, GOAL_CELL, CELL_NOT_VISITED);
+
+    memset(nav_state.home_region, 0, sizeof nav_state.home_region);
+    for (uint32_t i = 0; i < nav_state.s_q.tail; i++) {
+        const uint16_t cell = nav_state.s_q.values[i];
+        nav_state.home_region[cell >> 3] |= (uint8_t)(1u << (cell & 7));
+    }
+}
+
 // Dopo un arresto o uno sblocco, riporta il robot al centro della sua cella se è 
 // libera o al quadrante libero più vicino, altrimenti ricalcola il percorso
 static void resume_after_stop(safety_alarm_t cur_alarm, movement_position_data_t cur_pos) {
@@ -1826,6 +1904,24 @@ static bool can_pass_through(const uint32_t idx, const movement_position_data_t 
 // Funzione helper: dopo un allarme segna la cella del robot come ostacolo e fa partire lo sblocco
 static void start_unlock_after_alarm(const safety_alarm_t cur_alarm, const movement_position_data_t cur_pos) {
 
+    // conta gli sblocchi di fila nello stesso posto
+    const uint16_t robot_cell = coord_to_nav_index(cur_pos.x, cur_pos.y);
+    if (nav_state.unlock_place_count > 0 &&
+        abs((int)(robot_cell & 0xFF) - (int)(nav_state.unlock_place_cell & 0xFF)) <= UNLOCK_PLACE_RADIUS &&
+        abs((int)(robot_cell >> 8) - (int)(nav_state.unlock_place_cell >> 8)) <= UNLOCK_PLACE_RADIUS) nav_state.unlock_place_count++;
+    else nav_state.unlock_place_count = 1;
+    nav_state.unlock_place_cell = robot_cell;
+
+    // al UNLOCK_PLACE_MAX_ATTEMPTS-esimo sblocco nello stesso posto mentre seguiva un percorso, il robot chiude la cella in
+    // cui cercava di entrare (se è quella in cui si trova, la successiva del percorso): la ricerca cercherà un'altra
+    // strada, o l'obiettivo diventa irraggiungibile e si passa al prossimo, invece di riprovare fino al guasto
+    if (nav_state.unlock_place_count >= UNLOCK_PLACE_MAX_ATTEMPTS && nav_state.state == NAV_STATE_FOLLOW_PATH && nav_state.path.length > 0) {
+        uint16_t idx = nav_state.path_idx;
+        if (nav_state.path.cells[idx] == robot_cell && (uint32_t)idx + 1 < nav_state.path.length) idx++;
+        if (nav_state.path.cells[idx] != robot_cell) close_cell(nav_state.path.cells[idx]);
+        nav_state.unlock_place_count = 0;
+    }
+
     // l'incastro diventa un ostacolo sulla mappa solo adesso: se l'attraversamento riesce, il bordo del tappeto resta percorribile
     if (cur_alarm.error_mask & SAFETY_ERROR_STUCK) drv_stuck(1);
 
@@ -1966,6 +2062,106 @@ static void go_to_nearest_free_cell(const safety_alarm_t cur_alarm, const moveme
         // inizia a seguire il percorso (passa allo stato segui percorso)
         start_following_path(cur_alarm, cur_pos, 0, false);
     }
+}
+
+// funzione helper che trova il punto della scia a RETRACE_LOOK_BACK di strada dal robot (o il più vecchio, se la scia è
+// più corta), senza toglierlo dalla scia. Restituisce false se la scia è vuota
+static bool trail_look_back(const movement_position_data_t cur_pos, double *x, double *y) {
+
+    if (nav_state.trail.len == 0) return false;
+
+    double dist = 0, last_x = cur_pos.x, last_y = cur_pos.y;
+
+    // dal punto più recente verso quelli più vecchi
+    for (int k = 1; k <= nav_state.trail.len; k++) {
+        const int idx = (nav_state.trail.head + TRAIL_SIZE - k) % TRAIL_SIZE;
+        *x = nav_state.trail.x[idx];
+        *y = nav_state.trail.y[idx];
+        dist += hypot(*x - last_x, *y - last_y);
+        last_x = *x;
+        last_y = *y;
+        if (dist >= RETRACE_LOOK_BACK) break;
+    }
+
+    return true;
+}
+
+// funzione helper che manda il robot al prossimo punto della scia, almeno RETRACE_STEP più in là (l'ultimo della scia può
+// essere più vicino). Restituisce false se la scia è finita
+static bool retrace_next_point(const safety_alarm_t cur_alarm, const movement_position_data_t cur_pos) {
+
+    double x, y;
+    bool found = false;
+
+    while (trail_pop(&x, &y)) {
+        found = true;
+        if (hypot(x - cur_pos.x, y - cur_pos.y) >= RETRACE_STEP) break;
+    }
+
+    if (!found) return false;
+
+    const double v = nav_state.is_retrace_reverse ? -MIN(RETRACE_SPEED, cur_alarm.max_v_backw) : MIN(RETRACE_SPEED, cur_alarm.max_v_forw);
+    send_objective(OBJ_MOVE, MAX_ROTATION_SPEED, 0, v, x, y);
+
+    return true;
+}
+
+// funzione helper che fa partire il ritorno lungo la scia: la strada appena fatta è percorribile di sicuro, anche quando la
+// mappa dice il contrario. Se la scia sta dietro al robot (oltre RETRACE_REVERSE_ANGLE dal muso) la fa in retromarcia,
+// senza girarsi, altrimenti si gira e va avanti. Restituisce false se la scia è vuota
+static bool start_retrace(const safety_alarm_t cur_alarm, const movement_position_data_t cur_pos) {
+
+    double back_x, back_y;
+    if (!trail_look_back(cur_pos, &back_x, &back_y)) return false;
+
+    const double side = wrap_angle(atan2(back_y - cur_pos.y, back_x - cur_pos.x) - cur_pos.theta);
+    nav_state.is_retrace_reverse = fabs(side) > RETRACE_REVERSE_ANGLE;
+
+    set_state(NAV_STATE_RETRACE);
+
+    if (!retrace_next_point(cur_alarm, cur_pos)) {
+        set_state(nav_state.mission);
+        return false;
+    }
+
+    return true;
+}
+
+// funzione helper chiamata dagli stati che cercano un percorso (esplorazione, bordi, pulizia, ritorno alla base): se il
+// robot non è nella zona della base, prima di ogni altra ricerca ci rientra, e restituisce true. Così "la ricerca non
+// trova niente" vuol dire sempre "nella zona della base non c'è più niente da fare", mai "il robot è chiuso in un pezzo
+// di mappa staccato dal resto". Se la zona non ha senso (sessione non partita dalla base) fa quello che si faceva prima:
+// esce solo da una cella non libera, verso la libera più vicina
+static bool leave_outside_region(const safety_alarm_t cur_alarm, const movement_position_data_t cur_pos, const uint16_t robot_cell) {
+
+    update_home_region();
+
+    if (is_in_home_region(robot_cell)) {
+        nav_state.is_retrace_exhausted = false;
+        return false;
+    }
+
+    if (!nav_state.is_home_region_valid) {
+        go_to_nearest_free_cell(cur_alarm, cur_pos, robot_cell);
+        return true;
+    }
+
+    // prima si prova a tornare indietro lungo la scia, e solo se non basta si cerca una strada sulla mappa
+    if (!nav_state.is_retrace_exhausted && start_retrace(cur_alarm, cur_pos)) return true;
+
+    // prima senza attraversare le zone proibite, poi, se non c'è un'altra strada, anche attraverso
+    nav_state.escape_level = 1;
+    uint32_t length = search_cell(robot_cell, GOAL_HOME_REGION, 0);
+    if (length == 0) {
+        nav_state.escape_level = 2;
+        length = search_cell(robot_cell, GOAL_HOME_REGION, 0);
+    }
+    nav_state.escape_level = 0;
+
+    if (length == 0) stop_and_fail(DRV_FAULT_NO_ESCAPE_CELL);
+    else start_following_path(cur_alarm, cur_pos, 0, false);
+
+    return true;
 }
 
 // funzione helper che restituisce true se è possibile estendere la striscia attuale
@@ -2241,6 +2437,7 @@ static void start_new_mission(void) {
     nav_state.unlock_attempt = 0;
     nav_state.trail.len = 0;
     nav_state.has_left_base = false;
+    nav_state.is_retrace_exhausted = false;
 
     // da qui c'è una missione in corso, fino al prossimo riposo
     nav_state.is_mission_active = true;
@@ -2292,6 +2489,9 @@ static void go_home_now(void) {
     drv_leave_base(0);
     nav_state.interrupted_mission = 0;
 
+    // il rientro parte con tutti i tentativi di sblocco
+    nav_state.unlock_attempt = 0;
+
     // il rientro chiesto da fermo (in riposo fuori dalla base) è una missione a sé
     if (!nav_state.is_mission_active) nav_state.mission_start = rt_now();
     nav_state.is_mission_active = true;
@@ -2335,6 +2535,9 @@ static void start_blind_hook_up(void) {
 // se il telecomando era attivo si torna in telecomando, se c'era una missione si va in pausa (così con la ripresa la
 // pulizia continua tenendo le celle già pulite), altrimenti in riposo
 static void leave_failure(void) {
+
+    // quello che il robot farà adesso parte con tutti i tentativi di sblocco: quelli finiti hanno causato il guasto
+    nav_state.unlock_attempt = 0;
 
     if (nav_state.is_remote) {
         drv_leave_base(1);
@@ -2574,6 +2777,36 @@ static void check_brush_unlock(const safety_alarm_t cur_alarm) {
 
 }
 
+// funzione helper che controlla che il robot avanzi mentre la navigazione lo muove: se in NO_PROGRESS_TIMEOUT non si è
+// spostato di NO_PROGRESS_DISTANCE parte uno sblocco (e dopo UNLOCK_MAX_ATTEMPTS sblocchi di fila il guasto). Senza,
+// un ciclo fra la ricerca e un percorso che il robot non riesce a fare lo lascerebbe fermo per sempre con
+// l'aspirazione accesa. Restituisce true se ha fatto partire lo sblocco
+static bool check_progress(const safety_alarm_t cur_alarm, const movement_position_data_t cur_pos) {
+
+    const bool is_moving_state =
+        nav_state.state == NAV_STATE_EXPLORE || nav_state.state == NAV_STATE_CLEAN || nav_state.state == NAV_STATE_FOLLOW_BORDERS ||
+        nav_state.state == NAV_STATE_RETURN_HOME || nav_state.state == NAV_STATE_FOLLOW_PATH || nav_state.state == NAV_STATE_BORDER_LAP ||
+        nav_state.state == NAV_STATE_ALIGN || nav_state.state == NAV_STATE_RETRACE;
+
+    if (!is_moving_state || nav_state.progress_start == 0 ||
+        hypot(cur_pos.x - nav_state.progress_x, cur_pos.y - nav_state.progress_y) >= NO_PROGRESS_DISTANCE) {
+        nav_state.progress_x = cur_pos.x;
+        nav_state.progress_y = cur_pos.y;
+        nav_state.progress_start = rt_now();
+        return false;
+    }
+
+    if (elapsed_time(nav_state.progress_start) < NO_PROGRESS_TIMEOUT) return false;
+
+    nav_state.progress_start = 0;
+
+    send_objective(OBJ_STOP, 0, 0, 0, 0, 0);
+    set_state(NAV_STATE_UNLOCK);
+    start_unlock_attempt(cur_alarm, cur_pos);
+
+    return true;
+}
+
 // lavoro di un job del task (lo chiama job_navigation, che alla fine pubblica lo stato)
 static void job_navigation_body(void *arg) {
     
@@ -2687,7 +2920,7 @@ static void job_navigation_body(void *arg) {
     // salvata nel buffer della scia delle posizioni.
     // se il buffer della scia delle posizioni è vuoto o la distanza dall'ultima
     // posizione è almeno TRAIL_STEP, aggiungi la posizione corrente al buffer
-    if ((nav_state.trail.len <= 0 || hypot(nav_state.trail.x[(nav_state.trail.head + TRAIL_SIZE - 1) % TRAIL_SIZE] - cur_pos.x, nav_state.trail.y[(nav_state.trail.head + TRAIL_SIZE - 1) % TRAIL_SIZE] - cur_pos.y) >= TRAIL_STEP) && nav_state.state != NAV_STATE_UNLOCK) {       // btw spero che nessuno legga mai questo schifo di if
+    if ((nav_state.trail.len <= 0 || hypot(nav_state.trail.x[(nav_state.trail.head + TRAIL_SIZE - 1) % TRAIL_SIZE] - cur_pos.x, nav_state.trail.y[(nav_state.trail.head + TRAIL_SIZE - 1) % TRAIL_SIZE] - cur_pos.y) >= TRAIL_STEP) && nav_state.state != NAV_STATE_UNLOCK && nav_state.state != NAV_STATE_RETRACE) {       // btw spero che nessuno legga mai questo schifo di if
         trail_push(cur_pos.x, cur_pos.y);
     }
 
@@ -2696,6 +2929,9 @@ static void job_navigation_body(void *arg) {
 
     // l'incastro si segnala alla mappa solo quando parte lo sblocco
     drv_stuck(0);
+
+    // rete di sicurezza: il robot deve avanzare mentre la navigazione lo muove
+    if (check_progress(cur_alarm, cur_pos)) return;
 
     // se il robot è incastrato su qualcosa di basso, prima dello sblocco prova ad attraversarlo
     if (should_start_cross(cur_alarm.error_mask)) {
@@ -2774,14 +3010,8 @@ static void job_navigation_body(void *arg) {
             // non aggiornata, lo segnamo anche nella mappa privata di questo task
             if (get_nav_cell_state(nav_state.map[robot_index]) == NAV_CELL_UNKNOWN) nav_state.map[robot_index] = NAV_CELL_FREE;
             
-            // se il robot si trova in una cella non libera
-            if (!is_nav_cell_free(robot_index)) {
-
-                go_to_nearest_free_cell(cur_alarm, cur_pos, robot_index);
-
-                break;
-
-            }
+            // se il robot è fuori dalla zona della base (anche in una cella non libera), prima ci rientra
+            if (leave_outside_region(cur_alarm, cur_pos, robot_index)) break;
             
             
             
@@ -2829,11 +3059,8 @@ static void job_navigation_body(void *arg) {
             // calcola la cella del robot
             uint16_t robot_cell = coord_to_nav_index(cur_pos.x, cur_pos.y);
 
-            // se la cella del robot non è libera, vai alla cella libera più vicina ed esci
-            if (!is_nav_cell_free(robot_cell)) {
-                go_to_nearest_free_cell(cur_alarm, cur_pos, robot_cell);
-                break;
-            }
+            // se il robot è fuori dalla zona della base (anche in una cella non libera), prima ci rientra
+            if (leave_outside_region(cur_alarm, cur_pos, robot_cell)) break;
 
             // la prima striscia parte da un estremo della stanza, le altre proseguono corsia dopo corsia
             if (!nav_state.is_clean_started) {
@@ -2909,11 +3136,8 @@ static void job_navigation_body(void *arg) {
             // calcola la cella del robot
             uint16_t robot_cell = coord_to_nav_index(cur_pos.x, cur_pos.y);
 
-            // se la cella del robot non è libera, vai alla cella libera più vicina ed esci
-            if (!is_nav_cell_free(robot_cell)) {
-                go_to_nearest_free_cell(cur_alarm, cur_pos, robot_cell);
-                break;
-            }
+            // se il robot è fuori dalla zona della base (anche in una cella non libera), prima ci rientra
+            if (leave_outside_region(cur_alarm, cur_pos, robot_cell)) break;
 
             // se il robot si trova già su un bordo da pulire, inizia il giro
             if (cell_is_goal(GOAL_EDGE, robot_cell, 0)) {
@@ -2947,6 +3171,13 @@ static void job_navigation_body(void *arg) {
             if (new_clean) {
                 nav_state.border_no_new_dist = 0;
                 nav_state.unlock_attempt = 0;
+            }
+
+            // il giro segue il muro con il lidar e non guarda la mappa: le zone proibite le deve controllare da solo.
+            // Il centro del robot in una cella proibita vuol dire che il corpo tocca la zona: il giro finisce lì
+            if (get_nav_cell_state(nav_state.map[coord_to_nav_index(cur_pos.x, cur_pos.y)]) == NAV_CELL_FORBIDDEN) {
+                end_border_lap();
+                break;
             }
 
             // rete di sicurezza contro i giri infiniti
@@ -3225,11 +3456,8 @@ static void job_navigation_body(void *arg) {
             // calcola la cella del robot
             uint16_t robot_cell = coord_to_nav_index(cur_pos.x, cur_pos.y);
 
-            // se la cella del robot non è libera, vai alla cella libera più vicina ed esci
-            if (!is_nav_cell_free(robot_cell)) {
-                go_to_nearest_free_cell(cur_alarm, cur_pos, robot_cell);
-                break;
-            }
+            // se il robot è fuori dalla zona della base (anche in una cella non libera), prima ci rientra
+            if (leave_outside_region(cur_alarm, cur_pos, robot_cell)) break;
 
             // se il robot è già nella cella davanti alla base, inizia l'ultimo tratto
             if (robot_cell == CHARGING_STATION_CELL) {
@@ -3381,6 +3609,43 @@ static void job_navigation_body(void *arg) {
             break;
         }
 
+        case NAV_STATE_RETRACE: {
+
+            // la velocità segue i limiti della sicurezza: all'indietro quello della retromarcia
+            const double max_v = nav_state.is_retrace_reverse ? cur_alarm.max_v_backw : cur_alarm.max_v_forw;
+            nav_state.cur_obj.v = nav_state.is_retrace_reverse ? -MIN(RETRACE_SPEED, max_v) : MIN(RETRACE_SPEED, max_v);
+            write_objective(&nav_state.cur_obj);
+
+            // la sicurezza trattiene il robot (ostacolo nuovo sulla scia): la scia non basta, si passa alla mappa
+            if (max_v > STALL_SPEED || fabs(cur_pos.omega) > STALL_OMEGA) nav_state.stall_start = 0;
+            else if (nav_state.stall_start == 0) nav_state.stall_start = rt_now();
+            if (nav_state.stall_start != 0 && elapsed_time(nav_state.stall_start) >= STALL_TIME) {
+                send_objective(OBJ_STOP, 0, 0, 0, 0, 0);
+                nav_state.is_retrace_exhausted = true;
+                set_state(nav_state.mission);
+                break;
+            }
+
+            if (!is_objective_achieved(cur_pos)) break;
+
+            // a ogni punto raggiunto: se il robot è rientrato nella zona della base la missione riprende
+            update_home_region();
+            if (is_in_home_region(coord_to_nav_index(cur_pos.x, cur_pos.y))) {
+                send_objective(OBJ_STOP, 0, 0, 0, 0, 0);
+                nav_state.is_retrace_exhausted = false;
+                set_state(nav_state.mission);
+                break;
+            }
+
+            // altrimenti il punto dopo; se la scia è finita, si passa alla ricerca sulla mappa
+            if (!retrace_next_point(cur_alarm, cur_pos)) {
+                send_objective(OBJ_STOP, 0, 0, 0, 0, 0);
+                nav_state.is_retrace_exhausted = true;
+                set_state(nav_state.mission);
+            }
+
+            break;
+        }
         case NAV_STATE_FAILURE: {
             // Se il robot è in guasto non c'è niente da fare
             break;

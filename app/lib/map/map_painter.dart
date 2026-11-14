@@ -10,6 +10,7 @@ import 'package:flutter/material.dart';
 import '../config/map_colors.dart';
 import '../models/robot_state.dart';
 import 'rtm.dart';
+import 'trail.dart';
 import 'zone_editor.dart';
 
 /// Punti dello schermo per cella fine con lo zoom a 1.
@@ -90,12 +91,21 @@ class MapPainter extends CustomPainter {
 
   void _paintTrail(Canvas canvas) {
     if (trail.length < 2) return;
+    // un tratto per ogni pezzo fra due interruzioni (dove il robot non aspirava)
     final path = Path();
-    final first = worldToCanvas(trail.first.dx, trail.first.dy);
-    path.moveTo(first.dx, first.dy);
-    for (final point in trail.skip(1)) {
+    var isNewStretch = true;
+    for (final point in trail) {
+      if (isTrailBreak(point)) {
+        isNewStretch = true;
+        continue;
+      }
       final canvasPoint = worldToCanvas(point.dx, point.dy);
-      path.lineTo(canvasPoint.dx, canvasPoint.dy);
+      if (isNewStretch) {
+        path.moveTo(canvasPoint.dx, canvasPoint.dy);
+        isNewStretch = false;
+      } else {
+        path.lineTo(canvasPoint.dx, canvasPoint.dy);
+      }
     }
     canvas.drawPath(
       path,

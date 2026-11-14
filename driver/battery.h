@@ -17,8 +17,11 @@
  *
  * Livelli (con isteresi, per non oscillare sul confine), sulla media dell'ultimo secondo:
  *   BAT_OK
- *   BAT_LOW     sotto 14,2 V (si torna OK sopra 14,4 V): il driver accende il LED 6 (giallo, lampeggio lento)
- *   BAT_CRITICAL   sotto 13,8 V (si torna BASSA sopra 14,0 V): il driver FERMA i motori e li rifiuta
+ *   BAT_LOW     sotto 13,6 V (si torna OK sopra 13,8 V): il driver accende il LED 6 (giallo, lampeggio lento)
+ *   BAT_CRITICAL   sotto 13,2 V (si torna BASSA sopra 13,4 V): il driver FERMA i motori e li rifiuta
+ * Sono soglie di protezione delle celle (3,4 e 3,3 V per cella sotto carico): con l'aspirazione la tensione cala di
+ * ~0,3 V, quindi le vecchie soglie (14,2 e 13,8 V) facevano rientrare il robot al ~40% (prova n3 del 14/11). Il rientro
+ * normale lo decide la navigazione dalla percentuale.
  * Mentre è in carica il livello è sempre BAT_OK (la tensione sale comunque).
  * Le soglie sono più prudenti di quelle dell'originale, che non fa partire la pulizia sotto il 15 % (~13,8 V da
  * fermo) e la interrompe sotto l'8 % (~13,4 V da fermo, ~13,25 V in movimento); protezione a 12,0 V.
@@ -48,10 +51,10 @@ enum {
 	BAT_STATE_IDLE = 10,        /* il resto (anche ventola fra 1 e 1000 giri/min) */
 };
 
-#define BAT_LOW_THRESHOLD_DV    142
-#define BAT_LOW_EXIT_DV    144
-#define BAT_CRITICAL_THRESHOLD_DV  138
-#define BAT_CRITICAL_EXIT_DV  140
+#define BAT_LOW_THRESHOLD_DV    136        /* 3,4 V per cella sotto carico: protezione delle celle, il rientro normale lo decide la percentuale (task) */
+#define BAT_LOW_EXIT_DV    138
+#define BAT_CRITICAL_THRESHOLD_DV  132     /* 3,3 V per cella sotto carico, ancora lontano dalla protezione a 12,0 V */
+#define BAT_CRITICAL_EXIT_DV  134
 #define BAT_AVG_SAMPLES     50         /* 1 s di frame dei sensori: per le soglie */
 #define BAT_AVG_ESTIMATE        5000       /* 100 s: media della tensione per la percentuale */
 #define BAT_AVG_CHARGING       1500       /* 30 s: quanto è stato acceso il bit "in carica" */

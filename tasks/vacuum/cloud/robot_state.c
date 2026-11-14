@@ -26,7 +26,7 @@
 // nomi degli stati della navigazione, nello stesso ordine di nav_state_t
 static const char *const NAV_STATE_NAMES[] = {
     "wait", "explore", "clean", "follow_borders", "return_home", "hook_up", "follow_path", "unlock", "sleep", "align",
-    "failure", "border_lap", "leave_base", "cross", "pause", "remote",
+    "failure", "border_lap", "leave_base", "cross", "pause", "remote", "retrace",
 };
 
 // nomi dei tipi di obiettivo, nello stesso ordine di objective_type_t

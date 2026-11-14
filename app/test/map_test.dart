@@ -111,7 +111,7 @@ void main() {
   });
 
   group('scia', () {
-    Map<String, dynamic> message(int id, int offset, List<List<double>> points) =>
+    Map<String, dynamic> message(int id, int offset, List<List<double>?> points) =>
         {'trail_id': id, 'offset': offset, 'points': points};
 
     test('tutta all\'apertura, poi solo i punti nuovi', () {
@@ -128,6 +128,20 @@ void main() {
       expect(trail.points.last.dy, 0.5);
       trail.applyMessage(message(7, 3, []));
       expect(trail.points.length, 3);
+    });
+
+    test('scia interrotta dove il robot non aspirava', () {
+      final trail = Trail();
+      trail.applyMessage(message(9, 0, [
+        [0.0, 0.0],
+        [0.5, 0.0],
+        null,
+        [2.0, 1.0],
+      ]));
+      expect(trail.points.length, 4);
+      expect(isTrailBreak(trail.points[2]), isTrue);
+      expect(isTrailBreak(trail.points[3]), isFalse);
+      expect(trail.points[3].dx, 2.0);
     });
 
     test('missione nuova: la scia vecchia si butta', () {

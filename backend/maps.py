@@ -381,7 +381,9 @@ class LiveMap:
 
 
 class Trail:
-    """La scia dell'ultima missione, registrata dalle posizioni che arrivano con lo stato (docs/app.md, sezione 7.4)."""
+    """La scia dell'ultima missione, registrata dalle posizioni che arrivano con lo stato (docs/app.md, sezione 7.4).
+    Si registra solo mentre il robot aspira, così la scia è la zona pulita: quando l'aspirazione si spegne la scia si
+    interrompe, e il punto successivo comincia un tratto nuovo. L'interruzione è un None nella lista (null nel JSON)."""
 
     def __init__(self, data_dir):
         self.path = os.path.join(data_dir, config.TRAIL_FILE)
@@ -390,13 +392,14 @@ class Trail:
         self.points = []
         self.last_mission_number = None
         self.mission_active = False
+        self.is_broken = False                      # l'aspirazione si è spenta dopo l'ultimo punto: il prossimo comincia un tratto nuovo
         self.load()
 
     def load(self):
         try:
             with open(self.path, encoding="utf-8") as trail_file:
                 saved = json.load(trail_file)
-            self.points = [tuple(point) for point in saved["points"]]
+            self.points = [tuple(point) if point is not None else None for point in saved["points"]]
             self.last_mission_number = saved.get("mission_number")
         except (OSError, ValueError, KeyError, TypeError):
             pass
@@ -412,17 +415,24 @@ class Trail:
         position = state.get("position") or {}
         mission_number = navigation.get("mission_number")
         mission_active = navigation.get("mission", "none") != "none"
+        is_cleaning = (state.get("motors") or {}).get("suction_rpm", 0) > 0
         with self.lock:
             # il numero torna a 0 quando il programma del robot riparte: la scia vecchia resta finché non parte una missione
             if mission_number != self.last_mission_number:
                 if mission_number and self.last_mission_number is not None:
                     self.points = []
                     self.trail_id += 1
+                    self.is_broken = False
                 self.last_mission_number = mission_number
-            if mission_active and position.get("valid") and len(self.points) < config.TRAIL_MAX_POINTS:
+            if not is_cleaning:
+                self.is_broken = True
+            elif mission_active and position.get("valid") and len(self.points) < config.TRAIL_MAX_POINTS:
                 point = (round(position.get("x", 0.0), 3), round(position.get("y", 0.0), 3))
-                if not self.points or math.dist(point, self.points[-1]) >= config.TRAIL_MIN_STEP_M:
+                if self.is_broken and self.points and self.points[-1] is not None:
+                    self.points.append(None)
+                if not self.points or self.points[-1] is None or math.dist(point, self.points[-1]) >= config.TRAIL_MIN_STEP_M:
                     self.points.append(point)
+                self.is_broken = False
             if self.mission_active and not mission_active:
                 self.save()                         # fine missione: la scia va su file
             self.mission_active = mission_active

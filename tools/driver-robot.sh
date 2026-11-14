@@ -85,8 +85,10 @@ case "${1:-}" in
     }
     nav=$((16#$(simbolo nav_state)))
     ind() { printf %x $((nav + $(campo "$1"))); }
-    ind_stato=$(printf %x $((nav + $(campo_prima state mission))))
-    arg="$(simbolo navigation_map_data) $ind_stato $(ind mission) $(ind clean_cell_mask) $(ind strip_axis_x) $(simbolo pose_exchange) $(simbolo pose_buffers)"
+    # "mission" c'è anche in altre strutture: quello di nav_state è il più grande (state lo precede di 4 byte)
+    off_miss=$(LC_ALL=C "$B-readelf" --debug-dump=info "$EXE" | awk '/DW_AT_name/ { n = $NF; next } /DW_AT_data_member_location/ && n == "mission" { v = strtonum($NF); if (v > m) m = v } END { print m }')
+    ind_stato=$(printf %x $((nav + off_miss - 4)))
+    arg="$(simbolo navigation_map_data) $ind_stato $(printf %x $((nav + off_miss))) $(ind clean_cell_mask) $(ind strip_axis_x) $(simbolo pose_exchange) $(simbolo pose_buffers)"
     copia osserva-robot
     AMBIENTE="RTES_REGISTRA=$nome.reg ${*:3}" avvia vacuum "$nome"
     robot "cd $D; start-stop-daemon -S -b -m -p $D/osserva.pid -x $D/osserva-robot -- \$(pidof vacuum) $nome $arg; sleep 1; tail -n 2 $nome.oss"

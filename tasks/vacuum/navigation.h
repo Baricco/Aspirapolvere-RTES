@@ -63,6 +63,7 @@ typedef enum {
     NAV_STATE_CROSS,            // il robot incastrato su un tappeto o un cavo avanza piano ruotando a turno a sinistra e a destra
     NAV_STATE_PAUSE,            // pulizia in pausa (tasto di accensione): robot fermo, riprende alla prossima pressione
     NAV_STATE_REMOTE,           // modalità telecomando: il robot va alla velocità chiesta dall'app
+    NAV_STATE_RETRACE,          // il robot ripercorre la propria scia per rientrare nella zona collegata alla base
 } nav_state_t;
 
 // Costanti del telecomando: gli stessi valori di crociera dei task, ma definiti a parte

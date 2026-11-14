@@ -154,12 +154,13 @@ static void battery(void)
 	battery_init(&b);
 	CONTROLLA(riempi(&b, 160, 0, 50) == BAT_OK);
 	CONTROLLA(fabs(battery_volts(&b) - 16.0) < 1e-9);
-	CONTROLLA(riempi(&b, 141, 0, 50) == BAT_LOW);
-	CONTROLLA(riempi(&b, 143, 0, 50) == BAT_LOW);     /* isteresi: serve > 14,4 V */
-	CONTROLLA(riempi(&b, 145, 0, 50) == BAT_OK);
-	CONTROLLA(riempi(&b, 137, 0, 50) == BAT_CRITICAL);
-	CONTROLLA(riempi(&b, 139, 0, 50) == BAT_CRITICAL);   /* isteresi: serve > 14,0 V */
-	CONTROLLA(riempi(&b, 141, 0, 50) == BAT_LOW);
+	CONTROLLA(riempi(&b, 142, 0, 50) == BAT_OK);        /* 14,2 V: con le soglie nuove non è più bassa */
+	CONTROLLA(riempi(&b, 135, 0, 50) == BAT_LOW);
+	CONTROLLA(riempi(&b, 137, 0, 50) == BAT_LOW);     /* isteresi: serve > 13,8 V */
+	CONTROLLA(riempi(&b, 139, 0, 50) == BAT_OK);
+	CONTROLLA(riempi(&b, 131, 0, 50) == BAT_CRITICAL);
+	CONTROLLA(riempi(&b, 133, 0, 50) == BAT_CRITICAL);   /* isteresi: serve > 13,4 V */
+	CONTROLLA(riempi(&b, 135, 0, 50) == BAT_LOW);
 	CONTROLLA(riempi(&b, 137, 1, 50) == BAT_OK);        /* in carica: sempre OK */
 	/* un solo campione basso non basta (media di 1 s) */
 	battery_init(&b);

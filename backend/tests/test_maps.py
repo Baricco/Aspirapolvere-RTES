@@ -367,8 +367,9 @@ class TrailTest(BackendTestCase):
         super().setUp()
         self.user = self.login()
 
-    def post_position(self, x, y, mission="clean", mission_number=1, valid=True):
+    def post_position(self, x, y, mission="clean", mission_number=1, valid=True, suction=15500):
         state = dict(ROBOT_STATE)
+        state["motors"] = {"side_brush": 60 if suction else 0, "main_brush": 60 if suction else 0, "suction_rpm": suction}
         state["navigation"] = dict(ROBOT_STATE["navigation"], mission=mission, mission_number=mission_number)
         state["position"] = dict(ROBOT_STATE["position"], x=x, y=y, valid=valid)
         self.robot_post_state(state)
@@ -402,6 +403,19 @@ class TrailTest(BackendTestCase):
         self.assertNotEqual(second["trail_id"], first["trail_id"])
         # un'app rimasta indietro chiede dopo il punto 2 della scia vecchia: riceve quella nuova dall'inizio
         self.assertEqual(self.trail("?after=2")["offset"], 0)
+
+    def test_trail_only_while_vacuuming(self):
+        self.post_position(0.0, 0.0)
+        self.post_position(0.5, 0.0)
+        self.post_position(1.0, 0.0, suction=0)                         # si sposta senza aspirare: niente scia
+        self.post_position(2.0, 0.0, suction=0)
+        self.post_position(2.0, 1.0)                                    # riprende ad aspirare: tratto nuovo
+        self.post_position(2.5, 1.0)
+        self.assertEqual(self.trail()["points"], [[0.0, 0.0], [0.5, 0.0], None, [2.0, 1.0], [2.5, 1.0]])
+        self.assertEqual(self.trail("?after=2")["points"], [None, [2.0, 1.0], [2.5, 1.0]])
+        self.post_position(2.5, 1.0, mission="none", suction=0)
+        reloaded = maps.Trail(self.data_dir)
+        self.assertEqual(reloaded.message()["points"], [(0.0, 0.0), (0.5, 0.0), None, (2.0, 1.0), (2.5, 1.0)])
 
     def test_trail_is_saved_at_the_end_of_the_mission(self):
         self.post_position(0.0, 0.0)
