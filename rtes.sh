@@ -9,6 +9,7 @@ set -eu
 DIR="$(cd "$(dirname "$0")" && pwd)"
 SSH_ROBOT="$DIR/../ssh-robot.sh"
 DIR_ROBOT=/tmp/rtes     # cartella sul robot, in RAM: sparisce al riavvio
+DIR_INSTALL=/mnt/UDISK/rt   # installazione persistente: eseguibili in bin/, mappe in maps/, token del server
 
 uso() {
   cat <<EOF
@@ -27,7 +28,7 @@ Uso: ./rtes.sh <comando> [argomenti]
   valida-sim [c2 c2b c3 c1] confronta il simulatore con le registrazioni del robot (build/robot/fase2)
   taratura                  ricalcola sim/parametri.txt dalle registrazioni (tools/taratura/tara.py)
   prova-pagina              prova automatica della pagina del simulatore (serve Brave o Chromium)
-  install / uninstall       installa o rimuove la versione persistente con avvio sicuro
+  install                   installa sul robot la versione persistente (eseguibili, install/, avvio automatico)
   ssh [comando]             apre una shell sul robot (o esegue un comando)
 EOF
 }
@@ -100,8 +101,38 @@ case "${1:-}" in
   valida-sim) shift; make --no-print-directory build/host/sim; exec python3 tools/valida-sim.py "$@" ;;
   taratura)  python3 tools/taratura/tara.py > sim/parametri.txt && echo "scritto sim/parametri.txt" ;;
   prova-pagina) shift; make --no-print-directory build/host/sim; exec node tools/prova-pagina.mjs "$@" ;;
-  install)   da_fare install "fase 5" ;;
-  uninstall) da_fare uninstall "fase 5" ;;
+  install)
+    # 1) compila; 2) eseguibili in $DIR_INSTALL/bin e i file di install/ negli stessi percorsi del robot, solo quelli
+    # cambiati, ognuno copiato con un nome temporaneo e poi rinominato (un programma o uno script in esecuzione non si
+    # rovina); 3) il nostro avvio (/etc/init.d/rtes) al posto dello stack di fabbrica (robotManager).
+    # Se il nostro avvio gira già, lo riavvia (il robot si ferma, se stava pulendo); se gira ancora lo stack di
+    # fabbrica, il cambio avviene al prossimo riavvio del robot (./rtes.sh ssh reboot).
+    grep -q '"https://<server>"' tasks/vacuum/cloud/config.h &&
+      echo "ATTENZIONE: in tasks/vacuum/cloud/config.h SERVER_URL è ancora l'esempio: il robot non troverà il server" >&2
+    make --no-print-directory build/arm/vacuum build/arm/spia
+    tmp=$(mktemp -d)
+    trap 'rm -rf "$tmp"' EXIT
+    mkdir -p "$tmp/files${DIR_INSTALL}/bin"
+    cp -a install/. "$tmp/files/"
+    cp build/arm/vacuum build/arm/spia "$tmp/files${DIR_INSTALL}/bin/"
+    tar -C "$tmp/files" -cf - . | robot "rm -rf /tmp/rtes-install && mkdir -p /tmp/rtes-install && tar -C /tmp/rtes-install -xf - && cd /tmp/rtes-install &&
+      find . -type f | while read -r f; do
+        dest=\${f#.}
+        cmp -s \"\$f\" \"\$dest\" && continue
+        mkdir -p \"\$(dirname \"\$dest\")\"
+        cp -p \"\$f\" \"\$dest.rtes-tmp\" && mv \"\$dest.rtes-tmp\" \"\$dest\" && echo \"  \$dest\"
+      done
+      cd / && rm -rf /tmp/rtes-install
+      sed -i 's/^auto_upgrade_status=.*/auto_upgrade_status=0/' /mnt/UDISK/config/device_config.ini
+      /etc/init.d/robotManager disable
+      /etc/init.d/rtes enable
+      if pidof AuxCtrl RobotApp >/dev/null; then
+        echo '== installato. Gira ancora lo stack di fabbrica: il nostro avvio parte dal prossimo riavvio (./rtes.sh ssh reboot)'
+      else
+        /etc/init.d/rtes restart; sleep 3
+        echo \"== installato e riavviato: vacuum=\$(pidof vacuum) custode=\$(pidof spia)\"
+      fi" ;;
+  uninstall) echo "Non previsto: dal 2026-11-13 non si torna allo stack di fabbrica (docs/PIANO.md, fase 6). Per fermare il programma: ./rtes.sh ssh /etc/init.d/rtes stop" >&2; exit 2 ;;
   ssh)       shift; exec "$SSH_ROBOT" "$@" ;;
   ""|-h|--help|help) uso ;;
   *) echo "Comando sconosciuto: $1" >&2; uso; exit 1 ;;

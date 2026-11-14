@@ -18,3 +18,7 @@ keepalive = 75
 
 accesslog = None
 errorlog = "-"
+
+# niente socket di controllo (gunicorn >= 25.1): il percorso di default è uguale per tutte le istanze dello stesso
+# utente, e sul server ci sono altri servizi con gunicorn. Non usiamo gunicornc
+control_socket_disable = True

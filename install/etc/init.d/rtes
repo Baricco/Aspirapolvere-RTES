@@ -1,0 +1,19 @@
+#!/bin/sh /etc/rc.common
+# Il programma del robot (tasks/vacuum) all'accensione, al posto dello stack di fabbrica (robotManager, disabilitato
+# da ./rtes.sh install). Il ciclo che lo rilancia e il custode sono in /usr/sbin/rtes-run.
+# L'uscita del programma va nel registro di sistema: logread -e rtes (in RAM, sparisce al riavvio).
+# Il GD32 riavvia il robot se per ~190 s nessuno manda il keepalive: rtes parte ~10 s dopo l'accensione.
+
+START=95
+STOP=10               # allo spegnimento si ferma per primo: motori fermi prima che sparisca il resto
+USE_PROCD=1
+
+start_service() {
+    # niente respawn: i rilanci li decide rtes-run, che non esce mai da solo
+    procd_open_instance
+    procd_set_param command /usr/sbin/rtes-run
+    procd_set_param oom_adj -17
+    procd_set_param stdout 1
+    procd_set_param stderr 1
+    procd_close_instance
+}

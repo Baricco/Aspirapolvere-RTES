@@ -1,0 +1,77 @@
+#!/bin/sh
+# Lancia il programma del robot (vacuum) e lo rilancia quando esce. Lo avvia /etc/init.d/rtes (procd).
+#   - codice RESTART_CODE: il programma chiede di ripartire (cambio di mappa dall'app, docs/app.md 7.5): subito;
+#   - qualsiasi altra uscita: di nuovo dopo RETRY_DELAY_S, ma se le uscite sono MAX_FAILS in FAIL_WINDOW_S non lo
+#     rilancia più e avvia il CUSTODE (spia guida: keepalive e heartbeat, motori a zero, LED di guasto), così un
+#     difetto che fa chiudere il programma non diventa un ciclo infinito di avvii con i motori. Il custode resta
+#     finché non si riavvia il robot o non si interviene via SSH (/etc/init.d/rtes restart).
+# SIGTERM (/etc/init.d/rtes stop, spegnimento) passa al programma o al custode, che fermano i motori ed escono.
+
+BIN_DIR=/mnt/UDISK/rt/bin
+WORK_DIR=/mnt/UDISK/rt
+VOLUME=50                     # 'speaker volume control' (0-63): quello che impostava AuxCtrl di fabbrica
+RESTART_CODE=3
+RETRY_DELAY_S=5
+MAX_FAILS=3
+FAIL_WINDOW_S=600
+GUARD_RETRY_S=5               # se il custode si chiude (non dovrebbe), riparte dopo questa attesa
+PREVIOUS_WAIT_S=15            # con /etc/init.d/rtes restart procd avvia questo script mentre il programma di prima si
+                              # sta ancora chiudendo: si aspetta che lasci libere le seriali
+FAULT_LED=0x8d:08             # comando del LED al GD32: 8 = rosso, lampeggio veloce (come il guasto del driver)
+
+child=
+
+stop() {
+    if [ -n "$child" ]; then
+        kill -TERM "$child" 2>/dev/null
+        wait "$child"
+    fi
+    exit 0
+}
+trap stop TERM INT
+
+amixer -q cset name='speaker volume control' "$VOLUME"
+
+i=0
+while pidof vacuum spia >/dev/null && [ "$i" -lt "$PREVIOUS_WAIT_S" ]; do
+    sleep 1
+    i=$((i + 1))
+done
+
+cd "$WORK_DIR" || exit 1
+fails=""                      # istanti (uptime, in s) delle uscite dentro la finestra
+n=0
+while :; do
+    "$BIN_DIR/vacuum" &
+    child=$!
+    wait "$child"
+    code=$?
+    child=
+    if [ "$code" = "$RESTART_CODE" ]; then
+        echo "rtes-run: il programma chiede di ripartire"
+        continue
+    fi
+    now=$(cut -d. -f1 /proc/uptime)
+    recent=""
+    n=0
+    for t in $fails $now; do
+        if [ $((now - t)) -lt "$FAIL_WINDOW_S" ]; then
+            recent="$recent $t"
+            n=$((n + 1))
+        fi
+    done
+    fails=$recent
+    echo "rtes-run: vacuum uscito con codice $code ($n uscite in $FAIL_WINDOW_S s)"
+    [ "$n" -ge "$MAX_FAILS" ] && break
+    sleep "$RETRY_DELAY_S"
+done
+
+echo "rtes-run: troppe uscite, non lo rilancio più: parte il custode (motori fermi, LED di guasto)"
+while :; do
+    "$BIN_DIR/spia" guida --una "$FAULT_LED" >/dev/null 2>&1 &
+    child=$!
+    wait "$child"
+    child=
+    echo "rtes-run: il custode si è chiuso, lo riavvio"
+    sleep "$GUARD_RETRY_S"
+done
