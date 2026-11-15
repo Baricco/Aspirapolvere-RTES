@@ -203,6 +203,14 @@ def fault_reset():
     return command_response("fault_reset")
 
 
+@robot_blueprint.post("/base/reposition")
+@require_session
+def reposition_base():
+    """Riposiziona base (docs/app.md, sezione 7.9): il robot risponde subito se accetta, l'esito arriva nello stato
+    (map.reposition). Se riesce il robot si riavvia, e la mappa spostata diventa una mappa nuova, selezionata (7.2)."""
+    return command_response("reposition_base")
+
+
 # ---------------------------------------------------------------------------------------------- telecomando
 
 @robot_blueprint.post("/remote/take")

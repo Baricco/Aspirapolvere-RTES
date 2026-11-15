@@ -14,6 +14,7 @@ typedef struct {
     uint16_t cells[CLOSED_CELLS_MAX];               // lista circolare con gli indici delle celle chiuse
     uint32_t mission_num;                           // numero della pulizia: quando cambia, la mappatura azzera quello che in una pulizia non si aggiorna più
     uint32_t stop_search_num;                       // cresce quando un tasto viene premuto con la posizione persa: la mappatura annulla la ricerca e aspetta che il robot sia sulla base
+    uint32_t reposition_num;                        // cresce a ogni Riposiziona base accettato: la mappatura cerca la posizione del robot sulla base nella mappa
 } navigation_closed_cells_t;
 
 
@@ -86,6 +87,7 @@ typedef enum {
     NAV_COMMAND_REMOTE_CLEANING,    // telecomando: spazzole e aspirazione
     NAV_COMMAND_REMOTE_KEEPALIVE,   // telecomando: segno di vita dell'app
     NAV_COMMAND_REMOTE_RELEASE,     // telecomando: lo rilascia
+    NAV_COMMAND_REPOSITION_BASE,    // Riposiziona base: con il robot a riposo sulla base, la mappa si sposta sulla posizione della base
 } nav_command_type_t;
 
 // Esito di un comando, pubblicato dalla navigazione in navigation_status_t
@@ -97,6 +99,8 @@ typedef enum {
     NAV_RESULT_ALREADY_HOME,        // home: il robot è già a riposo sulla base
     NAV_RESULT_POSITION_LOST,       // la posizione è persa: solo home fa qualcosa
     NAV_RESULT_IN_FAULT,            // il driver è ancora in guasto
+    NAV_RESULT_NOT_RESTING,         // Riposiziona base: il robot non è a riposo sulla base
+    NAV_RESULT_NO_MAP,              // Riposiziona base: il programma non è partito dalla base, quindi non c'è una mappa caricata
 } nav_command_result_t;
 
 // Un comando per la navigazione

@@ -94,6 +94,9 @@
 #define CONFIRM_DISTANCE            1.0         // strada da percorrere con la posizione che regge, prima di confermarla, espressa in m
 #define CONFIRM_MAX_BAD_SCANS       5           // scansioni di fila sotto SEARCH_MIN_SCORE_PCT che fanno scartare la posizione trovata
 #define CONFIRM_MAX_OMEGA           0.5         // durante la conferma le scansioni fatte ruotando più veloce di così non si controllano (sono deformate), espressa in rad/s
+#define REPOSITION_MIN_SCORE_PCT    75          // Riposiziona base: punteggio minimo della ricerca, in percentuale del massimo. Più alto di SEARCH_MIN_SCORE_PCT (nel simulatore la posizione giusta fa 78-88%): meglio dire "non trovata" che spostare la mappa nel posto sbagliato
+#define REPOSITION_MAX_ANGLE_ERROR  (20 * M_PI / 180)   // Riposiziona base: scarto massimo dell'angolo trovato da un multiplo di 90 gradi (la base sta contro un muro); il resto lo corregge l'allineamento all'avvio, espresso in radianti
+#define REPOSITION_TIMEOUT          RT_S(30)    // Riposiziona base: tempo massimo per avere una scansione buona dopo il comando
 
 // Ogni cella della griglia della ricerca è un uint16_t con 3 numeri da 3 bit: il primo livello a cui il blocco che parte dalla cella
 // contiene la vicina di un ostacolo, un ostacolo, una cella libera. Salendo di livello il blocco contiene quello del livello prima,
@@ -169,6 +172,7 @@ typedef struct {
     uint32_t request_num;   // numero della richiesta a cui risponde
     search_outcome_t outcome;
     double x, y, theta;     // posizione trovata, sulla mappa (solo con SEARCH_FOUND)
+    int score_pct;          // punteggio della posizione trovata, in percentuale del massimo (solo con SEARCH_FOUND)
 } search_result_t;
 
 // Struttura che contiene un possibile blocco di posizioni del centro del robot ancora da guardare
@@ -261,7 +265,9 @@ typedef struct {
         bool is_stopped_by_user;                    // l'annullamento viene da un tasto (si aspetta la base) e non da un sollevamento
         uint32_t last_stop_num;                     // ultimo stop_search_num della navigazione già visto
         uint8_t attempts;                           // numero di ricerche o conferme fallite dall'ultimo sollevamento
-        int64_t put_down_t;                         // istante del riappoggio, valgono solo le scansioni del lidar iniziate dopo
+        int64_t put_down_t;                         // istante del riappoggio, valgono solo le scansioni del lidar iniziate dopo (con Riposiziona base: istante del comando)
+        uint32_t last_reposition_num;               // ultimo reposition_num della navigazione già visto
+        bool is_repositioning;                      // Riposiziona base in corso: la mappatura non scrive, cerca la posizione del robot sulla base
         bool grid_ready;                            // indica se la griglia corrisponde alla mappa
         int x0, y0;                                 // cella fine corrispondente alla cella (0, 0) della griglia della ricerca
         int width, height;                          // dimensioni della zona della ricerca, in celle fini
@@ -1774,11 +1780,88 @@ void run_position_search(uint32_t request_num) {
         result.y = (map_state.search.y0 + map_state.search.best_y - FINE_MAP_ORIGIN + 0.5) * FINE_MAP_CELL_SIZE;
         result.theta = wrap_angle(map_state.search.best_angle * 2 * M_PI / SEARCH_NUM_ANGLES);
         refine_search_result(&result.x, &result.y, &result.theta);
+        result.score_pct = map_state.search.num_points > 0 ? map_state.search.best_score * 100 / (2 * map_state.search.num_points) : 0;
         result.outcome = SEARCH_FOUND;
     }
 
     // la mappa torna alla mappatura
     exchange_write(&double_buffer_search, &result);
+}
+
+// Riposiziona base (docs/app.md, sezione 7.9): con il robot fermo sulla base, cerca la sua posizione nella mappa con la
+// stessa ricerca del sollevamento, poi chiede al task aperiodico di spostare il file della mappa in modo che quella posizione
+// diventi l'origine. Finché è in corso la mappatura non scrive niente (durante la ricerca la mappa è prestata)
+static void reposition_base(const movement_position_data_t *cur_pos, bool is_same_scan) {
+
+    (void)cur_pos;
+
+    switch (map_state.search.phase) {
+
+        case SEARCH_WAIT_SCAN: {
+
+            // mappa vuota o nessuna scansione buona in tempo: non c'è niente da fare
+            if (!map_state.aligned_valid || rt_now() - map_state.search.put_down_t > REPOSITION_TIMEOUT) {
+                map_state.search.is_repositioning = false;
+                set_reposition_status(REPOSITION_FAILED);
+                return;
+            }
+
+            // serve una scansione iniziata dopo il comando (sulla base il lidar era spento)
+            if (is_same_scan || map_state.last_scan.t_start_ns <= map_state.search.put_down_t) return;
+
+            pose_at_time(map_state.last_scan.t_end_ns, &map_state.search.ref_x, &map_state.search.ref_y, &map_state.search.ref_theta);
+            prepare_search_points(prepare_lidar_points(map_state.search.ref_x, map_state.search.ref_y, map_state.search.ref_theta));
+            if (map_state.search.num_points < SEARCH_MIN_POINTS) return;
+
+            map_state.search.is_cancel_requested = false;
+            map_state.search.is_stopped_by_user = false;
+            map_state.search.request_num = request_position_search();
+            map_state.search.phase = SEARCH_WAIT_RESULT;
+            return;
+        }
+        case SEARCH_WAIT_RESULT: {
+
+            search_result_t result = {0};
+            exchange_read(&double_buffer_search, &result);
+            if (result.request_num != map_state.search.request_num) return;
+
+            // da qui la mappa è di nuovo della mappatura
+            map_state.search.is_repositioning = false;
+            map_state.search.phase = SEARCH_WAIT_SCAN;
+
+            if (result.outcome != SEARCH_FOUND || result.score_pct < REPOSITION_MIN_SCORE_PCT) {
+                if (result.outcome == SEARCH_FOUND)
+                    fprintf(stderr, "mappatura: riposizionamento della base: posizione migliore (%.3f, %.3f) a %.1f gradi, punteggio %d%%: troppo basso\n",
+                            result.x, result.y, result.theta * 180 / M_PI, result.score_pct);
+                else fprintf(stderr, "mappatura: riposizionamento della base: posizione non trovata\n");
+                set_reposition_status(REPOSITION_NOT_FOUND);
+                return;
+            }
+
+            // la base sta contro un muro: l'angolo trovato è vicino a un multiplo di 90 gradi, e la mappa ruota di quello
+            long quarters = lround(result.theta / (M_PI / 2));
+            double angle_error = wrap_angle(result.theta - quarters * (M_PI / 2));
+            if (fabs(angle_error) > REPOSITION_MAX_ANGLE_ERROR) {
+                fprintf(stderr, "mappatura: riposizionamento della base: angolo %.1f gradi, troppo lontano da un multiplo di 90\n", result.theta * 180 / M_PI);
+                set_reposition_status(REPOSITION_ROTATED);
+                return;
+            }
+
+            // la posizione trovata diventa l'origine: prima lo spostamento in celle intere, poi la rotazione che riporta
+            // l'angolo del robot vicino a 0
+            int dx = -(int)lround(result.x / FINE_MAP_CELL_SIZE);
+            int dy = -(int)lround(result.y / FINE_MAP_CELL_SIZE);
+            int quarter_turns = (int)(((-quarters) % 4 + 4) % 4);
+            fprintf(stderr, "mappatura: riposizionamento della base: robot in (%.3f, %.3f) a %.1f gradi, punteggio %d%%\n",
+                    result.x, result.y, result.theta * 180 / M_PI, result.score_pct);
+            request_map_reposition(dx, dy, quarter_turns);
+            return;
+        }
+        default:
+            map_state.search.is_repositioning = false;
+            set_reposition_status(REPOSITION_FAILED);
+            return;
+    }
 }
 
 // funzione che cerca la posizione del robot dopo il riappoggio (stato MAP_LOST): prepara i punti, chiede la ricerca al
@@ -2350,6 +2433,11 @@ static void job_mapping_body(void *arg) {
     // se il robot è sollevato la sua posizione è persa: pubblicalo una volta sola ed esci,
     // da sollevato non si scrive niente sulla mappa
     if (cur_drv_state.lifted) {
+        // un Riposiziona base in corso non vale più: il robot non è più sulla base
+        if (map_state.search.is_repositioning) {
+            map_state.search.is_repositioning = false;
+            set_reposition_status(REPOSITION_FAILED);
+        }
         if (map_state.state != MAP_LOST) {
             map_state.state = MAP_LOST;
             map_state.search.attempts = 0;
@@ -2396,6 +2484,25 @@ static void job_mapping_body(void *arg) {
 
     // Leggi lo storico delle pose dell'odometria: serve a sapere dov'era il robot quando è stato misurato ogni punto
     read_odom_history(&map_state.odom_history);
+
+    // Riposiziona base: un comando nuovo della navigazione fa partire la ricerca; finché è in corso la mappa non si scrive
+    {
+        navigation_closed_cells_t closed_cells = read_closed_cells();
+        if (closed_cells.reposition_num != map_state.search.last_reposition_num) {
+            map_state.search.last_reposition_num = closed_cells.reposition_num;
+            if (map_state.state == MAP_NORMAL && map_state.search.phase != SEARCH_WAIT_RESULT) {
+                map_state.search.is_repositioning = true;
+                map_state.search.phase = SEARCH_WAIT_SCAN;
+                map_state.search.put_down_t = rt_now();
+            } else {
+                set_reposition_status(REPOSITION_FAILED);
+            }
+        }
+        if (map_state.search.is_repositioning) {
+            reposition_base(&cur_pos, is_same_scan);
+            return;
+        }
+    }
 
     // posizione trovata dalla ricerca ma non ancora confermata: allinea e controlla, senza scrivere sulla mappa
     if (map_state.state == MAP_UNCONFIRMED) {

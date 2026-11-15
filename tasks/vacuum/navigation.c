@@ -278,6 +278,8 @@ typedef struct {
     double progress_x, progress_y;          // posizione da cui si misura se il robot avanza
     int64_t progress_start;                 // istante in cui il robot era in progress_x, progress_y
 
+    bool is_repositioning;                  // Riposiziona base in corso: il driver è sveglio (lidar acceso) finché la mappatura e il task aperiodico non hanno finito
+
 } navigation_state_t;
 
 // stato interno della navigazione
@@ -2669,8 +2671,8 @@ static nav_command_result_t apply_command(const navigation_command_t *command, c
     switch (command->type) {
 
         case NAV_COMMAND_START:
-            // nuova pulizia, solo da riposo
-            if (nav_state.state != NAV_STATE_SLEEP) return NAV_RESULT_BUSY;
+            // nuova pulizia, solo da riposo e non durante Riposiziona base
+            if (nav_state.state != NAV_STATE_SLEEP || nav_state.is_repositioning) return NAV_RESULT_BUSY;
             start_new_mission();
             return NAV_RESULT_OK;
 
@@ -2679,6 +2681,21 @@ static nav_command_result_t apply_command(const navigation_command_t *command, c
             // già in pausa: va bene solo se ci è arrivato adesso, rilasciando il telecomando
             if (nav_state.state == NAV_STATE_PAUSE) return was_remote ? NAV_RESULT_OK : NAV_RESULT_NOT_RUNNING;
             start_pause();
+            return NAV_RESULT_OK;
+
+        case NAV_COMMAND_REPOSITION_BASE:
+            // solo a riposo sulla base, con la mappa caricata (il programma è partito dalla base), uno alla volta
+            if (nav_state.state != NAV_STATE_SLEEP || !cur_drv_state->on_base) return NAV_RESULT_NOT_RESTING;
+            if (!read_started_on_base()) return NAV_RESULT_NO_MAP;
+            if (nav_state.is_repositioning) return NAV_RESULT_BUSY;
+
+            // il driver si sveglia (lidar acceso) come per uscire dalla base, ma il robot resta fermo: in riposo
+            // l'obiettivo è sempre lo stop. La mappatura cerca la posizione, il task aperiodico sposta il file
+            set_reposition_status(REPOSITION_RUNNING);
+            nav_state.is_repositioning = true;
+            drv_leave_base(1);
+            nav_state.closed_cells.reposition_num++;
+            exchange_write(&double_buffer_2, &nav_state.closed_cells);
             return NAV_RESULT_OK;
 
         case NAV_COMMAND_RESUME:
@@ -3499,6 +3516,13 @@ static void job_navigation_body(void *arg) {
 
             // se l'obiettivo non è di stare fermo, manda l'obiettivo di fermarsi
             if (nav_state.cur_obj.obj_type != OBJ_STOP) send_objective(OBJ_STOP, 0, 0, 0, 0, 0);
+
+            // Riposiziona base finito (riuscito o no): il driver può tornare a riposo. Se è riuscito il programma si
+            // riavvia comunque con la mappa nuova
+            if (nav_state.is_repositioning && read_reposition_status() != REPOSITION_RUNNING) {
+                drv_leave_base(0);
+                nav_state.is_repositioning = false;
+            }
 
             // leggi lo stato attuale del driver
             drv_status_t cur_state = {0};

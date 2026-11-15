@@ -71,6 +71,11 @@ void main() {
       expect(offBase.userZones.length, 2);
     });
 
+    test('Riposiziona base: stato nella mappa, idle se manca', () {
+      expect(state.mapReposition, 'idle');
+      expect(stateWith((json) => (json['map'] as Map)['reposition'] = 'running').mapReposition, 'running');
+    });
+
     test('il pulsante principale segue lo stato', () {
       MainAction action(String navigationState, String mission) =>
           stateWith((json) => json['navigation'] = {'state': navigationState, 'mission': mission}).mainAction;

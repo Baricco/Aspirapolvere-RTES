@@ -19,6 +19,7 @@ const Map<String, String> commandNames = {
   'resume': 'Riprendi',
   'home': 'Casa',
   'fault_reset': 'Azzera guasto',
+  'reposition_base': 'Riposiziona base',
   'remote_take': 'Telecomando: preso',
   'remote_move': 'Telecomando: movimento',
   'remote_cleaning': 'Telecomando: spazzole e aspirazione',

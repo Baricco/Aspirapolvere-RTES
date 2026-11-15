@@ -278,8 +278,13 @@ int main(void) {
 	// dopo aver avviato i task nei loro thread
 	// il main aspetta solo il segnale per terminare
 	// oppure la richiesta di riavvio, dopo un cambio di mappa dall'app
+	// Riposiziona base riuscito: il riavvio lo chiede il thread dello stato appena il server ha l'esito; se la rete non c'è
+	// (o il server non risponde) lo chiede il main dopo REPOSITION_RESTART_DELAY, il file della mappa è già spostato
+	int reposition_done_s = 0;
 	while (!fine && !is_restart_requested()) {
               sleep(SLEEP_TIME);
+              if (read_reposition_status() != REPOSITION_DONE) reposition_done_s = 0;
+              else if (++reposition_done_s * RT_S(SLEEP_TIME) > REPOSITION_RESTART_DELAY) request_restart();
        }
 
        // Spegni il Watchdog dei task

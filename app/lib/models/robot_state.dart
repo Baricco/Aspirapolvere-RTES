@@ -82,6 +82,9 @@ class RobotState {
   bool get startedOnBase => _map['started_on_base'] == true;
   String? get mapFileCrc => _map['file_crc'] as String?;
 
+  /// Riposiziona base (docs/app.md, sezione 7.9): idle, running, done, not_found, rotated o failed.
+  String get mapReposition => _map['reposition'] as String? ?? 'idle';
+
   /// Con la posizione persa solo Casa fa qualcosa.
   bool get positionLost => mapState == 'lost' || mapState == 'not_found';
 

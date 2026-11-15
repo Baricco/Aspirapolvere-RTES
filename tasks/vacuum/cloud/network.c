@@ -348,6 +348,9 @@ static void *state_loop(void *arg) {
             if (code == HTTP_OK) {
                 mark_robot_state_sent();
                 check_state_response(&response);
+
+                // Riposiziona base riuscito e già detto all'app: il programma si riavvia con la mappa spostata
+                if (is_reposition_done_sent()) request_restart();
             }
             free_bytes(&response);
             is_network_ok = code != HTTP_FAILED;

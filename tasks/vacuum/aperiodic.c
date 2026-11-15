@@ -1,4 +1,5 @@
 #include <errno.h>
+#include <math.h>
 #include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -28,6 +29,7 @@ typedef struct {
     uint32_t last_search_num;                       // numero dell'ultima richiesta di ricerca della posizione eseguita
     uint32_t last_zones_num;                        // numero dell'ultima richiesta di zone proibite eseguita
     uint32_t last_file_num;                         // numero dell'ultima richiesta sul file della mappa (sostituzione o cancellazione) eseguita
+    uint32_t last_reposition_num;                   // numero dell'ultima richiesta di Riposiziona base eseguita
     bool is_saving_disabled;                        // true dopo una sostituzione o una cancellazione del file: da lì non si salva più, il programma sta per riavviarsi
     uint8_t categories[MAP_CATEGORIES_BYTES];       // copia della griglia fine a categorie, 2 bit per cella
 } aperiodic_state_t;
@@ -69,6 +71,20 @@ static exchange_t file_request_buffer;
 static aperiodic_file_request_t file_buffer1, file_buffer2;
 static uint32_t file_request_num;
 
+// richiesta di spostamento del file della mappa (Riposiziona base): la scrive solo la mappatura
+typedef struct {
+    uint32_t num;           // numero progressivo della richiesta, 0 = nessuna richiesta
+    int dx, dy;             // spostamento in celle fini, fatto per primo
+    int quarter_turns;      // poi la rotazione attorno all'origine, in quarti di giro antiorari (0-3)
+} aperiodic_reposition_request_t;
+
+static exchange_t reposition_request_buffer;
+static aperiodic_reposition_request_t reposition_buffer1, reposition_buffer2;
+static uint32_t reposition_request_num;
+
+// stato di Riposiziona base (reposition_status_t)
+static _Atomic int reposition_status;
+
 // esito dell'ultima richiesta sul file eseguita: prima l'esito, poi il numero (chi aspetta guarda il numero)
 static _Atomic bool file_request_ok;
 static _Atomic uint32_t file_request_done_num;
@@ -85,6 +101,7 @@ rt_aperiodic_t aperiodic_task;
 void init_aperiodic(void) {
     exchange_init(&save_request_buffer, &save_buffer1, &save_buffer2, sizeof(aperiodic_save_request_t));
     exchange_init(&search_request_buffer, &search_buffer1, &search_buffer2, sizeof(aperiodic_search_request_t));
+    exchange_init(&reposition_request_buffer, &reposition_buffer1, &reposition_buffer2, sizeof(aperiodic_reposition_request_t));
     exchange_init(&zones_request_buffer, &zones_buffer1, &zones_buffer2, sizeof(aperiodic_zones_request_t));
     exchange_init(&file_request_buffer, &file_buffer1, &file_buffer2, sizeof(aperiodic_file_request_t));
     atomic_store(&save_failed, false);
@@ -103,6 +120,21 @@ uint32_t request_position_search(void) {
     // scrivi la richiesta con un numero nuovo, poi sveglia il task
     aperiodic_search_request_t request = { .num = ++search_request_num };
     exchange_write(&search_request_buffer, &request);
+    rt_aperiodic_wake(&aperiodic_task);
+    return request.num;
+}
+
+void set_reposition_status(reposition_status_t status) {
+    atomic_store(&reposition_status, (int)status);
+}
+
+reposition_status_t read_reposition_status(void) {
+    return (reposition_status_t)atomic_load(&reposition_status);
+}
+
+uint32_t request_map_reposition(int dx, int dy, int quarter_turns) {
+    aperiodic_reposition_request_t request = { .num = ++reposition_request_num, .dx = dx, .dy = dy, .quarter_turns = quarter_turns };
+    exchange_write(&reposition_request_buffer, &request);
     rt_aperiodic_wake(&aperiodic_task);
     return request.num;
 }
@@ -356,6 +388,129 @@ static void apply_map_file_request(const aperiodic_file_request_t *request) {
     atomic_store(&file_request_done_num, request->num);
 }
 
+// funzione helper che porta una cella fine (x, y) dove la manda Riposiziona base: spostamento di (dx, dy), poi rotazione
+// di quarter_turns quarti di giro antiorari attorno all'origine (lo spigolo fra le celle FINE_MAP_ORIGIN - 1 e FINE_MAP_ORIGIN).
+// Attorno a uno spigolo le celle ruotate cadono esattamente su altre celle. Ritorna false se la cella esce dalla griglia
+static bool reposition_cell(int x, int y, int dx, int dy, int quarter_turns, int *new_x, int *new_y) {
+
+    int a = x - FINE_MAP_ORIGIN + dx, b = y - FINE_MAP_ORIGIN + dy;
+    int ra = a, rb = b;
+
+    // la cella (a, b) occupa [a, a + 1] x [b, b + 1]: ruotando lo spigolo in basso a sinistra cambia
+    if (quarter_turns == 1) { ra = -b - 1; rb = a; }
+    else if (quarter_turns == 2) { ra = -a - 1; rb = -b - 1; }
+    else if (quarter_turns == 3) { ra = b; rb = -a - 1; }
+
+    *new_x = ra + FINE_MAP_ORIGIN;
+    *new_y = rb + FINE_MAP_ORIGIN;
+    return *new_x >= 0 && *new_y >= 0 && *new_x < FINE_MAP_CELL_NUMBER && *new_y < FINE_MAP_CELL_NUMBER;
+}
+
+// funzione helper che porta uno spigolo (u, v), in celle rispetto all'origine, dove lo manda Riposiziona base
+static void reposition_corner(double u, double v, int dx, int dy, int quarter_turns, double *new_u, double *new_v) {
+    u += dx;
+    v += dy;
+    if (quarter_turns == 1) { *new_u = -v; *new_v = u; }
+    else if (quarter_turns == 2) { *new_u = -u; *new_v = -v; }
+    else if (quarter_turns == 3) { *new_u = v; *new_v = -u; }
+    else { *new_u = u; *new_v = v; }
+}
+
+// funzione helper che legge un uint16 little endian da un file, aggiornando il CRC. Ritorna false a fine file
+static bool read_file_u16(FILE *f, uint32_t *crc, uint16_t *value) {
+    uint8_t bytes[2];
+    if (fread(bytes, 1, 2, f) != 2) return false;
+    *crc = map_crc32(*crc, bytes, 2);
+    *value = (uint16_t)(bytes[0] | bytes[1] << 8);
+    return true;
+}
+
+// Riposiziona base: rilegge map.rtm, sposta e ruota celle e zone nella griglia a categorie del task aperiodico (la
+// stessa del salvataggio: nessuna memoria nuova) e riscrive il file come il salvataggio, con un file temporaneo
+// rinominato alla fine. Riuscito, non si salva più (il programma si riavvia con il file nuovo). Ritorna true se ci riesce
+static bool reposition_map_file(const aperiodic_reposition_request_t *request) {
+
+    char path[256], tmp_path[256];
+    if (map_file_path(path, sizeof path, "") != 0 || map_file_path(tmp_path, sizeof tmp_path, MAP_TMP_EXT) != 0) return false;
+
+    FILE *f = fopen(path, "rb");
+    if (!f) return false;
+
+    // intestazione: numero magico, rettangolo, zone
+    uint32_t crc = 0;
+    char magic[MAP_FILE_MAGIC_LEN];
+    uint16_t x0, y0, width, height;
+    uint8_t num_zones;
+    bool ok = fread(magic, 1, MAP_FILE_MAGIC_LEN, f) == MAP_FILE_MAGIC_LEN && memcmp(magic, MAP_FILE_MAGIC, MAP_FILE_MAGIC_LEN) == 0;
+    if (ok) crc = map_crc32(crc, (const uint8_t *)magic, MAP_FILE_MAGIC_LEN);
+    ok = ok && read_file_u16(f, &crc, &x0) && read_file_u16(f, &crc, &y0) && read_file_u16(f, &crc, &width) && read_file_u16(f, &crc, &height);
+    ok = ok && fread(&num_zones, 1, 1, f) == 1 && num_zones <= MAX_FORBIDDEN_ZONES - 1;
+    if (ok) crc = map_crc32(crc, &num_zones, 1);
+
+    // zone: i loro spigoli si spostano e ruotano, il rettangolo ruotato è ancora un rettangolo
+    mapping_forbidden_zone_t zones[MAX_FORBIDDEN_ZONES - 1];
+    for (int i = 0; ok && i < num_zones; i++) {
+        uint16_t zx, zy, zw, zh;
+        ok = read_file_u16(f, &crc, &zx) && read_file_u16(f, &crc, &zy) && read_file_u16(f, &crc, &zw) && read_file_u16(f, &crc, &zh);
+        double u1, v1, u2, v2;
+        reposition_corner(zx - FINE_MAP_ORIGIN, zy - FINE_MAP_ORIGIN, request->dx, request->dy, request->quarter_turns, &u1, &v1);
+        reposition_corner(zx + zw - FINE_MAP_ORIGIN, zy + zh - FINE_MAP_ORIGIN, request->dx, request->dy, request->quarter_turns, &u2, &v2);
+        zones[i].x = fmin(u1, u2) * FINE_MAP_CELL_SIZE;
+        zones[i].y = fmin(v1, v2) * FINE_MAP_CELL_SIZE;
+        zones[i].w = fabs(u2 - u1) * FINE_MAP_CELL_SIZE;
+        zones[i].h = fabs(v2 - v1) * FINE_MAP_CELL_SIZE;
+    }
+
+    // celle a sequenze: ognuna va al suo posto nuovo nella griglia a categorie, che parte tutta sconosciuta
+    memset(aper_state.categories, 0, sizeof aper_state.categories);
+    uint32_t total = (uint32_t)width * height, done = 0;
+    while (ok && done < total) {
+        int byte = fgetc(f);
+        if (byte == EOF) { ok = false; break; }
+        uint8_t run = (uint8_t)byte;
+        crc = map_crc32(crc, &run, 1);
+        uint8_t category = run >> MAP_RUN_CATEGORY_SHIFT;
+        uint32_t count = run & MAP_RUN_COUNT_MASK;
+        if (count == 0 || count > total - done) { ok = false; break; }
+        for (uint32_t k = 0; ok && k < count; k++, done++) {
+            if (category == MAP_CAT_UNKNOWN) continue;
+            int new_x, new_y;
+            ok = reposition_cell(x0 + (int)(done % width), y0 + (int)(done / width), request->dx, request->dy, request->quarter_turns, &new_x, &new_y);
+            if (ok) {
+                uint32_t index = (uint32_t)new_y * FINE_MAP_CELL_NUMBER + (uint32_t)new_x;
+                aper_state.categories[index >> 2] |= (uint8_t)(category << (2 * (index & 3)));
+            }
+        }
+    }
+
+    // in fondo il CRC di tutto quello che c'è prima
+    uint8_t crc_bytes[MAP_FILE_CRC_LEN];
+    ok = ok && fread(crc_bytes, 1, MAP_FILE_CRC_LEN, f) == MAP_FILE_CRC_LEN &&
+         crc == ((uint32_t)crc_bytes[0] | (uint32_t)crc_bytes[1] << 8 | (uint32_t)crc_bytes[2] << 16 | (uint32_t)crc_bytes[3] << 24);
+    fclose(f);
+    if (!ok) {
+        fprintf(stderr, "aperiodico: riposizionamento della base: il file della mappa non si legge, o esce dalla griglia\n");
+        return false;
+    }
+
+    // riscrittura come nel salvataggio
+    int x, y, w, h;
+    if (!find_map_rectangle(aper_state.categories, &x, &y, &w, &h)) return false;
+    FILE *out = fopen(tmp_path, "wb");
+    if (!out) return false;
+    ok = encode_map_rectangle(aper_state.categories, x, y, w, h, zones, num_zones, write_to_file, out);
+    if (fclose(out) != 0) ok = false;
+    if (!ok || rename(tmp_path, path) != 0) {
+        remove(tmp_path);
+        return false;
+    }
+
+    aper_state.is_saving_disabled = true;
+    fprintf(stderr, "aperiodico: base riposizionata, mappa spostata di (%d, %d) celle e ruotata di %d quarti di giro\n",
+            request->dx, request->dy, request->quarter_turns);
+    return true;
+}
+
 // funzione helper che controlla le zone volute, le passa alla mappatura e, appena applicate, salva la mappa (se un file
 // della mappa c'è già: altrimenti la mappa non è ancora completa, e le zone si salveranno con il primo salvataggio)
 static void apply_user_zones_request(const aperiodic_zones_request_t *request) {
@@ -412,6 +567,15 @@ void job_aperiodic(void *arg) {
     if (search_request.num != aper_state.last_search_num) {
         aper_state.last_search_num = search_request.num;
         run_position_search(search_request.num);
+    }
+
+    // Richiesta: Riposiziona base (dalla mappatura, dopo la ricerca)
+    aperiodic_reposition_request_t reposition_request = {0};
+    exchange_read(&reposition_request_buffer, &reposition_request);
+
+    if (reposition_request.num != aper_state.last_reposition_num) {
+        aper_state.last_reposition_num = reposition_request.num;
+        set_reposition_status(reposition_map_file(&reposition_request) ? REPOSITION_DONE : REPOSITION_FAILED);
     }
 
     // Richiesta: Salvataggio della Mappa

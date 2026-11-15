@@ -98,6 +98,8 @@ JSON di circa 1,6 KB (circa 750 byte con gzip). Contiene solo dati che i task e 
 - `map.file_crc`: CRC-32 del file `map.rtm` sul robot (assente se non c'è). Il server lo usa per sapere se ha la copia
   giusta della mappa (sezione 7).
 - `map.forbidden_zones`: la zona 0 è quella della base. `GET /api/robot/zones` la toglie.
+- `map.reposition`: stato di "Riposiziona base" (sezione 7.9): `idle`, `running`, `done`, `not_found`, `rotated`,
+  `failed`.
 - **Lasciati fuori di proposito:** il giro intero del lidar, i campi del GD32 non verificati, il magnetico, i tempi
   massimi di `rt_stats_t` (si leggono solo a task fermo), odometria, statistiche del collegamento, contatti, IMU,
   encoder.
@@ -174,6 +176,7 @@ Tutti gli errori hanno la forma `{"reason": ..., "message": ...}`. Ogni comando 
 | `POST /api/robot/mission/resume` | `resume` | azzera anche il guasto; `not_paused`, `cause_still_present`, `position_lost` |
 | `POST /api/robot/mission/home` | `home` | azzera anche il guasto; con la posizione persa fa l'aggancio alla cieca; se sta già tornando: 200; `already_home`, `cause_still_present` |
 | `POST /api/robot/fault/reset` | `fault_reset` | `not_in_fault`, `cause_still_present` |
+| `POST /api/robot/base/reposition` | `reposition_base` | `not_resting`, `no_map`, `busy`; l'esito arriva dopo nello stato (sezione 7.9) |
 | `POST /api/robot/remote/take` | `remote_take` | `remote_in_use` (con l'utente che lo tiene) |
 | `POST /api/robot/remote/move` `{"v","omega"}` | `remote_move` | `remote_in_use`, `position_lost` |
 | `POST /api/robot/remote/cleaning` `{"brushes","suction"}` | `remote_cleaning` | `remote_in_use`, `dustbin_missing` |
@@ -334,6 +337,35 @@ in corso".
 - Per la **mappa selezionata**: comando `zones` al robot, che le applica, salva la mappa e la rimanda al server.
 - Per le **altre mappe**: il server riscrive l'intestazione del file (zone e CRC).
 - `PUT /api/robot/maps/{id}/zones` sceglie da solo fra i due casi.
+
+### 7.9 Riposiziona base
+
+Deciso con l'utente il 2026-11-15, dopo uno spostamento della base: invece di rifare la mappa (e le zone proibite) il
+robot sposta quella che ha. App: menu Avanzate, "Riposiziona base", con conferma.
+
+1. **Comando** `reposition_base` (`POST /api/robot/base/reposition`). La navigazione lo accetta solo in riposo sulla base
+   con la mappa caricata (`not_resting`, `no_map`, `busy`) e risponde subito: il comando resta sotto i 3 s come gli
+   altri. Accettato, `map.reposition` diventa `running`, il driver si sveglia (`drv_leave_base(1)`, lidar acceso: il
+   robot resta fermo, in riposo l'obiettivo è lo stop) e la navigazione lo dice alla mappatura (`reposition_num` nelle
+   celle chiuse).
+2. **Ricerca** (mappatura): aspetta un giro del lidar iniziato dopo il comando, poi la stessa ricerca del sollevamento
+   (`prepare_search_points`, `request_position_search` nel task aperiodico, rifinitura). Finché è in corso la mappa non
+   si scrive. Accetta solo con punteggio almeno `REPOSITION_MIN_SCORE_PCT` (75%) e angolo entro 20 gradi da un multiplo
+   di 90 (la base sta contro un muro): altrimenti `not_found` o `rotated`, e la mappa non cambia.
+3. **Spostamento del file** (task aperiodico): la posizione trovata diventa l'origine. Ogni cella e ogni zona si sposta
+   di celle intere (errore al massimo mezza cella, che corregge l'allineamento all'avvio) e ruota di quarti di giro
+   attorno all'origine, esattamente. Usa la griglia a categorie del salvataggio, nessuna memoria nuova; file temporaneo
+   rinominato alla fine; da lì il task aperiodico non salva più. `map.reposition` diventa `done` (o `failed`).
+4. **Riavvio**: appena il server ha ricevuto lo stato con `done` (o comunque dopo `REPOSITION_RESTART_DELAY`, 10 s,
+   senza rete) il programma si riavvia con la mappa spostata. All'avvio il CRC non coincide con la mappa selezionata,
+   quindi il server la salva come **mappa nuova** e la seleziona (sezione 7.2): la vecchia resta, l'utente la cancella
+   se vuole.
+5. **App**: dopo l'"accettato" mostra "Ricerca della base"; quando `map.reposition` smette di essere `running` mostra
+   l'esito, e con `done` l'avviso di riavvio.
+
+Prove nel simulatore (stanza ricavata dalla mappa con la base nuova, robot con la mappa vecchia): base spostata di
+10 cm, ritrovata con punteggio 86-88% e file identico a quello spostato a mano; base contro un altro muro (stanza ruotata
+di 90 gradi), ritrovata a -90,5 gradi con punteggio 75-78%, celle e zone identiche a quelle attese.
 
 ### 7.8 Mappe di oggi
 
@@ -534,6 +566,7 @@ task.
 | `pause`, `remote_*` | la navigazione |
 | `zones` | richiesta al task aperiodico come oggi, poi attesa di `read_applied_user_zones_version()` |
 | `map_select`, `map_reset` | rete e task aperiodico; `not_resting` se la navigazione non è in riposo o il robot non è sulla base |
+| `reposition_base` | la navigazione accetta o rifiuta subito, poi mappatura e task aperiodico (sezione 7.9) |
 
 **Comando alla navigazione in una sola variabile `_Atomic uint64_t`**, senza doppio buffer nuovo (sull'ARMv7 una
 lettura o scrittura atomica da 64 bit è un'istruzione sola, senza lock):

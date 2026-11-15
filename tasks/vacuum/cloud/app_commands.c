@@ -39,6 +39,7 @@ static const reason_message_t REASON_MESSAGES[] = {
     { "outside_map",            "Una zona esce dalla mappa o è troppo piccola." },
     { "not_resting",            "Il robot deve essere a riposo sulla base." },
     { "download_failed",        "Non sono riuscito a scaricare la mappa." },
+    { "no_map",                 "Il robot non ha una mappa caricata: deve essere partito dalla base con una mappa." },
     { "invalid_command",        "Comando non valido." },
     { "no_answer",              "Il robot non ha eseguito il comando in tempo." },
 };
@@ -68,6 +69,8 @@ static const char *navigation_result_reason(nav_command_result_t navigation_resu
         case NAV_RESULT_ALREADY_HOME:   return "already_home";
         case NAV_RESULT_POSITION_LOST:  return "position_lost";
         case NAV_RESULT_IN_FAULT:       return "cause_still_present";
+        case NAV_RESULT_NOT_RESTING:    return "not_resting";
+        case NAV_RESULT_NO_MAP:         return "no_map";
         default:                        return "invalid_command";
     }
 }
@@ -332,6 +335,13 @@ static void run_parsed_command(const cJSON *command, app_map_download_t download
     } else if (strcmp(type, "map_reset") == 0) {
 
         run_map_command(command, false, download_map, result);
+
+    } else if (strcmp(type, "reposition_base") == 0) {
+
+        // Riposiziona base: la navigazione controlla che il robot sia a riposo sulla base con una mappa e lo fa partire.
+        // L'esito arriva dopo, nello stato (map.reposition), e se è riuscito il programma si riavvia
+        navigation_command.type = NAV_COMMAND_REPOSITION_BASE;
+        run_navigation_command(navigation_command, result);
 
     } else refuse(result, "invalid_command");
 }

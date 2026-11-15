@@ -139,6 +139,7 @@ class CommandTest(BackendTestCase):
                  ("post", "/api/robot/mission/resume", None, "resume", {}),
                  ("post", "/api/robot/mission/home", None, "home", {}),
                  ("post", "/api/robot/fault/reset", None, "fault_reset", {}),
+                 ("post", "/api/robot/base/reposition", None, "reposition_base", {}),
                  ("post", "/api/robot/remote/take", None, "remote_take", {}),
                  ("post", "/api/robot/remote/move", {"v": 0.2, "omega": -0.5}, "remote_move", {"v": 0.2, "omega": -0.5}),
                  ("post", "/api/robot/remote/cleaning", {"brushes": True, "suction": False}, "remote_cleaning",

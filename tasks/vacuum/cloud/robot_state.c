@@ -35,6 +35,9 @@ static const char *const OBJECTIVE_NAMES[] = { "stop", "rotate", "move", "const_
 // nomi degli stati della mappa, nello stesso ordine di mapping_map_state
 static const char *const MAP_STATE_NAMES[] = { "normal", "lost", "unconfirmed", "not_found" };
 
+// nomi dello stato di Riposiziona base, nello stesso ordine di reposition_status_t
+static const char *const REPOSITION_NAMES[] = { "idle", "running", "done", "not_found", "rotated", "failed" };
+
 // nomi degli allarmi della sicurezza, nello stesso ordine dei bit di error_mask
 static const char *const SAFETY_ERROR_NAMES[] = { "stuck", "slip", "motor_overload", "obstacle", "forbidden_zone", "contact", "brush" };
 
@@ -92,6 +95,7 @@ typedef struct {
     mapping_forbidden_zone_list_t zones;
     bool is_moving;                 // quando il robot si ferma parte ancora uno stato, con le velocità a zero
     bool is_brushes_on, is_suction_on;  // spazzole e aspirazione accese o spente
+    int reposition_status;          // Riposiziona base (reposition_status_t): l'app ne aspetta l'esito
 } important_state_t;
 
 // tutto quello che serve a costruire lo stato, letto una volta per ciclo
@@ -126,6 +130,10 @@ void mark_robot_state_sent(void) {
     robot_state.sent = robot_state.built;
     robot_state.is_first_sent = true;
     robot_state.last_sent_t = rt_now();
+}
+
+bool is_reposition_done_sent(void) {
+    return robot_state.is_first_sent && robot_state.sent.reposition_status == REPOSITION_DONE;
 }
 
 // funzione helper che legge tutto dai doppi buffer dei task e del driver
@@ -171,6 +179,7 @@ static void fill_important_state(const state_readings_t *readings, important_sta
     important->map_state = readings->correction.state;
     important->save_failed = read_map_save_failed();
     important->started_on_base = read_started_on_base();
+    important->reposition_status = read_reposition_status();
     snprintf(important->file_crc_text, sizeof important->file_crc_text, "%s", read_live_map_file_crc());
 
     // le zone: solo quelle presenti, il resto dell'array resta azzerato
@@ -235,6 +244,7 @@ static char *build_json(const state_readings_t *readings) {
     cJSON_AddStringToObject(map, "state", name_of(MAP_STATE_NAMES, ARRAY_SIZE(MAP_STATE_NAMES), readings->correction.state));
     cJSON_AddBoolToObject(map, "save_failed", read_map_save_failed());
     cJSON_AddBoolToObject(map, "started_on_base", read_started_on_base());
+    cJSON_AddStringToObject(map, "reposition", name_of(REPOSITION_NAMES, ARRAY_SIZE(REPOSITION_NAMES), read_reposition_status()));
     if (read_live_map_file_crc()[0] != '\0') cJSON_AddStringToObject(map, "file_crc", read_live_map_file_crc());
     cJSON *zones = cJSON_AddArrayToObject(map, "forbidden_zones");
     for (int i = 0; i < readings->zones.num_zones && i < MAX_FORBIDDEN_ZONES; i++) {

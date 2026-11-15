@@ -13,6 +13,7 @@ import '../../map/map_view.dart';
 import '../../models/map_info.dart';
 import '../../models/robot_state.dart';
 import '../../widgets/alerts_box.dart';
+import '../../widgets/confirm_dialog.dart';
 import '../../widgets/glass_panel.dart';
 import '../../widgets/main_button.dart';
 import '../../widgets/robot_badges.dart';
@@ -67,8 +68,43 @@ class _MainScreenState extends ConsumerState<MainScreen> with StateIntervalMixin
     }
   }
 
+  /// Riposiziona base (docs/app.md, sezione 7.9): conferma, poi il comando. Il robot risponde subito se accetta;
+  /// l'esito arriva nello stato (map.reposition) e lo mostra il listener in build.
+  Future<void> _repositionBase() async {
+    final confirmed = await confirmWithWarning(context,
+        title: 'Riposiziona base',
+        warning: 'Il robot, fermo sulla base, cerca dove si trova nella mappa e la sposta insieme alle zone proibite. '
+            'Poi si riavvia: sul server resta anche la mappa di prima.',
+        confirmLabel: 'Riposiziona');
+    if (!confirmed) return;
+    final ok = await runCommand(ref, (api) => api.send('POST', '/api/robot/base/reposition'));
+    if (ok) {
+      ref.read(notificationProvider.notifier).show('Ricerca della base', 'Il robot cerca dove si trova nella mappa.');
+    }
+  }
+
+  /// Esito di Riposiziona base, quando lo stato smette di essere "running".
+  void _showRepositionResult(String result) {
+    final notifications = ref.read(notificationProvider.notifier);
+    switch (result) {
+      case 'done':
+        notifications.show('Base riposizionata', 'Mappa e zone spostate. Il robot si riavvia con la mappa nuova.');
+        ref.read(restartProvider.notifier).start();
+        ref.invalidate(mapsProvider);
+      case 'not_found':
+        notifications.show('Base non trovata', 'Il robot non riconosce la stanza dalla base: la mappa non è cambiata.');
+      case 'rotated':
+        notifications.show('Base non riposizionata', 'La base è girata di un angolo che non si può correggere: rifai la mappa.');
+      default:
+        notifications.show('Base non riposizionata', 'Qualcosa non ha funzionato: la mappa non è cambiata.');
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
+    ref.listen(robotStateProvider.select((robotState) => robotState?.mapReposition), (previous, next) {
+      if (previous == 'running' && next != null && next != 'running') _showRepositionResult(next);
+    });
     final state = ref.watch(robotStateProvider);
     final liveMap = ref.watch(liveMapProvider);
     final trail = ref.watch(trailProvider);
@@ -83,7 +119,7 @@ class _MainScreenState extends ConsumerState<MainScreen> with StateIntervalMixin
 
     return Scaffold(
       key: _scaffoldKey,
-      drawer: _MainMenu(onOpen: _open),
+      drawer: _MainMenu(onOpen: _open, onRepositionBase: _repositionBase),
       body: Stack(children: [
         // la mappa a tutto schermo: selezionata o dal vivo, con scia, zone, base e robot
         Positioned.fill(
@@ -300,11 +336,12 @@ class _MapMenu extends ConsumerWidget {
   }
 }
 
-/// Il menu laterale: Programmazione, Registro dei comandi, Avanzate (Azzera guasto, Diagnostica), Esci.
+/// Il menu laterale: Programmazione, Registro dei comandi, Avanzate (Azzera guasto, Riposiziona base, Diagnostica), Esci.
 class _MainMenu extends ConsumerWidget {
-  const _MainMenu({required this.onOpen});
+  const _MainMenu({required this.onOpen, required this.onRepositionBase});
 
   final void Function(Widget screen) onOpen;
+  final Future<void> Function() onRepositionBase;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -349,6 +386,15 @@ class _MainMenu extends ConsumerWidget {
                   Navigator.of(context).pop();
                   final ok = await runCommand(ref, (api) => api.send('POST', '/api/robot/fault/reset'));
                   if (ok) ref.read(notificationProvider.notifier).show('Guasto azzerato', 'Il robot è di nuovo pronto.');
+                },
+              ),
+              ListTile(
+                contentPadding: const EdgeInsets.only(left: 56, right: 16),
+                leading: const Icon(Icons.my_location_rounded),
+                title: const Text('Riposiziona base'),
+                onTap: () {
+                  Navigator.of(context).pop();
+                  onRepositionBase();
                 },
               ),
               ListTile(
