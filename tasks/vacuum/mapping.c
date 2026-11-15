@@ -22,10 +22,7 @@
 #define FINE_CELL_INFLATION_RADIUS  (int)(ceil(((ROBOT_RADIUS + INFLATION_MARGIN_MM) / 1000) / FINE_MAP_CELL_SIZE)) // indica di quanto vengono ingrossate le celle con ostacoli nella mappa di navigazione, il margine serve per essere certi che il robot non sbatta contro gli ostacoli, considerando anche le dimensioni del robot e un piccolo margine d'errore
 #define FINE_CELL_OCCUPATION_THRESHOLD 50        // soglia sopra al quale una cella è considerata occupata
 #define UNKNOWN_CELL_THRESHOLD      8           // numero minimo di celle fini da osservare affinchè la cella di navigazione risulti osservata
-#define NEAR_OBSTACLE_NO_WRITE_M    0.5         // se entro questa distanza dal robot c'è un ostacolo della mappa, della scansione si scrivono solo i punti colpiti (niente raggi liberi, che sposterebbero i muri), espressa in m
-#define NEAR_HIT_MAX_INTENSITY      100         // nella scrittura dei soli colpi si scrivono solo gli echi scuri (intensità sotto questa soglia): le superfici chiare il lidar le vede bene anche da lontano, le scure danno eco solo da vicino (superfici normali 140-160, scure 40-100)
-#define NEAR_HIT_SCORE              10          // punteggio di un colpo scritto vicino agli ostacoli: più basso di LIDAR_HIT_SCORE, così una vista sbagliata da sola non rende occupata una cella, servono echi coerenti da più viste
-#define NEAR_HIT_MIN_DISTANCE_M     ((ROBOT_RADIUS + 10) / 1000)   // nella scrittura dei soli colpi, i punti più vicini di così al centro del robot (dentro il robot o quasi) si scartano: sono echi sbagliati delle superfici scure, espressa in m
+#define NEAR_OBSTACLE_NO_WRITE_M    0.5         // se entro questa distanza dal robot c'è un ostacolo della mappa, la scansione serve solo per allinearsi e non si scrive, espressa in m
 #define ROTATION_SPEED_MAX_THRESHOLD 1.5        // massima velocità angolare che può avere il robot prima che la scansione del lidar venga scartata, oltre questa velocità la scansione è deformata. espressa in rad/s
 #define VOID_OBSTACLE                -128       // punteggio speciale da assegnare ad una cella che viene rilevata come "dirupo" dai sensori anti-caduta, una volta che una cella viene messa a questo valore, non può essere modificata dal ciclo di aggiornamento lidar-based
 #define LOW_OBSTACLE                 127        // punteggio speciale da assegnare ad una cella che viene rilevata come ostacolo dal bumper, ma non rilevato dal lidar, una volta che una cella viene messa a questo valore, non può essere modificata dal ciclo di aggiornamento lidar-based
@@ -229,6 +226,7 @@ typedef struct {
     mapping_forbidden_zone_t user_zones[MAX_FORBIDDEN_ZONES - 1];
     int num_user_zones;
     uint32_t user_zones_version;    // versione delle zone volute già applicata
+    uint8_t forbidden_quads[NAV_MAP_CELL_NUMBER * NAV_MAP_CELL_NUMBER];   // quadranti proibiti dalle zone dell'utente, bit come NAV_CELL_QUAD
 
     // punti misurati dal lidar da usare per l'allineamento 
     align_point_t lidar_point[LIDAR_SCAN_MAX_POINTS];
@@ -330,6 +328,9 @@ static uint8_t calc_nav_cell_bitmask(uint16_t index) {
             bitmask |= NAV_CELL_QUAD[q];
         }
     }
+
+    // i quadranti proibiti dalle zone dell'utente sono bloccati come quelli con gli ostacoli
+    bitmask |= map_state.forbidden_quads[index];
 
     // due quadranti liberi in diagonale restano liberi tutti e due: il passo in diagonale è sempre permesso
     // (deciso con l'utente il 2026-11-08, guasto di p5; prima qui si bloccava anche un terzo quadrante)
@@ -2108,9 +2109,48 @@ static void mark_forbidden_cells(const mapping_forbidden_zone_t zone) {
     pthread_mutex_unlock(&navigation_map_data.mutex);
 }
 
-// funzione helper inversa di mark_forbidden_cells: le celle proibite della zona (allargata del raggio del robot) tornano
-// allo stato calcolato dalla mappa. Le zone che restano vanno segnate di nuovo dopo, perché possono toccare le stesse celle
-static void unmark_forbidden_cells(const mapping_forbidden_zone_t zone) {
+// Funzione helper che segna come proibiti i quadranti in cui il centro del robot farebbe entrare il corpo nella zona:
+// quelli con il centro a meno del raggio del robot dalla zona. Una cella con tutti e quattro i quadranti proibiti è proibita
+static void mark_forbidden_quads(const mapping_forbidden_zone_t zone) {
+
+    const double radius = ROBOT_RADIUS / 1000.0;
+
+    // calcola le celle dei due vertici opposti della zona allargata
+    uint16_t cell_min = coord_to_nav_index(zone.x - radius, zone.y - radius);
+    uint16_t cell_max = coord_to_nav_index(zone.x + zone.w + radius, zone.y + zone.h + radius);
+
+    pthread_mutex_lock(&navigation_map_data.mutex);
+
+    for (int cur_y = cell_min >> 8; cur_y <= cell_max >> 8; cur_y++) {
+        for (int cur_x = cell_min & 0xFF; cur_x <= (cell_max & 0xFF); cur_x++) {
+
+            int cur_index = cur_y << 8 | cur_x;
+
+            // segna i quadranti con il centro a meno del raggio del robot dalla zona
+            for (int quad = 0; quad < 4; quad++) {
+                double quad_x, quad_y;
+                quad_to_coord(cur_index, NAV_CELL_QUAD[quad], &quad_x, &quad_y);
+                if (calc_forbidden_zone_distance(quad_x, quad_y, zone) < radius) map_state.forbidden_quads[cur_index] |= NAV_CELL_QUAD[quad];
+            }
+
+            // ricalcola quadranti e stato: proibita se lo sono tutti e quattro i quadranti, la proibita e la troppo stretta restano
+            uint8_t cell_mask = calc_nav_cell_bitmask(cur_index);
+            uint8_t cur_state = get_nav_cell_state(navigation_map_data.navigation_grid[cur_index]);
+            if (map_state.forbidden_quads[cur_index] == NAV_CELL_QUAD_MASK) cur_state = NAV_CELL_FORBIDDEN;
+            else if (cur_state != NAV_CELL_FORBIDDEN && cur_state != NAV_CELL_TOO_NARROW) cur_state = calc_nav_cell_state(cur_index, cell_mask);
+
+            navigation_map_data.navigation_grid[cur_index] = cur_state | cell_mask;
+        }
+    }
+
+    navigation_map_data.version_number++;
+
+    pthread_mutex_unlock(&navigation_map_data.mutex);
+}
+
+// funzione helper inversa di mark_forbidden_quads: toglie i quadranti proibiti della zona e le celle che erano proibite per
+// intero tornano allo stato calcolato dalla mappa. Le zone che restano vanno segnate di nuovo dopo
+static void unmark_forbidden_quads(const mapping_forbidden_zone_t zone) {
 
     const double radius = ROBOT_RADIUS / 1000.0;
 
@@ -2123,10 +2163,15 @@ static void unmark_forbidden_cells(const mapping_forbidden_zone_t zone) {
         for (int cur_x = cell_min & 0xFF; cur_x <= (cell_max & 0xFF); cur_x++) {
 
             int cur_index = cur_y << 8 | cur_x;
-            if (get_nav_cell_state(navigation_map_data.navigation_grid[cur_index]) != NAV_CELL_FORBIDDEN) continue;
+
+            bool was_forbidden = map_state.forbidden_quads[cur_index] == NAV_CELL_QUAD_MASK;
+            map_state.forbidden_quads[cur_index] = 0;
 
             uint8_t cell_mask = calc_nav_cell_bitmask(cur_index);
-            navigation_map_data.navigation_grid[cur_index] = calc_nav_cell_state(cur_index, cell_mask) | cell_mask;
+            uint8_t cur_state = get_nav_cell_state(navigation_map_data.navigation_grid[cur_index]);
+            if (was_forbidden && cur_state == NAV_CELL_FORBIDDEN) cur_state = calc_nav_cell_state(cur_index, cell_mask);
+
+            navigation_map_data.navigation_grid[cur_index] = cur_state | cell_mask;
         }
     }
 
@@ -2152,7 +2197,9 @@ static void publish_base_zone(void) {
 
     write_forbidden_zone_list(&zone_list);
 
-    for (int i = 0; i < zone_list.num_zones; i++) mark_forbidden_cells(zone_list.forbidden_zones[i]);
+    // la base proibisce celle intere, le zone dell'utente solo i quadranti
+    mark_forbidden_cells(zone_list.forbidden_zones[0]);
+    for (int i = 1; i < zone_list.num_zones; i++) mark_forbidden_quads(zone_list.forbidden_zones[i]);
 }
 
 // funzione helper che applica le zone volute dall'utente (scritte dal task aperiodico): toglie le celle proibite delle
@@ -2165,7 +2212,7 @@ static void apply_user_zones(void) {
 
     if (wanted.version == map_state.user_zones_version || !read_started_on_base()) return;
 
-    for (int i = 0; i < map_state.num_user_zones; i++) unmark_forbidden_cells(map_state.user_zones[i]);
+    for (int i = 0; i < map_state.num_user_zones; i++) unmark_forbidden_quads(map_state.user_zones[i]);
 
     map_state.num_user_zones = wanted.num_zones;
     for (int i = 0; i < wanted.num_zones; i++) map_state.user_zones[i] = wanted.zones[i];
@@ -2570,14 +2617,12 @@ static void job_mapping_body(void *arg) {
         // aggiorna la stima allineata, prima di scrivere la scansione nella mappa
         update_aligned_pose(ref_x, ref_y, ref_theta);
 
-        // vicino a un ostacolo della scansione si scrivono solo i punti colpiti: i raggi liberi sposterebbero i muri
-        // (circolo mappa -> posizione -> mappa), ma senza i colpi le superfici scure, che danno eco solo da vicino,
-        // non entrerebbero mai nella mappa
+        // vicino a un ostacolo la scansione serve solo per allinearsi
         bool write_scan = !is_near_obstacle(map_state.aligned_x, map_state.aligned_y);
         
         // Scorri tutti i punti della scansione del lidar e se sono != 0
         // Calcola la posizione del punto rispetto al robot nella mappa
-        for (int i = 0; i < map_state.last_scan.n; i++) {
+        for (int i = 0; write_scan && i < map_state.last_scan.n; i++) {
             
             // se un punto ha distanza 0, non considerarlo
             if (map_state.last_scan.p[i].distance_mm == 0) continue;
@@ -2632,13 +2677,7 @@ static void job_mapping_body(void *arg) {
             // le celle della fine map per cui passa il raggio del lidar
             // e aggiornare sia i punti per cui è passato il raggio
             // e non ha trovato ostacoli, sia l'ultimo punto dove il raggio si è infranto
-            if (write_scan) exec_bresenham_algorithm(robot_cell_x, robot_cell_y, cur_point_cell_x, cur_point_cell_y);
-            else {
-                // vicino agli ostacoli solo il colpo degli echi scuri, entro la portata e fuori dal robot
-                const double point_dist = hypot(x_coord_rel, y_coord_rel);
-                if (map_state.last_scan.p[i].intensity < NEAR_HIT_MAX_INTENSITY && point_dist >= NEAR_HIT_MIN_DISTANCE_M && point_dist < LIDAR_MAPPING_MAX_RANGE)
-                    add_score_to_fine_cell(cur_point_cell_index, NEAR_HIT_SCORE);
-            }
+            exec_bresenham_algorithm(robot_cell_x, robot_cell_y, cur_point_cell_x, cur_point_cell_y);
 
         }
     }

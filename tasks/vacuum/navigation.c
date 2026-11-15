@@ -209,6 +209,7 @@ typedef struct {
     int64_t stall_start;                        // istante in cui è iniziato l'arresto, 0 se il robot non è in arresto
     bool center_to_center;                      // è true se il percorso attuale va seguito senza prendere scorciatoie (le scorciatoie potrebbero far finire il robot in posizioni diverse dal centro delle celle, rendendo possibili situazioni di stallo dove il task di sicurezza ferma il robot per via di ostacoli che la navigazione non vede)
     navigation_closed_cells_t closed_cells;     // lista di celle chiuse da segnalare al task di mappatura
+    mapping_forbidden_zone_list_t zones;        // zone proibite, la 0 è la base
     
     struct {                                    // struct con le ultime TRAIL_SIZE posizioni del robot
         double x[TRAIL_SIZE];                   // buffer delle x delle posizioni
@@ -827,6 +828,17 @@ static inline void coord_to_lattice(const double x, const double y, int *lattice
     *lattice_y = (int)floor(y / (NAV_MAP_CELL_SIZE / 2)) + 2 * NAV_MAP_ORIGIN;
 }
 
+// funzione helper che restituisce true se il robot con il centro in (x, y) tocca una zona proibita dell'utente
+static bool is_touching_user_zone(const double x, const double y) {
+
+    // la zona 0 è la base, che proibisce celle intere
+    for (int i = 1; i < nav_state.zones.num_zones; i++) {
+        if (calc_forbidden_zone_distance(x, y, nav_state.zones.forbidden_zones[i]) < ROBOT_RADIUS / 1000) return true;
+    }
+
+    return false;
+}
+
 // Funzione helper che prende le coordinate di un punto in una cella di navigazione
 // e restituisce true se quel punto si trova in una cella che genera un bordo, false altrimenti
 static bool is_lattice_point_edge_source(const double x, const double y) {
@@ -848,6 +860,9 @@ static bool is_lattice_point_edge_source(const double x, const double y) {
 
     // se lo stato della cella è NAV_CELL_FORBIDDEN restituisci false perchè quella zona non genera bordi da pulire
     if (get_nav_cell_state(nav_state.map[cell]) == NAV_CELL_FORBIDDEN) return false;
+
+    // anche i quadranti proibiti da una zona dell'utente non generano bordi da pulire
+    if (is_touching_user_zone(x, y)) return false;
 
     // conta solo il bit del quadrante, non lo stato della cella: il bit a 1 vuol dire che lì c'è un ostacolo vero,
     // quindi le celle troppo strette e quelle sconosciute da sole non generano bordi
@@ -2841,6 +2856,9 @@ static void job_navigation_body(void *arg) {
 
     }
 
+    // leggi le zone proibite
+    nav_state.zones = read_forbidden_zone_list();
+
     // leggi la posizione corrente dal task di movimento
     movement_position_data_t cur_pos = read_movement();
 
@@ -3191,8 +3209,8 @@ static void job_navigation_body(void *arg) {
             }
 
             // il giro segue il muro con il lidar e non guarda la mappa: le zone proibite le deve controllare da solo.
-            // Il centro del robot in una cella proibita vuol dire che il corpo tocca la zona: il giro finisce lì
-            if (get_nav_cell_state(nav_state.map[coord_to_nav_index(cur_pos.x, cur_pos.y)]) == NAV_CELL_FORBIDDEN) {
+            // Il centro del robot in una cella proibita o vicino a una zona dell'utente vuol dire che il corpo tocca la zona: il giro finisce lì
+            if (get_nav_cell_state(nav_state.map[coord_to_nav_index(cur_pos.x, cur_pos.y)]) == NAV_CELL_FORBIDDEN || is_touching_user_zone(cur_pos.x, cur_pos.y)) {
                 end_border_lap();
                 break;
             }

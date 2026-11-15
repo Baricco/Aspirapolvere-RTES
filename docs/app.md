@@ -393,6 +393,7 @@ amministrazione (servono per provare l'app).
 | `device_api.py` | richieste del robot (`/api/device/...`) |
 | `robot_link.py` | stato vivo in memoria: coda dei comandi, attese, telecomando, ultimo stato |
 | `maps.py` | lettura e scrittura RTM1, mappa dal vivo, differenze, scia |
+| `recorder.py` | registro per le analisi: tutti gli stati del robot e la mappa durante le missioni (sezione 8.9) |
 | `scheduler.py` | pulizie programmate |
 | `db.py`, `schema.sql` | accesso a SQLite e tabelle |
 | `config.py` | costanti non private: tempi, limiti |
@@ -404,7 +405,7 @@ amministrazione (servono per provare l'app).
 
 **Valori privati** (cartella dei dati, origini permesse per il web in sviluppo) in variabili d'ambiente, dall'unità
 systemd in produzione e da un file `.env` ignorato da git in sviluppo. **Cartella dei dati**, fuori dal progetto:
-database, mappe, chiave del JWT, ultimo stato, scia.
+database, mappe, chiave del JWT, ultimo stato, scia, registro per le analisi (`registro/`).
 
 ### 8.3 Database
 
@@ -501,6 +502,26 @@ non serve CORS; in sviluppo il backend accetta le origini scritte nella configur
 | Elenco utenti | |
 | Rigenera token del robot | **chiede di scrivere `ToKeN`** (maiuscole e minuscole contano), poi genera il token, lo stampa una volta sola e salva l'hash |
 | Importa mappa | file RTM1 e nome |
+
+### 8.9 Registro per le analisi
+
+Aggiunto il 2026-11-15, dopo pulizie finite in guasto di cui non restava la causa: il log del robot (`logread`,
+512 KB in RAM) si riempie dei messaggi del Wi-Fi in poche ore, e il server teneva solo l'ultimo stato. **Solo il
+backend cambia**: robot e app restano come sono.
+
+- **Cosa si salva**: ogni stato che il robot manda (sezione 4: ogni 100 ms mentre lavora, ogni 10 s a riposo) così
+  com'è arrivato, con l'ora del server; durante una missione anche la mappa dal vivo in RTM1 (base64), ogni 10 s se è
+  cambiata e una alla fine. Dentro lo stato ci sono fase e missione della navigazione, posizione, obiettivo, errori
+  della sicurezza, batteria, guasto del driver con codice e testo, aggancio, paraurti, anti-caduta, correnti, lidar e
+  scadenze mancate: basta per ricostruire una pulizia e il motivo di un guasto.
+- **Dove**: `registro/stati-AAAA-MM-GG.jsonl.gz` nella cartella dei dati, un file al giorno, una riga JSON per evento
+  (`{"t": ..., "state": {...}}` oppure `{"t": ..., "map_version": ..., "map_rtm": "..."}`). Ogni scrittura è un
+  membro gzip completo: `zcat` legge il file intero anche mentre cresce. Si scarica con `rsync`.
+- **Limiti**: tetto di **500 MB** per la cartella (deciso con l'utente), oltre si cancellano i giorni più vecchi; con
+  meno di 2 GB liberi sul disco il registro smette di scrivere. Costanti `RECORDER_*` in `config.py`.
+- **Non deve mai disturbare**: la richiesta del robot fa solo `json.dumps` e mette la riga in una coda limitata (3000
+  righe, oltre si scartano e si conta quante); un thread scrive ogni 5 s; ogni errore va nel log del servizio
+  (journald) una volta sola per tipo e si ignora. Allo spegnimento si scrive quello che resta in coda.
 
 ## 9. Robot
 

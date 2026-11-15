@@ -76,6 +76,7 @@ def post_state():
     state = request.get_json(silent=True)
     if not isinstance(state, dict):
         return invalid_parameters()
+    services().recorder.add_state(state)       # registro per le analisi: veloce, non blocca e non fallisce mai
     services().trail.add_state(state)
     services().link.update_state(state)
     # la versione della mappa dal vivo che il server ha ricevuto dal robot (null se non ne ha): se non è quella del

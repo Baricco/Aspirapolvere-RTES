@@ -183,6 +183,13 @@ typedef struct {
 
 } mapping_forbidden_zone_t;
 
+// funzione helper che restituisce la distanza tra il punto (x, y) e la zona proibita, 0 se il punto è dentro la zona, espressa in metri
+static inline double calc_forbidden_zone_distance(const double x, const double y, const mapping_forbidden_zone_t zone) {
+    const double dx = fmax(fmax(zone.x - x, 0), x - (zone.x + zone.w));
+    const double dy = fmax(fmax(zone.y - y, 0), y - (zone.y + zone.h));
+    return hypot(dx, dy);
+}
+
 // Struttura dati che contiene la lista di zone proibite nella mappa
 typedef struct {
 

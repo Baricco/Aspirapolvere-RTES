@@ -83,6 +83,18 @@ MAP_DEFAULT_NAME_PREFIX = "map-"
 TRAIL_MIN_STEP_M = 0.03              # un punto nuovo solo se il robot si è spostato almeno di così
 TRAIL_MAX_POINTS = 100000
 
+# --- registro per le analisi (sezione 8.9): tutti gli stati del robot e la mappa durante le missioni ---
+RECORDER_DIR = "registro"                        # cartella dentro la cartella dei dati
+RECORDER_FILE_PREFIX = "stati-"                  # un file al giorno: stati-AAAA-MM-GG.jsonl.gz
+RECORDER_FILE_EXTENSION = ".jsonl.gz"
+RECORDER_MAX_BYTES = 500 * 1024 * 1024           # tetto della cartella (deciso con l'utente il 2026-11-15): oltre si cancellano i giorni più vecchi
+RECORDER_MIN_FREE_BYTES = 2 * 1024 * 1024 * 1024 # sotto questo spazio libero sul disco il registro smette di scrivere
+RECORDER_QUEUE_MAX = 3000                        # righe in attesa di scrittura (5 minuti a 10 stati al secondo): oltre si scartano
+RECORDER_FLUSH_INTERVAL_S = 5                    # ogni quanto il thread scrive le righe in coda (al massimo si perde questo in uno spegnimento)
+RECORDER_MAP_INTERVAL_S = 10                     # ogni quanto, durante una missione, si salva la mappa dal vivo (se è cambiata)
+RECORDER_GZIP_LEVEL = 6
+RECORDER_STOP_TIMEOUT_S = 5                      # attesa massima dell'ultima scrittura alla chiusura del servizio
+
 # --- risposte ---
 GZIP_MIN_BYTES = 256                 # le risposte JSON più corte non si comprimono
 

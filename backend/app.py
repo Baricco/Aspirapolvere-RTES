@@ -14,6 +14,7 @@ import auth
 import config
 import db
 import maps
+import recorder
 import robot_api
 import robot_link
 import scheduler
@@ -40,6 +41,7 @@ class Services:
         self.trail = maps.Trail(data_dir)
         self.live_map = maps.LiveMap()
         self.live_map.on_change = lambda: self.link.set_map_version(self.live_map.version)
+        self.recorder = recorder.Recorder(data_dir, self.live_map)
         self.scheduler = scheduler.Scheduler(self.database, self.scheduled_start)
         self.last_logged = {}       # tipo di comando -> ultimo scritto nel registro, per quelli che si scrivono solo se cambiano
         self.load_selected_map()
@@ -61,10 +63,12 @@ class Services:
     def start(self):
         self.link.start()
         self.scheduler.start()
+        self.recorder.start()
 
     def stop(self):
         self.scheduler.stop()
         self.link.stop()
+        self.recorder.stop()
 
 
 def origin_allowed(origin):
