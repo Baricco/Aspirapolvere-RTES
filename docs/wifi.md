@@ -20,6 +20,7 @@ l'utente lo rivede, come per il resto dell'app (`docs/app.md`, sezione 1: valgon
 12. [Prove](#12-prove)
 13. [Decisioni sui punti aperti](#13-decisioni-del-2026-11-17-sui-punti-aperti)
 14. [Ordine di lavoro](#14-ordine-di-lavoro)
+15. [Prove sul robot del 2026-11-17](#15-prove-sul-robot-del-2026-11-17)
 
 ---
 
@@ -46,7 +47,7 @@ telefono si collega alla rete del robot).
 - Sulla rete del robot l'app parla in **HTTP** semplice (la rete è protetta da WPA2).
 - L'app sceglie da sola con chi parlare: robot Online → backend; robot Offline → prova il robot su `192.168.5.1`.
   Nessun interruttore.
-- Tempi proposti e accettati: rete del robot accesa dopo **2 minuti** senza rete; poi **5 minuti** di rete del robot
+- Tempi proposti e accettati: rete del robot accesa dopo **30 secondi** senza rete (erano 2 minuti, abbassati dall'utente il 2026-11-17 dopo le prove); poi **5 minuti** di rete del robot
   e **1 minuto** di nuovo tentativo sulla rete salvata, a ripetizione; scansione con la rete del robot accesa spegnendola
   per **5 s**. Tutti in `#define`.
 - La scansione può durare più dei 3 s di attesa dei comandi: per lei l'attesa del backend sale a 10 s. La password
@@ -233,8 +234,8 @@ Nuovo campo `wifi` nello stato JSON (`docs/app.md`, sezione 4.1), letto da `vacu
 | `tasks/vacuum/cloud/network.c` | campo `data` nell'esito |
 | `tasks/vacuum/cloud/robot_state.c` | campo `wifi` dello stato; `resting` a `rtes-wifi` |
 | `tasks/vacuum/cloud/wifi_link.c/.h` (nuovo) | il socket verso `rtes-wifi` |
-| `wifi/install/` → `install/` | `etc/init.d/rtes-wifi` (un'istanza sola: `rtes-wifi-run`) e `usr/sbin/rtes-wifi-run` (sezione 8.3). **Stanno in `wifi/install/` finché non sono provati sul robot**: così `./rtes.sh install` non può installare per sbaglio un Wi-Fi mai provato, che toglierebbe l'SSH. Dopo le prove in casa si spostano in `install/` |
-| `install/usr/sbin/rtes-wifi-dhcp`, `-event`, `-check` | **tolti** insieme allo spostamento: il loro lavoro passa in `rtes-wifi` (udhcpc avviato solo a collegamento fatto, riavviato se dopo un nuovo collegamento non arriva l'indirizzo) |
+| `install/etc/init.d/rtes-wifi`, `install/usr/sbin/rtes-wifi-run` | un'istanza sola (`rtes-wifi-run`, sezione 8.3), uscita nel registro (`logread -e rtes-wifi`). Tenuti in `wifi/install/` fino alle prove in casa del 2026-11-17, poi spostati qui; `./rtes.sh install` copia anche `/usr/sbin/rtes-wifi` e riavvia il Wi-Fi solo se è cambiato |
+| `install/usr/sbin/rtes-wifi-dhcp`, `-event`, `-check` | **tolti** (anche dal robot, con `./rtes.sh install`): il loro lavoro passa in `rtes-wifi` (udhcpc avviato solo a collegamento fatto, riavviato se dopo un nuovo collegamento non arriva l'indirizzo) |
 | `install/etc/wifi/hostapd-rtes.conf`, `dnsmasq-rtes.conf` | generati da `rtes-wifi` in `/tmp` all'avvio, con SSID e password della configurazione: niente file versionati con la password |
 | `Makefile`, `rtes.sh install` | compilazione per ARM con le stesse librerie di `vacuum` (libcurl, mbedTLS) e installazione |
 
@@ -333,7 +334,7 @@ Su Android due cose servono per il modo locale:
 2. scansione da `station` e da `ap` (il chip cerca reti con il punto di accesso acceso?);
 3. cambio con password giusta, password sbagliata, rete che non esiste, rete senza internet (hotspot del telefono con
    i dati spenti);
-4. router spento: rete del robot dopo 2 minuti, alternanza, ritorno da solo alla riaccensione;
+4. router spento: rete del robot dopo 30 secondi, alternanza, ritorno da solo alla riaccensione;
 5. cambio dalla rete del robot con il telefono;
 6. SSH su `192.168.5.1` con la rete del robot accesa;
 7. `rtes-wifi` che si chiude 3 volte: parte il `wifiManager` di fabbrica.
@@ -356,3 +357,22 @@ Su Android due cose servono per il modo locale:
 4. Revisione dell'utente.
 5. Prove sul robot in casa (sezione 12), poi `./rtes.sh install`.
 6. Aggiornamento di `docs/app.md` (sezioni 4.1, 5.3, 8.5, 8.6, 10.4) e di `docs/PIANO.md` (fase 6).
+
+## 15. Prove sul robot del 2026-11-17
+
+Prova a tempo (rtes-wifi in `/tmp`, 20 minuti al massimo, poi il Wi-Fi di prima di nuovo da solo), poi installazione:
+- cambi dalla rete di casa all'hotspot del telefono e ritorno: riusciti; password sbagliata: `wrong_password` e ritorno a
+  casa;
+- hotspot spento: rete del robot accesa, telefono su `Maurice-WiFi`, lista e cambio verso la rete di casa: riusciti;
+- difetti trovati e corretti:
+  - l'indirizzo dato dall'hotspot restava sull'interfaccia dopo lo spegnimento, e il robot si credeva collegato:
+    ora "collegato" vuol dire `wpa_state=COMPLETED` e un indirizzo (`radio_real.c`), e all'avvio si toglie l'indirizzo
+    lasciato dal Wi-Fi di prima;
+  - dopo un cambio la richiesta lunga dei comandi di `vacuum` restava appesa alla rete di prima fino a 40 s e la lista
+    dell'app non si ricaricava: ora `network.c` interrompe una richiesta quando l'indirizzo del Wi-Fi cambia; l'app
+    segue sempre modo e rete del robot, ricarica la lista a ogni cambio e ricontrolla con chi parlare ogni 3 s;
+  - l'uscita di `rtes-wifi` non arrivava al registro: `stdout`/`stderr` di procd;
+- attesa prima della rete del robot abbassata da 2 minuti a 30 s (`WIFI_CONNECT_TIMEOUT_S`, `WIFI_LOST_TIMEOUT_S`),
+  richiesta dell'utente;
+- installazione: riavvio del robot (rtes-wifi collegato 5 s dopo l'avvio) e ripiego (3 uscite di `rtes-wifi` →
+  `wifiManager` di fabbrica sulla rete di casa) riusciti.

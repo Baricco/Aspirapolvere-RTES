@@ -1,9 +1,0 @@
-#!/bin/sh
-# Istanza "dhcp" di /etc/init.d/rtes-wifi. Fa partire udhcpc solo quando wlan0 è collegato al router: udhcpc 1.24
-# avviato prima del collegamento riceve "Network is down", riapre il socket e non manda più richieste (visto
-# all'avvio il 2026-11-13).
-
-while [ "$(cat /sys/class/net/wlan0/operstate 2>/dev/null)" != up ]; do
-    sleep 1
-done
-exec /sbin/udhcpc -f -i wlan0 -S -T 10

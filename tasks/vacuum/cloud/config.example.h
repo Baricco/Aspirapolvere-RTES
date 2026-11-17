@@ -77,8 +77,8 @@
 #define WIFI_IFCONFIG_BIN           "/sbin/ifconfig"
 
 // tempi dei modi (docs/wifi.md, sezione 4)
-#define WIFI_CONNECT_TIMEOUT_S      120     // all'avvio (e dopo un cambio fallito) senza indirizzo per tanto: rete del robot
-#define WIFI_LOST_TIMEOUT_S         120     // rete persa durante il funzionamento per tanto: rete del robot
+#define WIFI_CONNECT_TIMEOUT_S      30      // all'avvio (e dopo un cambio fallito) senza indirizzo per tanto: rete del robot
+#define WIFI_LOST_TIMEOUT_S         30      // rete persa durante il funzionamento per tanto: rete del robot
 #define WIFI_AP_DURATION_S          300     // rete del robot accesa per tanto, poi si riprova la rete salvata
 #define WIFI_AP_RETRY_S             60      // tentativo sulla rete salvata fra due periodi della rete del robot
 #define WIFI_AP_SCAN_S              5       // con la rete del robot accesa, "Aggiorna" la spegne al massimo per tanto per cercare le reti

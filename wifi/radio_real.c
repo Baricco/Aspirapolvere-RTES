@@ -283,12 +283,16 @@ static bool real_get_link(wifi_link_t *link) {
         return false;
     }
 
+    // collegato = wpa_supplicant collegato a una rete E un indirizzo. Solo l'indirizzo non basta: quando la rete cade
+    // (hotspot spento, router spento) l'indirizzo dato dal router resta sull'interfaccia finché scade, anche un'ora
+    // (visto il 2026-11-17). Lo stato si chiede a ogni giro, così non dipende da un evento perso
     char value[128];
-    if (is_completed && supplicant_command(&commands, "STATUS", reply, sizeof reply) &&
-        supplicant_value(reply, "ssid", value, sizeof value)) {
-        decode_ssid(value, link->ssid, sizeof link->ssid);
-    }
-    if (is_completed && supplicant_command(&commands, "SIGNAL_POLL", reply, sizeof reply) &&
+    is_completed = supplicant_command(&commands, "STATUS", reply, sizeof reply) &&
+                   supplicant_value(reply, "wpa_state", value, sizeof value) && strcmp(value, "COMPLETED") == 0;
+    if (!is_completed) return false;
+
+    if (supplicant_value(reply, "ssid", value, sizeof value)) decode_ssid(value, link->ssid, sizeof link->ssid);
+    if (supplicant_command(&commands, "SIGNAL_POLL", reply, sizeof reply) &&
         supplicant_value(reply, "RSSI", value, sizeof value)) {
         link->signal_dbm = atoi(value);
     }
@@ -504,6 +508,9 @@ static bool real_init(void) {
 
     char *argv[] = { WIFI_IFCONFIG_BIN, WIFI_INTERFACE, "up", NULL };
     run_command(argv, COMMAND_TIMEOUT_MS);
+
+    // l'indirizzo lasciato dal Wi-Fi di prima farebbe credere per un attimo di essere già collegati
+    clear_address();
 
     if (!init_backend_check()) LOG("manca il token del robot: la prova del backend fallirà sempre");
     return true;

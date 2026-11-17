@@ -50,24 +50,28 @@ class _WifiScreenState extends ConsumerState<WifiScreen> with StateIntervalMixin
   late final PendingWifiChangeNotifier _pending = ref.read(pendingWifiChangeProvider.notifier);
 
   _Route _route = _Route.checking;
+  String? _wifiKey; // modo e rete dell'ultimo stato visto: quando cambiano si ricarica la lista
   WifiScan? _scan;
   bool _isScanning = false;
+  bool _isRescanWanted = false; // un'altra ricarica chiesta mentre ce n'era già una in corso
   String? _scanError;
   _Change? _change;
-  Timer? _pollTimer, _timeoutTimer;
-  bool _isPolling = false;
+  Timer? _checkTimer, _timeoutTimer;
+  bool _isChecking = false;
 
   WifiApi get _api => _route == _Route.local ? _local : BackendWifiApi(ref.read(apiClientProvider));
 
   @override
   void initState() {
     super.initState();
-    Future.microtask(_chooseRoute);
+    Future.microtask(_checkRoute);
+    // la schermata segue sempre lo stato vero: con chi parlare, la rete di adesso, l'esito di un cambio
+    _checkTimer = Timer.periodic(wifiRouteCheckInterval, (_) => _checkRoute());
   }
 
   @override
   void dispose() {
-    _pollTimer?.cancel();
+    _checkTimer?.cancel();
     _timeoutTimer?.cancel();
     // un cambio ancora senza esito: lo mostrerà la schermata principale quando arriva
     if (_change != null && _change!.result == null) {
@@ -81,43 +85,95 @@ class _WifiScreenState extends ConsumerState<WifiScreen> with StateIntervalMixin
 
   // --------------------------------------------------------------------------------------------- strada
 
-  Future<void> _chooseRoute() async {
-    if (!mounted) return;
-    setState(() => _route = _Route.checking);
-    if (ref.read(robotStateProvider)?.online == true) {
-      await WifiNetworkBinding.unbind();
-      _setRoute(_Route.backend);
-      return;
+  /// Decide con chi parlare: robot Online → backend; altrimenti il robot sulla sua rete, se il telefono ci è
+  /// collegato; altrimenti nessuno. Si ripete ogni wifiRouteCheckInterval e a ogni cambio di Online.
+  Future<void> _checkRoute() async {
+    if (_isChecking || !mounted) return;
+    _isChecking = true;
+    try {
+      final robot = ref.read(robotStateProvider);
+      if (robot?.online == true) {
+        if (_route != _Route.backend) {
+          await WifiNetworkBinding.unbind();
+          _setRoute(_Route.backend);
+        }
+        _noteWifi(robot!.wifi);
+        return;
+      }
+      final status = await _local.status();
+      if (!mounted) return;
+      // nel frattempo il robot potrebbe essere tornato online
+      if (ref.read(robotStateProvider)?.online == true) return;
+      if (status == null) {
+        _setRoute(_Route.none);
+        return;
+      }
+      _setRoute(_Route.local);
+      _finishChange(status); // un cambio fatto dalla rete del robot e fallito: il robot l'ha riaccesa
+      _noteWifi(status);
+    } finally {
+      _isChecking = false;
     }
-    final status = await _local.status();
-    if (!mounted) return;
-    _setRoute(status != null ? _Route.local : _Route.none);
   }
 
   void _setRoute(_Route route) {
-    if (!mounted) return;
+    if (!mounted || route == _route) return;
     setState(() {
       _route = route;
       _scan = null;
       _scanError = null;
+      _wifiKey = null;
     });
     if (route == _Route.backend || route == _Route.local) _loadScan();
+  }
+
+  /// Modo e rete del Wi-Fi: se cambiano (cambio di rete, rete persa, rete del robot accesa o spenta) la lista si
+  /// ricarica, così la rete "In uso" è sempre quella vera.
+  void _noteWifi(WifiStatus? status) {
+    if (status == null) return;
+    final key = '${status.mode}|${status.ssid}';
+    if (key == _wifiKey) return;
+    final isFirst = _wifiKey == null;
+    _wifiKey = key;
+    if (!isFirst) _loadScan();
   }
 
   // ------------------------------------------------------------------------------------------- scansione
 
   Future<void> _loadScan({bool refresh = false}) async {
+    if (_isScanning) {
+      _isRescanWanted = true;
+      return;
+    }
+    final route = _route;
     setState(() {
       _isScanning = true;
       _scanError = null;
     });
     try {
-      final scan = await _api.scan(refresh: refresh);
-      if (mounted) setState(() => _scan = scan);
-    } on ApiException catch (error) {
-      if (mounted) setState(() => _scanError = error.message.isNotEmpty ? error.message : 'Ricerca delle reti non riuscita.');
+      for (var attempt = 0;; attempt++) {
+        try {
+          final scan = await _api.scan(refresh: refresh);
+          if (mounted && _route == route) setState(() => _scan = scan);
+          return;
+        } on ApiException catch (error) {
+          // subito dopo un cambio di rete il robot può non rispondere ancora: si riprova
+          final isTemporary = error.status == null || error.status == 503 || error.status == 504;
+          if (!mounted || _route != route) return;
+          if (!isTemporary || attempt + 1 >= wifiScanAttempts) {
+            setState(() => _scanError = error.message.isNotEmpty ? error.message : 'Ricerca delle reti non riuscita.');
+            return;
+          }
+          await Future<void>.delayed(wifiScanRetryDelay);
+          if (!mounted || _route != route) return;
+        }
+      }
     } finally {
       if (mounted) setState(() => _isScanning = false);
+      if (mounted && _isRescanWanted) {
+        _isRescanWanted = false;
+        unawaited(_loadScan());
+      }
     }
   }
 
@@ -136,11 +192,6 @@ class _WifiScreenState extends ConsumerState<WifiScreen> with StateIntervalMixin
       _timeoutTimer = Timer(wifiChangeWait, () {
         if (mounted && _change?.number == number && _change?.result == null) setState(() => _change!.isTimedOut = true);
       });
-      // dalla rete del robot il telefono la perde: si cerca il robot di nuovo, sulla sua rete o dal backend
-      if (isFromRobotNetwork) {
-        _pollTimer?.cancel();
-        _pollTimer = Timer.periodic(wifiChangePollInterval, (_) => _pollChange());
-      }
     } on ApiException catch (error) {
       if (!error.isUnauthenticated) {
         ref.read(notificationProvider.notifier).show(
@@ -150,33 +201,14 @@ class _WifiScreenState extends ConsumerState<WifiScreen> with StateIntervalMixin
     }
   }
 
-  /// Esito arrivato (dallo stato del robot o da rtes-wifi sulla sua rete).
+  /// Esito arrivato (dallo stato del robot o da rtes-wifi sulla sua rete). La lista si ricarica comunque da
+  /// _noteWifi, perché un cambio riuscito cambia la rete in uso.
   void _finishChange(WifiStatus status) {
     final change = _change;
     if (change == null || change.result != null || status.change.number != change.number || !status.change.isDone) return;
     setState(() => change.result = status.change.result);
     _pending.clear();
-    _pollTimer?.cancel();
     _timeoutTimer?.cancel();
-  }
-
-  /// Durante un cambio chiesto dalla rete del robot: il backend (se il cambio è riuscito) o il robot sulla sua rete
-  /// (se è fallito e l'ha riaccesa).
-  Future<void> _pollChange() async {
-    if (_isPolling || _change == null || _change!.result != null) return;
-    _isPolling = true;
-    try {
-      final robot = ref.read(robotStateProvider);
-      final status = robot?.online == true ? robot!.wifi : await _local.status();
-      if (!mounted || status == null) return;
-      _finishChange(status);
-      if (_change?.result != null) {
-        await WifiNetworkBinding.unbind();
-        _setRoute(robot?.online == true ? _Route.backend : _Route.local);
-      }
-    } finally {
-      _isPolling = false;
-    }
   }
 
   // ---------------------------------------------------------------------------------------------- disegno
@@ -185,15 +217,19 @@ class _WifiScreenState extends ConsumerState<WifiScreen> with StateIntervalMixin
   Widget build(BuildContext context) {
     final robot = ref.watch(robotStateProvider);
     ref.listen<RobotState?>(robotStateProvider, (previous, next) {
-      final status = next?.wifi;
-      if (next?.online == true && status != null) _finishChange(status);
-      // il robot è tornato online mentre la schermata non trovava nessuno
-      if (next?.online == true && _route == _Route.none) _setRoute(_Route.backend);
+      if (next?.online == true) {
+        if (next!.wifi != null) _finishChange(next.wifi!);
+        if (_route == _Route.backend) _noteWifi(next.wifi);
+      }
+      // online o offline cambiato: si ricontrolla subito con chi parlare
+      if ((previous?.online == true) != (next?.online == true)) _checkRoute();
     });
 
     final canRefresh = !_isScanning && (_route == _Route.backend || _route == _Route.local);
     final isResting = _route != _Route.backend || robot?.navigationState == 'sleep';
     final isBusy = _change != null && _change!.result == null && !_change!.isTimedOut;
+    // dopo un cambio chiesto dalla rete del robot il telefono la perde: finché Maurice non si fa sentire si aspetta
+    final isWaitingRobot = isBusy && _change!.isFromRobotNetwork && _route != _Route.backend;
 
     return Scaffold(
       appBar: ScreenHeader(title: 'Rete Wi-Fi', trailing: [
@@ -205,12 +241,16 @@ class _WifiScreenState extends ConsumerState<WifiScreen> with StateIntervalMixin
         OnlineBadge(state: robot),
       ]),
       body: ListView(padding: const EdgeInsets.fromLTRB(screenPadding, 4, screenPadding, 24), children: [
-        _StatusPanel(route: _route, robot: robot, onRetry: _chooseRoute),
+        _StatusPanel(
+          route: isWaitingRobot ? _Route.checking : _route,
+          robot: robot,
+          onRetry: _checkRoute,
+        ),
         if (_change != null) ...[
           const SizedBox(height: 12),
           _ChangePanel(change: _change!, onClose: () => setState(() => _change = null)),
         ],
-        if (_route == _Route.backend || _route == _Route.local) ...[
+        if (!isWaitingRobot && (_route == _Route.backend || _route == _Route.local)) ...[
           const SizedBox(height: 12),
           _NetworksPanel(
             scan: _scan,
@@ -253,7 +293,7 @@ class _StatusPanel extends StatelessWidget {
           child: Row(children: [
             SizedBox(width: 22, height: 22, child: CircularProgressIndicator(strokeWidth: 2.5)),
             SizedBox(width: 14),
-            Text('Cerco Maurice…', style: TextStyle(fontSize: 16)),
+            Expanded(child: Text('Aspetto Maurice…', style: TextStyle(fontSize: 16))),
           ]),
         );
       case _Route.backend:
@@ -303,7 +343,7 @@ class _StatusPanel extends StatelessWidget {
             if (robotWifiPassword.isNotEmpty) _CopyRow(label: 'Password', value: robotWifiPassword),
             const SizedBox(height: 8),
             Text(
-                'Maurice accende la sua rete quando non riesce a collegarsi alla rete salvata per 2 minuti, e ogni '
+                'Maurice accende la sua rete quando non riesce a collegarsi alla rete salvata per 30 secondi, e ogni '
                 '5 minuti la spegne per 1 minuto per riprovare. Se Android avvisa che la rete non ha internet, scegli di '
                 'restare collegato.',
                 style: secondary),

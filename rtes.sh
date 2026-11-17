@@ -109,20 +109,26 @@ case "${1:-}" in
     # fabbrica, il cambio avviene al prossimo riavvio del robot (./rtes.sh ssh reboot).
     grep -q '"https://<server>"' tasks/vacuum/cloud/config.h &&
       echo "ATTENZIONE: in tasks/vacuum/cloud/config.h SERVER_URL è ancora l'esempio: il robot non troverà il server" >&2
-    make --no-print-directory build/arm/vacuum build/arm/spia
+    make --no-print-directory build/arm/vacuum build/arm/spia build/arm/rtes-wifi
     tmp=$(mktemp -d)
     trap 'rm -rf "$tmp"' EXIT
     mkdir -p "$tmp/files${DIR_INSTALL}/bin"
     cp -a install/. "$tmp/files/"
     cp build/arm/vacuum build/arm/spia "$tmp/files${DIR_INSTALL}/bin/"
+    # rtes-wifi sta nella partizione principale: il Wi-Fi parte presto (START=21), prima di /mnt/UDISK (docs/wifi.md 8.3)
+    mkdir -p "$tmp/files/usr/sbin"
+    cp build/arm/rtes-wifi "$tmp/files/usr/sbin/"
     tar -C "$tmp/files" -cf - . | robot "rm -rf /tmp/rtes-install && mkdir -p /tmp/rtes-install && tar -C /tmp/rtes-install -xf - && cd /tmp/rtes-install &&
       find . -type f | while read -r f; do
         dest=\${f#.}
         cmp -s \"\$f\" \"\$dest\" && continue
         mkdir -p \"\$(dirname \"\$dest\")\"
         cp -p \"\$f\" \"\$dest.rtes-tmp\" && mv \"\$dest.rtes-tmp\" \"\$dest\" && echo \"  \$dest\"
+        case \"\$dest\" in */rtes-wifi*) touch /tmp/rtes-wifi-changed ;; esac
       done
       cd / && rm -rf /tmp/rtes-install
+      # gli script del Wi-Fi di prima (sostituiti da rtes-wifi il 2026-11-17)
+      rm -f /usr/sbin/rtes-wifi-dhcp /usr/sbin/rtes-wifi-event /usr/sbin/rtes-wifi-check
       sed -i 's/^auto_upgrade_status=.*/auto_upgrade_status=0/' /mnt/UDISK/config/device_config.ini
       /etc/init.d/robotManager disable
       /etc/init.d/rtes enable
@@ -131,6 +137,13 @@ case "${1:-}" in
       else
         /etc/init.d/rtes restart; sleep 3
         echo \"== installato e riavviato: vacuum=\$(pidof vacuum) custode=\$(pidof spia)\"
+      fi
+      # il Wi-Fi si riavvia solo se non gira già rtes-wifi (passaggio dagli script di prima) o se è cambiato: staccato
+      # da questa sessione SSH, che cade per qualche secondo
+      if ! pidof rtes-wifi >/dev/null || [ -f /tmp/rtes-wifi-changed ]; then
+        rm -f /tmp/rtes-wifi-changed
+        echo '== riavvio il Wi-Fi (rtes-wifi): SSH di nuovo raggiungibile fra qualche secondo'
+        start-stop-daemon -S -b -m -p /tmp/rtes-wifi-restart.pid -x /etc/init.d/rtes-wifi -- restart
       fi" ;;
   uninstall) echo "Non previsto: dal 2026-11-13 non si torna allo stack di fabbrica (docs/PIANO.md, fase 6). Per fermare il programma: ./rtes.sh ssh /etc/init.d/rtes stop" >&2; exit 2 ;;
   ssh)       shift; exec "$SSH_ROBOT" "$@" ;;

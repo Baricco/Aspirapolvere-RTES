@@ -81,8 +81,12 @@ const Duration wifiScanTimeout = Duration(seconds: 40);
 /// Dopo un cambio di rete, se il robot non torna online entro questo tempo l'app lo dice (docs/wifi.md, sezione 13).
 const Duration wifiChangeWait = Duration(minutes: 3);
 
-/// Durante un cambio fatto dalla rete del robot, ogni quanto si prova a ritrovarlo (sulla sua rete o dal backend).
-const Duration wifiChangePollInterval = Duration(seconds: 3);
-
 /// Soglie delle tacche del segnale, in dBm: da 4 tacche (sopra la prima) a 1.
 const List<int> wifiSignalSteps = [-55, -67, -78];
+
+/// La schermata del Wi-Fi ricontrolla ogni tanto con chi parlare (backend o robot sulla sua rete) e lo stato del robot.
+const Duration wifiRouteCheckInterval = Duration(seconds: 3);
+
+/// Tentativi di una ricarica della lista quando il robot non risponde (subito dopo un cambio di rete), e attesa fra due.
+const int wifiScanAttempts = 4;
+const Duration wifiScanRetryDelay = Duration(seconds: 5);

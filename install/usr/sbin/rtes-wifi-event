@@ -1,9 +1,0 @@
-#!/bin/sh
-# Chiamato da wpa_cli (istanza "events" di /etc/init.d/rtes-wifi) a ogni evento di wpa_supplicant: $1 interfaccia,
-# $2 evento. A un nuovo collegamento senza indirizzo (per esempio dopo un riavvio del router) chiude udhcpc, che
-# potrebbe essersi bloccato; procd lo fa ripartire con rtes-wifi-dhcp.
-
-[ "$2" = CONNECTED ] || exit 0
-/sbin/ip -4 addr show "$1" | grep -q inet && exit 0
-logger -t rtes-wifi "$1 collegato senza indirizzo: riavvio udhcpc"
-killall udhcpc

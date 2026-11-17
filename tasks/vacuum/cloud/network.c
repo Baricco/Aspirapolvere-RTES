@@ -1,5 +1,8 @@
 #define _GNU_SOURCE   // per pthread_setaffinity_np
+#include <arpa/inet.h>
 #include <ctype.h>
+#include <net/if.h>
+#include <netinet/in.h>
 #include <pthread.h>
 #include <sched.h>
 #include <signal.h>
@@ -7,7 +10,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/ioctl.h>
 #include <sys/resource.h>
+#include <sys/socket.h>
 #include <sys/syscall.h>
 #include <unistd.h>
 
@@ -29,9 +34,13 @@
 #define AUTH_HEADER_MAX     (TOKEN_MAX_LENGTH + 32)
 #define RESPONSE_MAX_BYTES  MAP_DOWNLOAD_MAX_BYTES  // una risposta più grande di così si rifiuta
 
+#define ADDRESS_CHECK_INTERVAL  RT_MS(500)  // durante una richiesta, ogni quanto si controlla l'indirizzo del Wi-Fi
+
 // una connessione al server: un handle di libcurl riusato, così la connessione resta aperta (niente handshake TLS a ogni richiesta)
 struct http_connection {
     CURL *curl;
+    int64_t last_address_check_t;       // ultimo controllo dell'indirizzo del Wi-Fi durante la richiesta in corso
+    char wifi_ip[INET_ADDRSTRLEN];      // indirizzo del Wi-Fi quando la connessione lo usava ("" = mai visto uguale)
     struct curl_slist *json_headers;        // intestazioni delle richieste con il corpo JSON
     struct curl_slist *bytes_headers;       // intestazioni delle richieste con il corpo a byte (mappe)
 };
@@ -100,6 +109,55 @@ static size_t receive_response(char *data, size_t size, size_t count, void *cont
     return total;
 }
 
+// funzione helper che legge l'indirizzo IPv4 di WIFI_INTERFACE. Ritorna false se non c'è (o se l'interfaccia non
+// esiste, per esempio sul PC)
+static bool read_wifi_address(char *ip, size_t size) {
+
+    int fd = socket(AF_INET, SOCK_DGRAM | SOCK_CLOEXEC, 0);
+    if (fd < 0) return false;
+
+    struct ifreq request;
+    memset(&request, 0, sizeof request);
+    snprintf(request.ifr_name, sizeof request.ifr_name, "%s", WIFI_INTERFACE);
+    bool ok = ioctl(fd, SIOCGIFADDR, &request) == 0;
+    close(fd);
+
+    if (ok) inet_ntop(AF_INET, &((struct sockaddr_in *)&request.ifr_addr)->sin_addr, ip, (socklen_t)size);
+    return ok;
+}
+
+// funzione che libcurl chiama durante una richiesta (anche ferma ad aspettare). Dopo un cambio di rete Wi-Fi
+// (docs/wifi.md) la connessione è legata all'indirizzo di prima e la risposta non arriverebbe più: la richiesta lunga
+// dei comandi resterebbe appesa fino a COMMANDS_REQUEST_TIMEOUT_S e il backend crederebbe il robot online senza che
+// nessuno prenda i comandi. Se l'indirizzo della connessione non è più quello del Wi-Fi la richiesta si interrompe e
+// si riprova subito dalla rete nuova
+static int abort_if_address_changed(void *context, curl_off_t dltotal, curl_off_t dlnow, curl_off_t ultotal, curl_off_t ulnow) {
+
+    (void)dltotal; (void)dlnow; (void)ultotal; (void)ulnow;
+    http_connection_t *connection = context;
+
+    int64_t now = rt_now();
+    if (now - connection->last_address_check_t < ADDRESS_CHECK_INTERVAL) return 0;
+    connection->last_address_check_t = now;
+
+    char *connection_ip = NULL;
+    char wifi_ip[INET_ADDRSTRLEN];
+    if (curl_easy_getinfo(connection->curl, CURLINFO_LOCAL_IP, &connection_ip) != CURLE_OK || connection_ip == NULL ||
+        connection_ip[0] == '\0' || !read_wifi_address(wifi_ip, sizeof wifi_ip)) {
+        return 0;   // connessione non ancora aperta, oppure niente Wi-Fi da controllare (PC)
+    }
+    // la connessione usa l'indirizzo del Wi-Fi: lo si ricorda. Se usa un'altra interfaccia (PC) non si fa niente
+    if (strcmp(connection_ip, wifi_ip) == 0) {
+        snprintf(connection->wifi_ip, sizeof connection->wifi_ip, "%s", wifi_ip);
+        return 0;
+    }
+    if (strcmp(connection_ip, connection->wifi_ip) != 0) return 0;
+    connection->wifi_ip[0] = '\0';
+
+    fprintf(stderr, "rete: indirizzo cambiato (%s -> %s): interrompo la richiesta e riprovo\n", connection_ip, wifi_ip);
+    return 1;
+}
+
 // funzione helper che apre una connessione (senza ancora collegarsi: lo fa la prima richiesta)
 static http_connection_t *open_connection(void) {
 
@@ -154,6 +212,12 @@ long send_http_request(http_connection_t *connection, const char *method, const 
     curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, (long)CONNECT_TIMEOUT_S);
     curl_easy_setopt(curl, CURLOPT_TIMEOUT, timeout_s);
     curl_easy_setopt(curl, CURLOPT_TCP_KEEPALIVE, 1L);
+
+    // dopo un cambio di rete Wi-Fi la richiesta si interrompe invece di restare appesa alla rete di prima
+    connection->last_address_check_t = rt_now();
+    curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 0L);
+    curl_easy_setopt(curl, CURLOPT_XFERINFOFUNCTION, abort_if_address_changed);
+    curl_easy_setopt(curl, CURLOPT_XFERINFODATA, connection);
 
     if (body != NULL || strcmp(method, "GET") != 0) {
         curl_easy_setopt(curl, CURLOPT_POSTFIELDS, body != NULL ? (const char *)body : "");
