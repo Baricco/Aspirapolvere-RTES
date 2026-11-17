@@ -18,6 +18,7 @@ typedef struct {
     const char *reason;                         // motivo del rifiuto (per esempio "busy"), NULL se eseguito
     char message[APP_COMMAND_MESSAGE_MAX];      // testo per l'utente, vuoto se eseguito
     bool is_restart_needed;                     // true dopo un cambio di mappa: mandato l'esito, il programma va riavviato
+    char *data;                                 // dati della risposta in JSON (wifi_scan: le reti), da liberare con free; NULL se non ce ne sono
 } app_command_result_t;
 
 // funzione che scarica la mappa map_id dal server nel file path. Ritorna true se ci riesce.

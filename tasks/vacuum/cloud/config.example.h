@@ -54,4 +54,54 @@
 #define COMMANDS_FIFO_MODE          0600                        // permessi del file speciale: legge e scrive solo il proprietario
 #define COMMAND_LINE_MAX            2048                        // lunghezza massima di una riga di comando
 
+// --- Wi-Fi del robot: rtes-wifi (docs/wifi.md) ---
+#define PATH_DEVICE_PING            "/api/device/ping"              // prova del backend dopo un cambio di rete
+#define WIFI_AP_SSID                "Maurice-WiFi"                  // rete del robot
+#define WIFI_AP_PASSWORD            "<password>"                  // password della rete del robot (WPA2, 8-63 caratteri)
+#define WIFI_AP_ADDRESS             "192.168.5.1"                   // indirizzo del robot sulla sua rete
+#define WIFI_AP_NETMASK             "255.255.255.0"
+#define WIFI_AP_DHCP_FIRST          "192.168.5.10"                  // indirizzi dati ai telefoni
+#define WIFI_AP_DHCP_LAST           "192.168.5.50"
+#define WIFI_AP_CHANNEL             6
+#define WIFI_HTTP_PORT              80                              // server HTTP locale, solo con la rete del robot accesa
+#define WIFI_INTERFACE              "wlan0"
+#define WIFI_SUPPLICANT_CONF        "/etc/wifi/wpa_supplicant.conf" // la rete salvata
+#define WIFI_SUPPLICANT_CTRL_DIR    "/etc/wifi/sockets"             // socket di controllo di wpa_supplicant
+#define WIFI_RUN_DIR                "/tmp/rtes-wifi"                // file di lavoro di rtes-wifi (configurazioni generate, socket)
+#define WIFI_SOCKET_PATH            "/tmp/rtes-wifi.sock"           // socket fra il programma dei task e rtes-wifi
+#define WIFI_SOCKET_ENV             "RTES_WIFI_SOCKET"              // sul PC: variabile d'ambiente con il percorso del socket
+#define WIFI_SUPPLICANT_BIN         "/usr/sbin/wpa_supplicant"
+#define WIFI_UDHCPC_BIN             "/sbin/udhcpc"
+#define WIFI_HOSTAPD_BIN            "/usr/sbin/hostapd"
+#define WIFI_DNSMASQ_BIN            "/usr/sbin/dnsmasq"
+#define WIFI_IFCONFIG_BIN           "/sbin/ifconfig"
+
+// tempi dei modi (docs/wifi.md, sezione 4)
+#define WIFI_CONNECT_TIMEOUT_S      120     // all'avvio (e dopo un cambio fallito) senza indirizzo per tanto: rete del robot
+#define WIFI_LOST_TIMEOUT_S         120     // rete persa durante il funzionamento per tanto: rete del robot
+#define WIFI_AP_DURATION_S          300     // rete del robot accesa per tanto, poi si riprova la rete salvata
+#define WIFI_AP_RETRY_S             60      // tentativo sulla rete salvata fra due periodi della rete del robot
+#define WIFI_AP_SCAN_S              5       // con la rete del robot accesa, "Aggiorna" la spegne al massimo per tanto per cercare le reti
+
+// tempi del cambio di rete e delle scansioni (docs/wifi.md, sezioni 5 e 6)
+#define WIFI_SCAN_TIMEOUT_S         8       // attesa massima dei risultati di una scansione
+#define WIFI_ASSOC_TIMEOUT_S        30      // attesa massima del collegamento alla rete nuova
+#define WIFI_DHCP_TIMEOUT_S         20      // attesa massima dell'indirizzo dalla rete nuova
+#define WIFI_BACKEND_TRIES          2       // tentativi della prova del backend
+#define WIFI_BACKEND_TIMEOUT_S      10      // tempo massimo di ogni tentativo
+#define WIFI_PING_ADDRESS           "8.8.8.8"
+#define WIFI_PING_TRIES             3
+#define WIFI_PING_TIMEOUT_S         2
+#define WIFI_SCAN_MAX_NETWORKS      32      // reti al massimo nella lista
+#define WIFI_RESTING_STALE_S        30      // senza notizie dal programma dei task da tanto, il robot conta come a riposo
+#define WIFI_SCAN_REPLY_WAIT_S      30      // attesa massima della risposta a una scansione dentro rtes-wifi
+#define WIFI_CONNECT_REPLY_WAIT_S   5       // attesa massima della risposta (accettato o no) a un cambio
+
+// lato del programma dei task (cloud/wifi_link.c, docs/wifi.md sezione 7)
+#define WIFI_SCAN_COMMAND_TIMEOUT_MS    9000            // attesa massima di una scansione (il backend aspetta l'esito 10 s)
+#define WIFI_CONNECT_COMMAND_TIMEOUT_MS 6000            // attesa massima della risposta a un cambio (accettato o no)
+#define WIFI_STATUS_INTERVAL            RT_S(2)         // ogni quanto il thread dello stato chiede lo stato del Wi-Fi
+#define WIFI_STATUS_TIMEOUT_MS          300             // attesa massima della risposta allo stato del Wi-Fi
+#define WIFI_RESTING_INTERVAL           RT_S(10)        // il riposo si manda a rtes-wifi a ogni cambio e almeno ogni tanto
+
 #endif

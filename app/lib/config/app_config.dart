@@ -60,3 +60,29 @@ const double joystickDeadZone = 0.12;
 
 /// Passi in cui si arrotondano v e omega: un dito fermo non manda comandi sempre diversi.
 const double joystickSpeedStep = 0.01;
+
+// --- rete Wi-Fi del robot (docs/wifi.md, sezione 10) ---
+
+/// Nome della rete che il robot accende quando non trova la sua (WIFI_AP_SSID in tasks/vacuum/cloud/config.h).
+const String robotWifiSsid = String.fromEnvironment('ROBOT_WIFI_SSID', defaultValue: 'Maurice-WiFi');
+
+/// Password di quella rete: privata, solo in config.json (WIFI_AP_PASSWORD sul robot).
+const String robotWifiPassword = String.fromEnvironment('ROBOT_WIFI_PASSWORD');
+
+/// Indirizzo del robot sulla sua rete: lì risponde rtes-wifi, in HTTP semplice (la rete è protetta da WPA2).
+const String robotLocalUrl = 'http://192.168.5.1';
+
+/// Attesa massima della risposta del robot sulla sua rete quando si controlla se il telefono ci è collegato.
+const Duration robotLocalProbeTimeout = Duration(seconds: 2);
+
+/// Attesa massima di una scansione: dal backend fino a 10 s, sulla rete del robot con "Aggiorna" anche di più.
+const Duration wifiScanTimeout = Duration(seconds: 40);
+
+/// Dopo un cambio di rete, se il robot non torna online entro questo tempo l'app lo dice (docs/wifi.md, sezione 13).
+const Duration wifiChangeWait = Duration(minutes: 3);
+
+/// Durante un cambio fatto dalla rete del robot, ogni quanto si prova a ritrovarlo (sulla sua rete o dal backend).
+const Duration wifiChangePollInterval = Duration(seconds: 3);
+
+/// Soglie delle tacche del segnale, in dBm: da 4 tacche (sopra la prima) a 1.
+const List<int> wifiSignalSteps = [-55, -67, -78];

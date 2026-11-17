@@ -101,6 +101,20 @@ build/arm/vacuum: $(VACUUM_SRC) $(VACUUM_HDR) $(TASK_LIB) $(TASK_HDR) $(NETLIBS)
 	$(CC_ARM) $(CFLAGS_ARM) -I. -I$(NETLIBS)/include -o $@ $(VACUUM_SRC) $(TASK_LIB) -lm \
 		-L$(NETLIBS)/lib -lcurl -lmbedtls -lmbedx509 -lmbedcrypto $(LDFLAGS_ARM)
 
+# Il Wi-Fi del robot (wifi/, docs/wifi.md): programma separato da vacuum, con la stessa configurazione privata
+# (cloud/config.h) e le stesse librerie di rete. Sul PC si prova con --simulate.
+WIFI_SRC = $(wildcard wifi/*.c) third_party/cjson/cJSON.c
+WIFI_HDR = $(wildcard wifi/*.h) third_party/cjson/cJSON.h tasks/vacuum/cloud/server_roots.h
+
+build/host/rtes-wifi: $(WIFI_SRC) $(WIFI_HDR) | $(CLOUD_CONFIG)
+	@mkdir -p $(@D)
+	$(CC_HOST) $(CFLAGS_HOST) -I. -o $@ $(WIFI_SRC) -lcurl
+
+build/arm/rtes-wifi: $(WIFI_SRC) $(WIFI_HDR) $(NETLIBS)/lib/libcurl.a | $(CLOUD_CONFIG)
+	@mkdir -p $(@D)
+	$(CC_ARM) $(CFLAGS_ARM) -I. -I$(NETLIBS)/include -o $@ $(WIFI_SRC) \
+		-L$(NETLIBS)/lib -lcurl -lmbedtls -lmbedx509 -lmbedcrypto $(LDFLAGS_ARM)
+
 # la configurazione privata robot-server non è versionata: va copiata dall'esempio
 $(CLOUD_CONFIG):
 	@echo "manca $(CLOUD_CONFIG): copialo da tasks/vacuum/cloud/config.example.h e metti i valori veri (git lo ignora)" >&2; exit 1
@@ -155,7 +169,7 @@ build/arm/test_%: test/test_%.c $(TEST_LIB) $(TEST_HDR)
 # resto del programma (task, driver, rete) sostituito da funzioni finte dentro il test.
 TEST_APP = test_nav_command test_live_map test_app_commands
 TEST_LIVE_MAP_SRC = tasks/vacuum/cloud/live_map.c tasks/vacuum/aperiodic.c
-TEST_APP_COMMANDS_SRC = tasks/vacuum/cloud/app_commands.c third_party/cjson/cJSON.c
+TEST_APP_COMMANDS_SRC = tasks/vacuum/cloud/app_commands.c tasks/vacuum/cloud/wifi_link.c third_party/cjson/cJSON.c
 
 build/host/test_live_map: test/test_live_map.c $(TEST_LIVE_MAP_SRC) $(VACUUM_HDR) $(TEST_LIB) $(TEST_HDR) | $(CLOUD_CONFIG)
 	@mkdir -p $(@D)

@@ -1,8 +1,12 @@
 /* Test dell'interprete dei comandi JSON dell'app (tasks/vacuum/cloud/app_commands.c, docs/app.md sezione 9.4).
  * Navigazione, mappatura, task aperiodico e driver sono finti e stanno qui sotto: il test controlla cosa chiede
  * l'interprete a ognuno e quale esito ritorna all'app. */
+#include <pthread.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/socket.h>
+#include <sys/un.h>
+#include <unistd.h>
 
 #include "test.h"
 #include "../driver/driver.h"
@@ -377,6 +381,85 @@ static void navigazione_che_non_risponde(void)
 	mappatura_applica = true;
 }
 
+/* rtes-wifi finto: un socket Unix che risponde a ogni richiesta con la risposta preparata, e ricorda l'ultima richiesta */
+#define SOCKET_WIFI "build/host/test-rtes-wifi.sock"
+static char richiesta_wifi[1024];
+static const char *risposta_wifi;
+
+static void *rtes_wifi_finto(void *arg)
+{
+	int ascolto = *(int *)arg;
+	for (;;) {
+		int fd = accept(ascolto, NULL, NULL);
+		if (fd < 0) return NULL;
+		ssize_t n = recv(fd, richiesta_wifi, sizeof richiesta_wifi - 1, 0);
+		richiesta_wifi[n > 0 ? n : 0] = '\0';
+		if (send(fd, risposta_wifi, strlen(risposta_wifi), 0) < 0) {}
+		close(fd);
+	}
+}
+
+static void wifi(void)
+{
+	/* senza rtes-wifi: rifiuto con il motivo suo */
+	setenv("RTES_WIFI_SOCKET", SOCKET_WIFI, 1);
+	unlink(SOCKET_WIFI);
+	app_command_result_t result = esegui("{\"type\":\"wifi_scan\"}");
+	CONTROLLA(rifiutato(result, "wifi_unreachable") && result.data == NULL);
+
+	static int ascolto;
+	ascolto = socket(AF_UNIX, SOCK_STREAM, 0);
+	struct sockaddr_un indirizzo = { .sun_family = AF_UNIX };
+	snprintf(indirizzo.sun_path, sizeof indirizzo.sun_path, "%s", SOCKET_WIFI);
+	CONTROLLA(bind(ascolto, (struct sockaddr *)&indirizzo, sizeof indirizzo) == 0 && listen(ascolto, 4) == 0);
+	pthread_t thread;
+	pthread_create(&thread, NULL, rtes_wifi_finto, &ascolto);
+
+	/* scansione: le reti arrivano nei dati dell'esito */
+	risposta_wifi = "{\"ok\":true,\"data\":{\"scanned_at\":5,\"networks\":[{\"ssid\":\"Casa\",\"signal_dbm\":-50,\"security\":\"wpa\",\"in_use\":true}]}}\n";
+	result = esegui("{\"id\":3,\"type\":\"wifi_scan\",\"refresh\":true}");
+	CONTROLLA(result.ok && result.data != NULL && strstr(result.data, "\"Casa\"") != NULL);
+	CONTROLLA(strcmp(richiesta_wifi, "{\"type\":\"scan\",\"refresh\":true}\n") == 0);
+	free(result.data);
+
+	/* cambio: i campi passano così come sono */
+	risposta_wifi = "{\"ok\":true,\"data\":{\"change_number\":4}}\n";
+	result = esegui("{\"type\":\"wifi_connect\",\"ssid\":\"Caffè ☕\",\"security\":\"wpa\",\"password\":\"pass \\\"word\"}");
+	CONTROLLA(result.ok && result.data != NULL && strstr(result.data, "\"change_number\":4") != NULL);
+	CONTROLLA(strstr(richiesta_wifi, "\"type\":\"connect\",\"ssid\":\"Caffè ☕\",\"security\":\"wpa\",\"password\":\"pass \\\"word\"") != NULL);
+	free(result.data);
+
+	/* rete aperta senza password: password vuota */
+	result = esegui("{\"type\":\"wifi_connect\",\"ssid\":\"Ospiti\",\"security\":\"open\"}");
+	CONTROLLA(result.ok && strstr(richiesta_wifi, "\"password\":\"\"") != NULL);
+	free(result.data);
+
+	/* rifiuto di rtes-wifi: motivo e testo suoi */
+	risposta_wifi = "{\"ok\":false,\"reason\":\"not_resting\",\"message\":\"Maurice deve essere a riposo\"}\n";
+	result = esegui("{\"type\":\"wifi_connect\",\"ssid\":\"Casa\",\"security\":\"wpa\",\"password\":\"12345678\"}");
+	CONTROLLA(!result.ok && strcmp(result.reason, "not_resting") == 0 && strcmp(result.message, "Maurice deve essere a riposo") == 0);
+
+	/* motivo sconosciuto: comando non valido, con il testo di rtes-wifi */
+	risposta_wifi = "{\"ok\":false,\"reason\":\"strano\",\"message\":\"boh\"}\n";
+	result = esegui("{\"type\":\"wifi_scan\"}");
+	CONTROLLA(!result.ok && strcmp(result.reason, "invalid_command") == 0 && strcmp(result.message, "boh") == 0);
+
+	/* parametri mancanti: non si chiede niente a rtes-wifi */
+	richiesta_wifi[0] = '\0';
+	result = esegui("{\"type\":\"wifi_connect\",\"security\":\"wpa\"}");
+	CONTROLLA(rifiutato(result, "invalid_command") && richiesta_wifi[0] == '\0');
+	result = esegui("{\"type\":\"wifi_connect\",\"ssid\":\"Casa\",\"security\":\"wpa\",\"password\":12}");
+	CONTROLLA(rifiutato(result, "invalid_command") && richiesta_wifi[0] == '\0');
+
+	/* risposta che non è JSON */
+	risposta_wifi = "boh\n";
+	result = esegui("{\"type\":\"wifi_scan\"}");
+	CONTROLLA(rifiutato(result, "wifi_unreachable"));
+
+	close(ascolto);
+	unlink(SOCKET_WIFI);
+}
+
 int main(void)
 {
 	stato_driver.phase = DRV_READY;
@@ -389,5 +472,6 @@ int main(void)
 	ESEGUI(cambio_di_mappa);
 	ESEGUI(comandi_non_validi);
 	ESEGUI(navigazione_che_non_risponde);
+	ESEGUI(wifi);
 	return TEST_FINE();
 }

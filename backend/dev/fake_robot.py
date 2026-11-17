@@ -3,8 +3,9 @@
 
 Parla con il backend come il programma vero: richiesta lunga dei comandi, esiti, stato, mappa dal vivo a differenze,
 mappa salvata. Dentro c'è un modello molto semplice: una stanza rettangolare con la base nell'origine, una pulizia a
-strisce, il telecomando, le zone, il cambio di mappa con il "riavvio". Non c'è niente di real-time: serve solo a far
-vedere all'app dati verosimili.
+strisce, il telecomando, le zone, il cambio di mappa con il "riavvio", il cambio della rete Wi-Fi (docs/wifi.md: il
+robot sparisce per WIFI_SWITCH_S secondi, poi torna con l'esito; reti e password in WIFI_NETWORKS). Non c'è niente di
+real-time: serve solo a far vedere all'app dati verosimili.
 
 Uso, dalla cartella backend/:
     .venv/bin/python dev/fake_robot.py --token-file FILE [--server http://127.0.0.1:5000] [--ca certificato.pem]
@@ -54,6 +55,18 @@ BATTERY_DRAIN_PER_S = 0.01
 BATTERY_CHARGE_PER_S = 0.05
 BATTERY_LOW_PERCENT = 15
 
+# Wi-Fi finto (docs/wifi.md): nome, sicurezza, password, segnale, esito del cambio con la password giusta
+WIFI_SWITCH_S = 6.0                 # quanto il robot resta offline durante un cambio riuscito
+WIFI_BACKEND_DOWN_S = 40.0          # con "backend_unreachable" il robot torna online solo dopo questo tempo
+WIFI_NETWORKS = [
+    ("Casa", "wpa", "password-casa", -48, "ok"),
+    ("Vicini 2.4", "wpa", "segreta123", -77, "ok"),
+    ("Ufficio", "wpa", "password-ufficio", -60, "backend_unreachable"),
+    ("Ospiti", "open", "", -66, "internet_unreachable"),
+    ("Senza DHCP", "wpa", "password-dhcp", -64, "no_address"),
+    ("Caffè ☕", "open", "", -82, "ok"),
+]
+
 MESSAGES = {
     "busy": "Il robot sta già facendo una missione.",
     "not_running": "Non c'è una missione in corso.",
@@ -67,6 +80,8 @@ MESSAGES = {
     "not_resting": "Il robot deve essere a riposo sulla base.",
     "download_failed": "Non sono riuscito a scaricare la mappa.",
     "unknown_command": "Comando sconosciuto.",
+    "wifi_busy": "Maurice sta già cambiando rete o cercando le reti",
+    "invalid_password": "La password deve avere da 8 a 63 caratteri",
 }
 
 
@@ -126,6 +141,8 @@ class FakeRobot:
         self.paused_state = "follow_path"   # stato da riprendere dopo una pausa
         self.restart_pending = False        # un cambio di mappa chiede il "riavvio"
         self.important_change = True        # c'è qualcosa da mandare subito
+        self.wifi = {"mode": "station", "ssid": "Casa", "signal_dbm": -48, "ip": "192.168.1.40",
+                     "change": {"number": 0, "state": "none", "result": "none"}}
 
         # mappa
         side = config.FINE_MAP_CELL_NUMBER
@@ -409,6 +426,7 @@ class FakeRobot:
                                         "suction": 600 if suction else 14}},
             "tasks": [{"name": name, "deadline_misses": 0, "missed_activations": 0}
                       for name in ("movement", "safety", "lidar", "navigation", "mapping")],
+            "wifi": self.wifi,
         }
 
     def state_loop(self):
@@ -539,9 +557,52 @@ class FakeRobot:
             elif os.path.exists(self.map_path):
                 os.remove(self.map_path)
             self.restart_pending = True
+        elif kind == "wifi_scan":
+            return self.wifi_scan()
+        elif kind == "wifi_connect":
+            return self.wifi_connect(command)
         else:
             return self.refuse("unknown_command")
         return ok
+
+    def wifi_scan(self):
+        networks = [{"ssid": ssid, "signal_dbm": signal, "security": security, "in_use": ssid == self.wifi["ssid"]}
+                    for ssid, security, _, signal, _ in WIFI_NETWORKS]
+        return {"ok": True, "data": {"scanned_at": int(time.time()), "networks": networks}}
+
+    def wifi_connect(self, command):
+        """Cambio di rete finto: risponde subito, sparisce, poi torna con l'esito (come rtes-wifi, docs/wifi.md 5)."""
+        if self.state != "sleep":
+            return self.refuse("not_resting")
+        if self.wifi["change"]["state"] == "testing":
+            return self.refuse("wifi_busy")
+        ssid, password = command.get("ssid", ""), command.get("password", "")
+        if command.get("security") == "wpa" and not 8 <= len(password) <= 63:
+            return self.refuse("invalid_password")
+        known = {network[0]: network for network in WIFI_NETWORKS}
+        if ssid not in known:
+            result = "not_found"
+        elif known[ssid][1] == "wpa" and known[ssid][2] != password:
+            result = "wrong_password"
+        else:
+            result = known[ssid][4]
+        number = self.wifi["change"]["number"] + 1
+        self.wifi["change"] = {"number": number, "ssid": ssid, "state": "testing", "result": "none"}
+        threading.Thread(target=self.finish_wifi_change, args=(ssid, result), daemon=True).start()
+        return {"ok": True, "data": {"change_number": number}}
+
+    def finish_wifi_change(self, ssid, result):
+        is_kept = result in ("ok", "backend_unreachable")
+        offline_s = WIFI_BACKEND_DOWN_S if result == "backend_unreachable" else WIFI_SWITCH_S
+        print(f"cambio di rete verso «{ssid}»: {result}, offline per {offline_s:.0f} s", flush=True)
+        self.offline_until = time.monotonic() + offline_s
+        time.sleep(offline_s)
+        with self.lock:
+            if is_kept:
+                signal = next(network[3] for network in WIFI_NETWORKS if network[0] == ssid)
+                self.wifi.update(ssid=ssid, signal_dbm=signal)
+            self.wifi["change"] = dict(self.wifi["change"], state="done", result=result, time=int(time.time()))
+            self.important_change = True
 
     def restart(self):
         """Il "riavvio" dopo un cambio di mappa: il robot sparisce per un po', poi riparte con la mappa nuova."""
@@ -571,7 +632,8 @@ class FakeRobot:
                 for command in json.loads(body)["commands"]:
                     with self.lock:
                         result = self.run_command(command)
-                    print(f"comando {command}: {result}", flush=True)
+                    shown = {key: value for key, value in command.items() if key != "password"}
+                    print(f"comando {shown}: {result}", flush=True)
                     self.server.request("POST", f"/api/device/commands/{command['id']}/result", result)
                     if self.restart_pending:
                         self.restart()

@@ -1,6 +1,7 @@
 #include <math.h>
 #include <stdatomic.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <time.h>
 
@@ -11,6 +12,7 @@
 #include "config_check.h"
 #include "live_map.h"
 #include "robot_state.h"
+#include "wifi_link.h"
 #include "../aperiodic.h"
 #include "../lidar.h"
 #include "../mapping.h"
@@ -22,6 +24,8 @@
 #define MOVING_SPEED_MIN        0.001       // sotto questa velocità misurata (m/s e rad/s) il robot conta come fermo
 #define RAD_TO_DEG              (180.0 / M_PI)
 #define FAULT_TEXT_MAX          96          // lunghezza massima del testo del guasto del driver
+#define WIFI_TEXT_MAX           768         // stato del Wi-Fi di rtes-wifi, in JSON
+#define WIFI_KEY_MAX            96          // le parti dello stato del Wi-Fi che, se cambiano, fanno partire lo stato subito
 
 // nomi degli stati della navigazione, nello stesso ordine di nav_state_t
 static const char *const NAV_STATE_NAMES[] = {
@@ -100,6 +104,7 @@ typedef struct {
     bool is_moving;                 // quando il robot si ferma parte ancora uno stato, con le velocità a zero
     bool is_brushes_on, is_suction_on;  // spazzole e aspirazione accese o spente
     int reposition_status;          // Riposiziona base (reposition_status_t): l'app ne aspetta l'esito
+    char wifi_key[WIFI_KEY_MAX];    // Wi-Fi: modo, rete, numero e fase dell'ultimo cambio (non il segnale, che cambia sempre)
 } important_state_t;
 
 // tutto quello che serve a costruire lo stato, letto una volta per ciclo
@@ -123,11 +128,61 @@ static struct {
     int64_t last_sent_t;            // istante dell'ultimo stato ricevuto dal server
     int64_t start_t;                // istante di avvio, per uptime_s
     int64_t mission_duration_s;     // durata dell'ultima missione: resta ferma quando la missione finisce
+    char wifi_text[WIFI_TEXT_MAX];  // ultimo stato del Wi-Fi avuto da rtes-wifi (vuoto se non risponde)
+    char wifi_key[WIFI_KEY_MAX];
+    int64_t next_wifi_t;            // prossima richiesta dello stato del Wi-Fi
+    int64_t next_resting_t;         // prossimo invio del riposo a rtes-wifi
+    int last_resting;               // ultimo riposo mandato (-1 = mai)
 } robot_state;
 
 void init_robot_state(void) {
     memset(&robot_state, 0, sizeof robot_state);
     robot_state.start_t = rt_now();
+    robot_state.last_resting = -1;
+}
+
+// funzione helper che parla con rtes-wifi (docs/wifi.md, sezione 7): ogni WIFI_STATUS_INTERVAL ne legge lo stato, e
+// gli dice se il robot è a riposo (solo allora si può cambiare rete) a ogni cambio e ogni WIFI_RESTING_INTERVAL. Se
+// rtes-wifi non c'è le richieste falliscono subito e lo stato non ha il campo wifi
+static void update_wifi(const state_readings_t *readings) {
+
+    int64_t now = rt_now();
+
+    int is_resting = readings->navigation.state == NAV_STATE_SLEEP;
+    if (is_resting != robot_state.last_resting || now >= robot_state.next_resting_t) {
+        char *answer = wifi_request(is_resting ? "{\"type\":\"resting\",\"value\":true}" : "{\"type\":\"resting\",\"value\":false}",
+                                    WIFI_STATUS_TIMEOUT_MS);
+        if (answer != NULL) robot_state.last_resting = is_resting;
+        free(answer);
+        robot_state.next_resting_t = now + WIFI_RESTING_INTERVAL;
+    }
+
+    if (now < robot_state.next_wifi_t) return;
+    robot_state.next_wifi_t = now + WIFI_STATUS_INTERVAL;
+
+    robot_state.wifi_text[0] = '\0';
+    robot_state.wifi_key[0] = '\0';
+
+    char *answer = wifi_request("{\"type\":\"status\"}", WIFI_STATUS_TIMEOUT_MS);
+    cJSON *response = cJSON_Parse(answer != NULL ? answer : "");
+    free(answer);
+
+    const cJSON *data = cJSON_GetObjectItemCaseSensitive(response, "data");
+    if (cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(response, "ok")) && cJSON_IsObject(data) &&
+        cJSON_PrintPreallocated((cJSON *)data, robot_state.wifi_text, WIFI_TEXT_MAX, false)) {
+
+        const cJSON *mode = cJSON_GetObjectItemCaseSensitive(data, "mode");
+        const cJSON *ssid = cJSON_GetObjectItemCaseSensitive(data, "ssid");
+        const cJSON *change = cJSON_GetObjectItemCaseSensitive(data, "change");
+        const cJSON *number = cJSON_GetObjectItemCaseSensitive(change, "number");
+        const cJSON *state = cJSON_GetObjectItemCaseSensitive(change, "state");
+        snprintf(robot_state.wifi_key, sizeof robot_state.wifi_key, "%s|%s|%d|%s",
+                 cJSON_IsString(mode) ? mode->valuestring : "", cJSON_IsString(ssid) ? ssid->valuestring : "",
+                 cJSON_IsNumber(number) ? (int)number->valuedouble : 0, cJSON_IsString(state) ? state->valuestring : "");
+    } else {
+        robot_state.wifi_text[0] = '\0';
+    }
+    cJSON_Delete(response);
 }
 
 void mark_robot_state_sent(void) {
@@ -214,6 +269,12 @@ static char *build_json(const state_readings_t *readings) {
     cJSON_AddNumberToObject(root, "robot_time", (double)time(NULL));
     cJSON_AddNumberToObject(root, "uptime_s", (double)((now - robot_state.start_t) / RT_S(1)));
     cJSON_AddBoolToObject(root, "remote_control", readings->navigation.is_remote);
+
+    // Wi-Fi: lo stato che dà rtes-wifi, così com'è (docs/wifi.md, sezione 7.4)
+    if (robot_state.wifi_text[0]) {
+        cJSON *wifi = cJSON_Parse(robot_state.wifi_text);
+        if (wifi != NULL) cJSON_AddItemToObject(root, "wifi", wifi);
+    }
 
     // navigazione. La durata della missione conta finché la missione è in corso, poi resta quella finale
     bool is_mission_active = readings->navigation.mission != NAV_STATE_SLEEP;
@@ -364,8 +425,11 @@ char *build_robot_state_if_due(void) {
     state_readings_t readings;
     read_everything(&readings);
 
+    update_wifi(&readings);
+
     important_state_t important;
     fill_important_state(&readings, &important);
+    snprintf(important.wifi_key, sizeof important.wifi_key, "%s", robot_state.wifi_key);
 
     // il robot si muove: stato della navigazione attivo, oppure v o omega diversi da 0
     nav_state_t state = readings.navigation.state;

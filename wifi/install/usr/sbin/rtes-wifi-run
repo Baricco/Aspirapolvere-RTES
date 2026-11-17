@@ -1,0 +1,53 @@
+#!/bin/sh
+# Lancia rtes-wifi e lo rilancia quando esce. Lo avvia /etc/init.d/rtes-wifi (procd).
+# Se rtes-wifi esce MAX_FAILS volte in FAIL_WINDOW_S non lo rilancia più e avvia il wifiManager di fabbrica: con un
+# difetto di rtes-wifi il robot resta comunque raggiungibile in SSH (come faceva rtes-wifi-check, docs/wifi.md 8.3).
+# SIGTERM (/etc/init.d/rtes-wifi stop, spegnimento) passa a rtes-wifi, che chiude i suoi processi ed esce.
+
+BIN=/usr/sbin/rtes-wifi
+RETRY_DELAY_S=5
+MAX_FAILS=3
+FAIL_WINDOW_S=600
+
+child=
+
+stop() {
+    if [ -n "$child" ]; then
+        kill -TERM "$child" 2>/dev/null
+        wait "$child"
+    fi
+    exit 0
+}
+trap stop TERM INT
+
+fails=""                      # istanti (uptime, in s) delle uscite dentro la finestra
+while :; do
+    "$BIN" &
+    child=$!
+    wait "$child"
+    code=$?
+    child=
+    now=$(cut -d. -f1 /proc/uptime)
+    recent=""
+    n=0
+    for t in $fails $now; do
+        if [ $((now - t)) -lt "$FAIL_WINDOW_S" ]; then
+            recent="$recent $t"
+            n=$((n + 1))
+        fi
+    done
+    fails=$recent
+    echo "rtes-wifi-run: rtes-wifi uscito con codice $code ($n uscite in $FAIL_WINDOW_S s)"
+    [ "$n" -ge "$MAX_FAILS" ] && break
+    sleep "$RETRY_DELAY_S"
+done
+
+echo "rtes-wifi-run: troppe uscite, non lo rilancio più: avvio il wifiManager di fabbrica"
+killall wpa_supplicant udhcpc hostapd dnsmasq 2>/dev/null
+/etc/init.d/robotWifiManager start
+# resta vivo (senza far niente) così procd non lo rilancia
+while :; do
+    sleep 3600 &
+    child=$!
+    wait "$child"
+done

@@ -25,6 +25,7 @@ const List<(String, String)> _sections = [
   ('motors', 'Motori della pulizia'),
   ('driver', 'Driver'),
   ('sensors', 'Sensori'),
+  ('wifi', 'Wi-Fi'),
 ];
 
 class DiagnosticsScreen extends ConsumerStatefulWidget {

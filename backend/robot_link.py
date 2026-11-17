@@ -145,7 +145,7 @@ class RobotLink:
     # ---------------------------------------------------------------------------------------------- comandi
 
     def send_command(self, command_type, params, on_late_result=None):
-        """Mette un comando in coda e aspetta l'esito, al massimo COMMAND_TIMEOUT_S.
+        """Mette un comando in coda e aspetta l'esito, al massimo COMMAND_TIMEOUT_S (o quello del tipo in COMMAND_TIMEOUTS_S).
 
         Ritorna (COMMAND_DONE, esito), (COMMAND_UNREACHABLE, None) o (COMMAND_NO_RESULT, None)."""
         with self.condition:
@@ -155,7 +155,7 @@ class RobotLink:
             self.next_command_id += 1
             self.queued_commands.append(command)
             self.condition.notify_all()
-            deadline = time.monotonic() + config.COMMAND_TIMEOUT_S
+            deadline = time.monotonic() + config.COMMAND_TIMEOUTS_S.get(command_type, config.COMMAND_TIMEOUT_S)
             while command.result is None:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:

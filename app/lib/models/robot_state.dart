@@ -1,6 +1,8 @@
 /// Stato del robot come arriva da GET /api/robot/state (docs/app.md, sezione 4): il JSON del robot più i campi del server.
 library;
 
+import 'wifi.dart';
+
 /// Una zona proibita, in metri sulla mappa: angolo con x e y minime, larghezza e altezza.
 class Zone {
   const Zone(this.x, this.y, this.w, this.h);
@@ -93,6 +95,9 @@ class RobotState {
   ({double x, double y})? get target =>
       _target['x'] is num && _target['y'] is num ? (x: (_target['x'] as num).toDouble(), y: (_target['y'] as num).toDouble()) : null;
   bool get remoteControl => raw['remote_control'] == true;
+
+  /// Wi-Fi del robot (docs/wifi.md, sezione 7.4); null se rtes-wifi non ha risposto al robot.
+  WifiStatus? get wifi => raw['wifi'] is Map<String, dynamic> ? WifiStatus.fromJson(raw['wifi'] as Map<String, dynamic>) : null;
   int get uptimeS => (raw['uptime_s'] as num?)?.toInt() ?? 0;
 
   // --- posizione ---

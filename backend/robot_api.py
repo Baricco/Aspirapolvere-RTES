@@ -44,6 +44,8 @@ def log_command(app_services, user_id, command_type, params, status, reason):
     """Scrive un comando nel registro. Ritorna l'id della riga, o None se quel tipo non si registra."""
     if command_type in config.COMMAND_LOG_SKIPPED_TYPES:
         return None
+    if params:
+        params = {key: value for key, value in params.items() if key not in config.COMMAND_LOG_HIDDEN_PARAMS}
     if command_type in config.COMMAND_LOG_ONLY_CHANGES_TYPES:
         # per esempio remote_move: il joystick fermo in una posizione ripete lo stesso comando, e si scrive una volta sola
         key = (user_id, status, reason, json.dumps(params, sort_keys=True))
@@ -117,7 +119,8 @@ def execute_command(app_services, command_type, params, user_id, username):
     if result.get("ok"):
         apply_success(app_services, command_type, params)
         log_command(app_services, user_id, command_type, params, LOG_STATUS_OK, None)
-        return 200, {"ok": True}
+        # i comandi con dati (wifi_scan, wifi_connect) rispondono con i dati, come il robot sulla sua rete
+        return 200, result["data"] if isinstance(result.get("data"), dict) else {"ok": True}
     log_command(app_services, user_id, command_type, params, LOG_STATUS_REJECTED, result.get("reason"))
     return 409, {"reason": result.get("reason", "rejected"), "message": result.get("message", "")}
 
@@ -277,6 +280,45 @@ def remote_keepalive():
 @require_session
 def remote_release():
     return command_response("remote_release")
+
+
+# ------------------------------------------------------------------------------------------------- Wi-Fi
+
+def wifi_password_problem(security, password):
+    """Controlla la password come rtes-wifi (docs/wifi.md, sezione 5). Ritorna il testo dell'errore, o None."""
+    if security == "open":
+        return None if password in (None, "") else "Una rete aperta non ha password."
+    if not isinstance(password, str) or not config.WIFI_PASSWORD_MIN <= len(password) <= config.WIFI_PASSWORD_MAX \
+            or any(not " " <= c <= "~" for c in password):
+        return "La password deve avere da %d a %d caratteri." % (config.WIFI_PASSWORD_MIN, config.WIFI_PASSWORD_MAX)
+    return None
+
+
+@robot_blueprint.get("/wifi/networks")
+@require_session
+def wifi_networks():
+    """Reti Wi-Fi vicine viste dal robot (docs/wifi.md, sezione 6). Con refresh=1 e la rete del robot accesa la spegne
+    per poco per cercare di nuovo (ma allora il robot è offline e l'app parla con lui direttamente)."""
+    return command_response("wifi_scan", {"refresh": request.args.get("refresh") == "1"})
+
+
+@robot_blueprint.post("/wifi/connect")
+@require_session
+def wifi_connect():
+    """Cambio della rete Wi-Fi (docs/wifi.md, sezione 5): il robot risponde subito se accetta, l'esito arriva nello
+    stato (wifi.change). La password passa al robot e non si scrive da nessuna parte."""
+    body = request.get_json(silent=True)
+    if not isinstance(body, dict):
+        return invalid_parameters()
+    ssid, security, password = body.get("ssid"), body.get("security"), body.get("password")
+    if not isinstance(ssid, str) or not 1 <= len(ssid.encode("utf-8")) <= config.WIFI_SSID_MAX:
+        return api_error(400, "invalid_ssid", "Il nome della rete non è valido.")
+    if security not in ("open", "wpa"):
+        return invalid_parameters("Tipo di rete sconosciuto.")
+    problem = wifi_password_problem(security, password)
+    if problem:
+        return api_error(400, "invalid_password", problem)
+    return command_response("wifi_connect", {"ssid": ssid, "security": security, "password": password or ""})
 
 
 # ------------------------------------------------------------------------------------------- zone proibite

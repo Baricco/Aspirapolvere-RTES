@@ -1,6 +1,7 @@
 #include <math.h>
 #include <pthread.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "driver/driver.h"
@@ -9,6 +10,7 @@
 #include "app_commands.h"
 #include "config_check.h"
 #include "live_map.h"
+#include "wifi_link.h"
 #include "../aperiodic.h"
 #include "../mapping.h"
 #include "../navigation.h"
@@ -44,6 +46,7 @@ static const reason_message_t REASON_MESSAGES[] = {
     { "not_reachable",          "Il robot non può arrivare lì: il punto non è libero sulla mappa o non c'è un percorso." },
     { "invalid_command",        "Comando non valido." },
     { "no_answer",              "Il robot non ha eseguito il comando in tempo." },
+    { "wifi_unreachable",       "Il programma del Wi-Fi del robot non risponde." },
 };
 
 // funzione helper che scrive un rifiuto nell'esito
@@ -266,6 +269,73 @@ static void run_map_command(const cJSON *command, bool is_select, app_map_downlo
     if (!is_done_ok) refuse(result, is_select ? "download_failed" : "no_answer");
 }
 
+// motivi dei rifiuti di rtes-wifi (docs/wifi.md, sezione 7): il testo per l'utente lo manda rtes-wifi
+static const char *const WIFI_REASONS[] = { "not_resting", "wifi_busy", "invalid_ssid", "invalid_password", "scan_failed" };
+
+// comandi wifi_scan e wifi_connect: passati a rtes-wifi, il programma che gestisce il Wi-Fi (docs/wifi.md). Il riposo
+// lo controlla lui. La scansione porta le reti nei dati dell'esito
+static void run_wifi_command(const cJSON *command, bool is_scan, app_command_result_t *result) {
+
+    cJSON *request = cJSON_CreateObject();
+
+    if (is_scan) {
+        bool is_refresh = false;
+        read_bool(command, "refresh", &is_refresh);
+        cJSON_AddStringToObject(request, "type", "scan");
+        cJSON_AddBoolToObject(request, "refresh", is_refresh);
+    } else {
+        const cJSON *ssid = cJSON_GetObjectItemCaseSensitive(command, "ssid");
+        const cJSON *security = cJSON_GetObjectItemCaseSensitive(command, "security");
+        const cJSON *password = cJSON_GetObjectItemCaseSensitive(command, "password");
+        if (!cJSON_IsString(ssid) || !cJSON_IsString(security) || (password != NULL && !cJSON_IsString(password))) {
+            cJSON_Delete(request);
+            refuse(result, "invalid_command");
+            return;
+        }
+        cJSON_AddStringToObject(request, "type", "connect");
+        cJSON_AddStringToObject(request, "ssid", ssid->valuestring);
+        cJSON_AddStringToObject(request, "security", security->valuestring);
+        cJSON_AddStringToObject(request, "password", password != NULL ? password->valuestring : "");
+    }
+
+    char *request_text = cJSON_PrintUnformatted(request);
+    cJSON_Delete(request);
+    if (request_text == NULL) {
+        refuse(result, "invalid_command");
+        return;
+    }
+
+    char *response_text = wifi_request(request_text, is_scan ? WIFI_SCAN_COMMAND_TIMEOUT_MS : WIFI_CONNECT_COMMAND_TIMEOUT_MS);
+
+    // la password non resta in memoria
+    memset(request_text, 0, strlen(request_text));
+    free(request_text);
+
+    cJSON *response = cJSON_Parse(response_text != NULL ? response_text : "");
+    free(response_text);
+    if (!cJSON_IsObject(response)) {
+        cJSON_Delete(response);
+        refuse(result, "wifi_unreachable");
+        return;
+    }
+
+    // {"ok": true, "data": {...}} oppure {"ok": false, "reason": ..., "message": ...}
+    if (cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(response, "ok"))) {
+        const cJSON *data = cJSON_GetObjectItemCaseSensitive(response, "data");
+        if (data != NULL) result->data = cJSON_PrintUnformatted(data);
+    } else {
+        const cJSON *reason = cJSON_GetObjectItemCaseSensitive(response, "reason");
+        const cJSON *message = cJSON_GetObjectItemCaseSensitive(response, "message");
+        refuse(result, "invalid_command");
+        for (size_t i = 0; i < sizeof WIFI_REASONS / sizeof WIFI_REASONS[0]; i++) {
+            if (cJSON_IsString(reason) && strcmp(reason->valuestring, WIFI_REASONS[i]) == 0) result->reason = WIFI_REASONS[i];
+        }
+        if (cJSON_IsString(message)) snprintf(result->message, sizeof result->message, "%s", message->valuestring);
+    }
+
+    cJSON_Delete(response);
+}
+
 // funzione helper che esegue un comando già letto dal JSON
 static void run_parsed_command(const cJSON *command, app_map_download_t download_map, app_command_result_t *result) {
 
@@ -378,6 +448,10 @@ static void run_parsed_command(const cJSON *command, app_map_download_t download
         navigation_command.type = NAV_COMMAND_REPOSITION_BASE;
         run_navigation_command(navigation_command, result);
 
+    } else if (strcmp(type, "wifi_scan") == 0 || strcmp(type, "wifi_connect") == 0) {
+
+        run_wifi_command(command, strcmp(type, "wifi_scan") == 0, result);
+
     } else refuse(result, "invalid_command");
 }
 
@@ -388,6 +462,7 @@ void run_app_command(const char *json, app_map_download_t download_map, app_comm
     result->reason = NULL;
     result->message[0] = '\0';
     result->is_restart_needed = false;
+    result->data = NULL;
 
     cJSON *command = cJSON_Parse(json);
     if (!cJSON_IsObject(command)) {

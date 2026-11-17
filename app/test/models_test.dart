@@ -7,6 +7,7 @@ import 'package:maurice/models/log_entry.dart';
 import 'package:maurice/models/map_info.dart';
 import 'package:maurice/models/robot_state.dart';
 import 'package:maurice/models/schedule.dart';
+import 'package:maurice/models/wifi.dart';
 import 'package:maurice/widgets/alerts_box.dart';
 
 // lo stato di esempio di docs/app.md (sezione 4.1), con i campi aggiunti dal server
@@ -265,6 +266,45 @@ void main() {
       edge.endDrag();
       expect(edge.zones.single.x + edge.zones.single.w, lessThanOrEqualTo(25.6 + 1e-9));
       expect(edge.zones.single.y + edge.zones.single.h, lessThanOrEqualTo(25.6 + 1e-9));
+    });
+  });
+
+  group('Wi-Fi', () {
+    test('reti vicine dalla risposta di rtes-wifi e del backend', () {
+      final scan = WifiScan.fromJson(jsonDecode('{"scanned_at":1763390000,"networks":['
+          '{"ssid":"Casa","signal_dbm":-48,"security":"wpa","in_use":true},'
+          '{"ssid":"Caffè ☕","signal_dbm":-82,"security":"open","in_use":false}]}') as Map<String, dynamic>);
+      expect(scan.networks.map((n) => n.ssid), ['Casa', 'Caffè ☕']);
+      expect(scan.networks.first.isProtected && scan.networks.first.inUse, isTrue);
+      expect(scan.networks.last.isProtected || scan.networks.last.inUse, isFalse);
+      expect(scan.scannedAt, DateTime.fromMillisecondsSinceEpoch(1763390000000));
+      expect(WifiScan.fromJson(const {'scanned_at': null, 'networks': []}).scannedAt, isNull);
+    });
+
+    test('stato del Wi-Fi nello stato del robot', () {
+      final state = RobotState(jsonDecode('{"wifi":{"mode":"station","ssid":"Casa","signal_dbm":-58,"ip":"192.168.1.40",'
+          '"change":{"number":5,"ssid":"Ufficio","state":"done","result":"backend_unreachable","time":1}}}') as Map<String, dynamic>);
+      final wifi = state.wifi!;
+      expect((wifi.mode, wifi.ssid, wifi.signalDbm, wifi.ip), ('station', 'Casa', -58, '192.168.1.40'));
+      expect(wifi.change, const WifiChange(5, 'Ufficio', 'done', 'backend_unreachable'));
+      expect(wifi.change.isDone, isTrue);
+      expect(RobotState(const {}).wifi, isNull);
+      final empty = WifiStatus.fromJson(const {'mode': 'ap', 'ssid': null, 'signal_dbm': null, 'ip': null});
+      expect((empty.ssid, empty.signalDbm, empty.change.number, empty.change.state), (null, null, 0, 'none'));
+    });
+
+    test('tacche del segnale', () {
+      expect([-40, -55, -56, -67, -70, -78, -79, -95].map(signalBars), [4, 4, 3, 3, 2, 2, 1, 1]);
+    });
+
+    test('esiti: chi resta sulla rete nuova e il testo', () {
+      expect(['ok', 'backend_unreachable'].every(isWifiChangeKept), isTrue);
+      expect(['internet_unreachable', 'no_address', 'wrong_password', 'not_found'].any(isWifiChangeKept), isFalse);
+      for (final result in ['ok', 'backend_unreachable', 'internet_unreachable', 'no_address', 'wrong_password', 'not_found']) {
+        expect(wifiResultMessage(result, 'Casa'), contains('«Casa»'));
+      }
+      expect(wifiResultMessage('wrong_password', 'Casa'), contains('Password sbagliata'));
+      expect(wifiTimeoutMessage('Casa'), contains('server irraggiungibile'));
     });
   });
 }

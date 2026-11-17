@@ -2,16 +2,19 @@
 /// sopra in pannelli traslucidi.
 library;
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../api/providers.dart';
+import '../../api/wifi_api.dart';
 import '../../config/app_colors.dart';
 import '../../config/app_config.dart';
 import '../../map/map_painter.dart';
 import '../../map/map_view.dart';
 import '../../models/map_info.dart';
 import '../../models/robot_state.dart';
+import '../../models/wifi.dart';
 import '../../widgets/alerts_box.dart';
 import '../../widgets/confirm_dialog.dart';
 import '../../widgets/glass_panel.dart';
@@ -23,6 +26,7 @@ import '../log/log_screen.dart';
 import '../maps/maps_screen.dart';
 import '../remote/remote_screen.dart';
 import '../schedules/schedules_screen.dart';
+import '../wifi/wifi_screen.dart';
 
 /// Spazio che i pannelli in alto e in basso tolgono alla mappa, per inquadrarla nella parte libera.
 const double _topPanelsHeight = 150;
@@ -108,6 +112,15 @@ class _MainScreenState extends ConsumerState<MainScreen> with StateIntervalMixin
       if (next == 'failed') {
         ref.read(notificationProvider.notifier).show('Obiettivo non raggiunto', 'Il robot non riesce ad arrivarci: si è messo in pausa.');
       }
+    });
+    // esito di un cambio di rete arrivato con la schermata del Wi-Fi chiusa, anche molto dopo (docs/wifi.md, sezione 13)
+    ref.listen(robotStateProvider.select((robotState) => robotState?.online == true ? robotState?.wifi?.change : null),
+        (previous, change) {
+      final pending = ref.read(pendingWifiChangeProvider);
+      if (pending == null || pending.isScreenOpen || change == null) return;
+      if (change.number != pending.number || !change.isDone) return;
+      ref.read(notificationProvider.notifier).show('Rete Wi-Fi', wifiResultMessage(change.result, pending.ssid));
+      ref.read(pendingWifiChangeProvider.notifier).clear();
     });
     final state = ref.watch(robotStateProvider);
     final liveMap = ref.watch(liveMapProvider);
@@ -343,7 +356,8 @@ class _MapMenu extends ConsumerWidget {
   }
 }
 
-/// Il menu laterale: Programmazione, Registro dei comandi, Avanzate (Azzera guasto, Riposiziona base, Diagnostica), Esci.
+/// Il menu laterale: Programmazione, Registro dei comandi, Avanzate (Azzera guasto, Riposiziona base, Rete Wi-Fi solo
+/// nell'APK, Diagnostica), Esci.
 class _MainMenu extends ConsumerWidget {
   const _MainMenu({required this.onOpen, required this.onRepositionBase});
 
@@ -404,6 +418,14 @@ class _MainMenu extends ConsumerWidget {
                   onRepositionBase();
                 },
               ),
+              // la rete del robot (192.168.5.1, senza internet) si raggiunge solo dall'app installata (docs/wifi.md, 10.1)
+              if (!kIsWeb)
+                ListTile(
+                  contentPadding: const EdgeInsets.only(left: 56, right: 16),
+                  leading: const Icon(Icons.wifi_rounded),
+                  title: const Text('Rete Wi-Fi'),
+                  onTap: () => open(const WifiScreen()),
+                ),
               ListTile(
                 contentPadding: const EdgeInsets.only(left: 56, right: 16),
                 leading: const Icon(Icons.monitor_heart_outlined),

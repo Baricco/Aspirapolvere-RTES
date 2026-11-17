@@ -222,15 +222,25 @@ static void run_server_command(const cJSON *command) {
 
     app_command_result_t result;
     run_app_command(command_text, download_map, &result);
-    fprintf(stderr, "rete: comando %s: %s\n", command_text, result.ok ? "eseguito" : result.reason);
+
+    // nel registro solo numero e tipo: il comando intero può contenere una password (wifi_connect)
+    const cJSON *type = cJSON_GetObjectItemCaseSensitive(command, "type");
+    fprintf(stderr, "rete: comando %u %s: %s\n", (unsigned)id->valuedouble, cJSON_IsString(type) ? type->valuestring : "?",
+            result.ok ? "eseguito" : result.reason);
+    memset(command_text, 0, strlen(command_text));
     free(command_text);
 
-    // esito: {"ok": ..., "reason": ..., "message": ...}
+    // esito: {"ok": ..., "reason": ..., "message": ..., "data": ...}
     cJSON *result_json = cJSON_CreateObject();
     cJSON_AddBoolToObject(result_json, "ok", result.ok);
     if (!result.ok) {
         cJSON_AddStringToObject(result_json, "reason", result.reason);
         cJSON_AddStringToObject(result_json, "message", result.message);
+    }
+    if (result.data != NULL) {
+        cJSON *data = cJSON_Parse(result.data);
+        if (data != NULL) cJSON_AddItemToObject(result_json, "data", data);
+        free(result.data);
     }
     char *result_text = cJSON_PrintUnformatted(result_json);
     cJSON_Delete(result_json);

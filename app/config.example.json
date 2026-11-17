@@ -1,4 +1,5 @@
 {
   "APP_NAME": "Maurice",
-  "SERVER_URL": "https://<server>"
+  "SERVER_URL": "https://<server>",
+  "ROBOT_WIFI_PASSWORD": "<password>"
 }

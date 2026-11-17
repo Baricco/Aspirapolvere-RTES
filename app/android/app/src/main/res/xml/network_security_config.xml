@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- HTTP in chiaro solo verso il robot sulla sua rete (docs/wifi.md, sezione 10.2) e verso il backend di sviluppo sul
+     PC (localhost, 10.0.2.2 dall'emulatore). Per tutto il resto solo HTTPS. -->
+<network-security-config>
+    <domain-config cleartextTrafficPermitted="true">
+        <domain includeSubdomains="false">192.168.5.1</domain>
+        <domain includeSubdomains="false">localhost</domain>
+        <domain includeSubdomains="false">10.0.2.2</domain>
+    </domain-config>
+</network-security-config>

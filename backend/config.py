@@ -29,6 +29,8 @@ SESSION_TOUCH_INTERVAL_S = 60        # last_used_at della sessione si riscrive a
 
 # --- comandi (sezione 5) ---
 COMMAND_TIMEOUT_S = 3                # attesa massima dell'esito di un comando: poi 503 o 504
+# comandi che aspettano di più (docs/wifi.md, sezione 7.3): la scansione delle reti dura fino a 8 s sul robot
+COMMAND_TIMEOUTS_S = {"wifi_scan": 10}
 DEVICE_LONG_POLL_S = 25              # attesa massima di GET /api/device/commands
 
 # --- telecomando (sezione 6) ---
@@ -57,9 +59,16 @@ COMMAND_LOG_PAGE_DEFAULT = 50
 COMMAND_LOG_PAGE_MAX = 200
 # tipi di comando che non si scrivono mai nel registro (deciso con l'utente il 2026-11-10: una sessione di telecomando
 # ne manderebbe una decina al secondo)
-COMMAND_LOG_SKIPPED_TYPES = ("remote_keepalive",)
+COMMAND_LOG_SKIPPED_TYPES = ("remote_keepalive", "wifi_scan")
+# parametri che non si scrivono mai nel registro (docs/wifi.md, sezione 9: la password del Wi-Fi)
+COMMAND_LOG_HIDDEN_PARAMS = ("password",)
 # tipi di comando che si scrivono solo quando i parametri cambiano rispetto all'ultimo dello stesso tipo
 COMMAND_LOG_ONLY_CHANGES_TYPES = ("remote_move",)
+
+# --- Wi-Fi del robot (docs/wifi.md): gli stessi controlli di rtes-wifi ---
+WIFI_SSID_MAX = 32                   # byte
+WIFI_PASSWORD_MIN = 8
+WIFI_PASSWORD_MAX = 63
 
 # --- programmazione delle pulizie (sezione 8.7) ---
 SCHEDULE_TIMEZONE = "Europe/Rome"

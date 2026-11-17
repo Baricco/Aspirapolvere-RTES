@@ -65,8 +65,18 @@ def post_command_result(command_id):
     if not isinstance(body, dict) or not isinstance(body.get("ok"), bool):
         return invalid_parameters()
     result = {"ok": body["ok"], "reason": body.get("reason"), "message": body.get("message", "")}
+    if isinstance(body.get("data"), dict):
+        result["data"] = body["data"]       # wifi_scan e wifi_connect: le reti, il numero del cambio
     if not services().link.set_command_result(command_id, result):
         return not_found("Il comando non esiste o non aspetta più un esito.")
+    return api_ok()
+
+
+@device_blueprint.get("/ping")
+@require_robot
+def ping():
+    """Prova del backend di rtes-wifi dopo un cambio di rete (docs/wifi.md, sezione 5): basta il token giusto. Non conta
+    come contatto: online lo decidono i thread di rete del programma dei task."""
     return api_ok()
 
 

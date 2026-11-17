@@ -50,6 +50,7 @@ static void *commands_loop(void *arg) {
             // lo stesso interprete del thread di rete. Dalla FIFO non si può scaricare una mappa dal server
             app_command_result_t result;
             run_app_command(line, NULL, &result);
+            free(result.data);
             if (result.ok) fprintf(stderr, "comandi: %s: eseguito\n", line);
             else fprintf(stderr, "comandi: %s: rifiutato (%s: %s)\n", line, result.reason, result.message);
 
