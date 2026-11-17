@@ -1,4 +1,4 @@
-/// Decodifica del formato RTM1 delle mappe (docs/formato-mappa.md) e mappa dal vivo con le differenze
+/// Decodifica del formato RTM1 delle mappe (RTM2 con i muri virtuali, docs/formato-mappa.md) e mappa dal vivo con le differenze
 /// (docs/app.md, sezione 7.3).
 library;
 
@@ -8,6 +8,7 @@ const int fineMapCellNumber = 1024; // celle per lato della griglia fine
 const double fineMapCellSize = 0.05; // lato di una cella, in metri
 const int fineMapOrigin = fineMapCellNumber ~/ 2; // la cella dell'origine (la base di ricarica)
 const int maxUserZones = 15;
+const int maxVirtualWalls = 16;
 
 const int mapCatUnknown = 0;
 const int mapCatFree = 1;
@@ -16,6 +17,7 @@ const int mapCatCliff = 3; // vuoto degli anti-caduta
 
 const int _headerLength = 13; // numero magico, rettangolo (4 uint16), numero di zone
 const int _zoneLength = 8;
+const int _wallLength = 8; // x e y dei due estremi (uint16, celle fini)
 const int _crcLength = 4;
 const int _runCountMask = 0x3F;
 const int _runCategoryShift = 6;
@@ -28,13 +30,14 @@ class MapFormatException implements Exception {
   String toString() => 'MapFormatException: $message';
 }
 
-/// Un rettangolo di celle fini a categorie, con le zone proibite dell'utente (in celle fini).
+/// Un rettangolo di celle fini a categorie, con le zone proibite dell'utente e i muri virtuali (in celle fini).
 class RtmMap {
-  RtmMap(this.x, this.y, this.width, this.height, this.zones, this.cells);
+  RtmMap(this.x, this.y, this.width, this.height, this.zones, this.cells, [this.walls = const []]);
 
   final int x, y, width, height;
   final List<List<int>> zones; // ogni zona: x, y, larghezza, altezza
   final Uint8List cells; // larghezza * altezza categorie, riga dopo riga
+  final List<List<int>> walls; // ogni muro: x1, y1, x2, y2 (spigoli delle celle)
 }
 
 final Uint32List _crcTable = _buildCrcTable();
@@ -65,21 +68,25 @@ int _u16(Uint8List data, int offset) => data[offset] | data[offset + 1] << 8;
 int _u32(Uint8List data, int offset) =>
     (data[offset] | data[offset + 1] << 8 | data[offset + 2] << 16 | data[offset + 3] << 24) & 0xFFFFFFFF;
 
-/// Decodifica un file RTM1 con tutti i controlli di docs/formato-mappa.md.
+/// Decodifica un file RTM1 o RTM2 con tutti i controlli di docs/formato-mappa.md.
 RtmMap decodeRtm(Uint8List data) {
   if (data.length < _headerLength + _crcLength) throw MapFormatException('file troppo corto');
-  if (data[0] != 0x52 || data[1] != 0x54 || data[2] != 0x4D || data[3] != 0x31) {
+  // "RTM1", oppure "RTM2" con il numero di muri dopo quello delle zone e i muri dopo le zone
+  final hasWalls = data[3] == 0x32;
+  if (data[0] != 0x52 || data[1] != 0x54 || data[2] != 0x4D || (data[3] != 0x31 && !hasWalls)) {
     throw MapFormatException('numero magico sbagliato');
   }
   final x = _u16(data, 4), y = _u16(data, 6), width = _u16(data, 8), height = _u16(data, 10);
   final zoneCount = data[12];
+  final wallCount = hasWalls ? data[13] : 0;
   if (width == 0 || height == 0 || x + width > fineMapCellNumber || y + height > fineMapCellNumber) {
     throw MapFormatException('il rettangolo esce dalla griglia');
   }
   if (zoneCount > maxUserZones) throw MapFormatException('troppe zone');
+  if (wallCount > maxVirtualWalls) throw MapFormatException('troppi muri');
   final end = data.length - _crcLength;
-  var offset = _headerLength;
-  if (offset + zoneCount * _zoneLength > end) throw MapFormatException('file troppo corto');
+  var offset = _headerLength + (hasWalls ? 1 : 0);
+  if (offset + zoneCount * _zoneLength + wallCount * _wallLength > end) throw MapFormatException('file troppo corto');
   final zones = <List<int>>[];
   for (var i = 0; i < zoneCount; i++, offset += _zoneLength) {
     final zone = [_u16(data, offset), _u16(data, offset + 2), _u16(data, offset + 4), _u16(data, offset + 6)];
@@ -87,6 +94,12 @@ RtmMap decodeRtm(Uint8List data) {
       throw MapFormatException('una zona esce dalla griglia');
     }
     zones.add(zone);
+  }
+  final walls = <List<int>>[];
+  for (var i = 0; i < wallCount; i++, offset += _wallLength) {
+    final wall = [_u16(data, offset), _u16(data, offset + 2), _u16(data, offset + 4), _u16(data, offset + 6)];
+    if (wall.any((value) => value > fineMapCellNumber)) throw MapFormatException('un muro esce dalla griglia');
+    walls.add(wall);
   }
   final total = width * height;
   final cells = Uint8List(total);
@@ -101,7 +114,7 @@ RtmMap decodeRtm(Uint8List data) {
   }
   if (offset != end) throw MapFormatException('byte in più dopo le celle');
   if (_u32(data, end) != crc32(data, 0, end)) throw MapFormatException('CRC sbagliato');
-  return RtmMap(x, y, width, height, zones, cells);
+  return RtmMap(x, y, width, height, zones, cells, walls);
 }
 
 const int liveMessageFull = 0; // la mappa intera, che sostituisce quella dell'app

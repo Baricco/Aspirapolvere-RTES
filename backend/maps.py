@@ -1,6 +1,7 @@
-"""Mappe: lettura e scrittura del formato RTM1, mappe salvate sul server, mappa dal vivo con le differenze, scia.
+"""Mappe: lettura e scrittura del formato RTM1 (RTM2 con i muri virtuali), mappe salvate sul server, mappa dal vivo con
+le differenze, scia.
 
-Il formato RTM1 è descritto in docs/formato-mappa.md; la mappa dal vivo e la scia in docs/app.md, sezione 7.
+Il formato è descritto in docs/formato-mappa.md; la mappa dal vivo e la scia in docs/app.md, sezione 7.
 """
 import collections
 import dataclasses
@@ -16,8 +17,10 @@ import zlib
 import config
 
 MAP_FILE_MAGIC = b"RTM1"
-MAP_HEADER_LEN = 13                 # numero magico, rettangolo (4 uint16), numero di zone
+MAP_FILE_MAGIC_WALLS = b"RTM2"      # con i muri virtuali: dopo il numero di zone il numero di muri, dopo le zone i muri
+MAP_HEADER_LEN = 13                 # numero magico, rettangolo (4 uint16), numero di zone (RTM2: un byte in più, i muri)
 MAP_ZONE_LEN = 8                    # x, y, larghezza, altezza (uint16, in celle fini)
+MAP_WALL_LEN = 8                    # x e y dei due estremi (uint16, in celle fini, spigoli delle celle come le zone)
 MAP_CRC_LEN = 4
 MAP_RUN_MAX = 63                    # celle massime in una sequenza
 MAP_RUN_CATEGORY_SHIFT = 6
@@ -61,24 +64,29 @@ class RtmMap:
     height: int
     zones: list             # zone proibite dell'utente: tuple (x, y, larghezza, altezza) in celle fini
     cells: bytes            # larghezza * altezza categorie, riga dopo riga
+    walls: list = dataclasses.field(default_factory=list)   # muri virtuali: tuple (x1, y1, x2, y2) in celle fini
 
 
 def decode_rtm(data):
-    """Decodifica un file RTM1 facendo tutti i controlli di docs/formato-mappa.md."""
+    """Decodifica un file RTM1 o RTM2 facendo tutti i controlli di docs/formato-mappa.md."""
     if len(data) < MAP_HEADER_LEN + MAP_CRC_LEN:
         raise MapFormatError("file troppo corto")
-    if data[:len(MAP_FILE_MAGIC)] != MAP_FILE_MAGIC:
+    has_walls = data[:len(MAP_FILE_MAGIC)] == MAP_FILE_MAGIC_WALLS
+    if data[:len(MAP_FILE_MAGIC)] != MAP_FILE_MAGIC and not has_walls:
         raise MapFormatError("numero magico sbagliato")
     x, y, width, height = struct.unpack_from("<4H", data, len(MAP_FILE_MAGIC))
     num_zones = data[MAP_HEADER_LEN - 1]
+    num_walls = data[MAP_HEADER_LEN] if has_walls and len(data) > MAP_HEADER_LEN + MAP_CRC_LEN else 0
     side = config.FINE_MAP_CELL_NUMBER
     if width == 0 or height == 0 or x + width > side or y + height > side:
         raise MapFormatError("il rettangolo esce dalla griglia")
     if num_zones > config.MAX_USER_ZONES:
         raise MapFormatError("troppe zone")
+    if num_walls > config.MAX_VIRTUAL_WALLS:
+        raise MapFormatError("troppi muri")
     end = len(data) - MAP_CRC_LEN
-    offset = MAP_HEADER_LEN
-    if offset + num_zones * MAP_ZONE_LEN > end:
+    offset = MAP_HEADER_LEN + (1 if has_walls else 0)
+    if offset + num_zones * MAP_ZONE_LEN + num_walls * MAP_WALL_LEN > end:
         raise MapFormatError("file troppo corto")
     zones = []
     for _ in range(num_zones):
@@ -87,6 +95,13 @@ def decode_rtm(data):
         if zone[0] + zone[2] > side or zone[1] + zone[3] > side:
             raise MapFormatError("una zona esce dalla griglia")
         zones.append(zone)
+    walls = []
+    for _ in range(num_walls):
+        wall = struct.unpack_from("<4H", data, offset)
+        offset += MAP_WALL_LEN
+        if max(wall) > side:
+            raise MapFormatError("un muro esce dalla griglia")
+        walls.append(wall)
     total = width * height
     cells = bytearray()
     while len(cells) < total:
@@ -102,17 +117,21 @@ def decode_rtm(data):
         raise MapFormatError("byte in più dopo le celle")
     if struct.unpack_from("<I", data, end)[0] != zlib.crc32(data[:end]):
         raise MapFormatError("CRC sbagliato")
-    return RtmMap(x, y, width, height, zones, bytes(cells))
+    return RtmMap(x, y, width, height, zones, bytes(cells), walls)
 
 
-def encode_rtm(x, y, width, height, zones, cells):
-    """Codifica un rettangolo di categorie in RTM1."""
+def encode_rtm(x, y, width, height, zones, cells, walls=()):
+    """Codifica un rettangolo di categorie in RTM1, o in RTM2 se ci sono muri virtuali (come il robot)."""
     if len(cells) != width * height:
         raise ValueError("numero di celle diverso da larghezza per altezza")
-    data = bytearray(MAP_FILE_MAGIC)
+    data = bytearray(MAP_FILE_MAGIC_WALLS if walls else MAP_FILE_MAGIC)
     data += struct.pack("<4HB", x, y, width, height, len(zones))
+    if walls:
+        data.append(len(walls))
     for zone in zones:
         data += struct.pack("<4H", *zone)
+    for wall in walls:
+        data += struct.pack("<4H", *wall)
     for match in RUN_PATTERN.finditer(cells):
         category = cells[match.start()] << MAP_RUN_CATEGORY_SHIFT
         full_runs, rest = divmod(match.end() - match.start(), MAP_RUN_MAX)
@@ -151,8 +170,20 @@ def zone_from_cells(zone):
             "h": round(zone[3] * size, 3)}
 
 
-def check_zones(zones):
-    """Controlla una lista di zone in metri con le stesse regole del robot. Ritorna None oppure il motivo del rifiuto."""
+def wall_to_cells(wall):
+    """Da un muro in metri {"x1", "y1", "x2", "y2"} allo stesso in celle fini, arrotondato come fa il robot."""
+    size = config.FINE_MAP_CELL_SIZE
+    return tuple(int(math.floor(wall[key] / size + 0.5)) + config.FINE_MAP_ORIGIN for key in ("x1", "y1", "x2", "y2"))
+
+
+def wall_from_cells(wall):
+    size = config.FINE_MAP_CELL_SIZE
+    return {key: round((value - config.FINE_MAP_ORIGIN) * size, 3) for key, value in zip(("x1", "y1", "x2", "y2"), wall)}
+
+
+def check_zones(zones, walls=None):
+    """Controlla una lista di zone in metri (e di muri, se c'è) con le stesse regole del robot. Ritorna None oppure il
+    motivo del rifiuto."""
     if len(zones) > config.MAX_USER_ZONES:
         return "too_many_zones"
     size = config.FINE_MAP_CELL_SIZE
@@ -161,13 +192,22 @@ def check_zones(zones):
         if (zone["w"] < size or zone["h"] < size or zone["x"] < -half_side or zone["y"] < -half_side
                 or zone["x"] + zone["w"] > half_side or zone["y"] + zone["h"] > half_side):
             return "outside_map"
+    if walls is not None:
+        if len(walls) > config.MAX_VIRTUAL_WALLS:
+            return "too_many_walls"
+        for wall in walls:
+            if (any(abs(wall[key]) > half_side for key in ("x1", "y1", "x2", "y2"))
+                    or math.hypot(wall["x2"] - wall["x1"], wall["y2"] - wall["y1"]) < size):
+                return "outside_map"
     return None
 
 
-def replace_zones(data, zones_cells):
-    """Riscrive l'intestazione di un file RTM1 con una nuova lista di zone, e il CRC."""
+def replace_zones(data, zones_cells, walls_cells=None):
+    """Riscrive l'intestazione di un file con una nuova lista di zone (e di muri, se c'è: altrimenti restano quelli del
+    file), e il CRC."""
     old = decode_rtm(data)
-    return encode_rtm(old.x, old.y, old.width, old.height, zones_cells, old.cells)
+    walls = old.walls if walls_cells is None else walls_cells
+    return encode_rtm(old.x, old.y, old.width, old.height, zones_cells, old.cells, walls)
 
 
 def write_file_atomic(path, data):
@@ -253,9 +293,10 @@ class MapStore:
             except FileNotFoundError:
                 pass
 
-    def set_zones(self, map_id, zones):
-        """Zone di una mappa non selezionata: si riscrive l'intestazione del file (zone e CRC)."""
-        data = replace_zones(self.read_file(map_id), [zone_to_cells(zone) for zone in zones])
+    def set_zones(self, map_id, zones, walls=None):
+        """Zone (e muri, se ci sono) di una mappa non selezionata: si riscrive l'intestazione del file (zone, muri e CRC)."""
+        walls_cells = None if walls is None else [wall_to_cells(wall) for wall in walls]
+        data = replace_zones(self.read_file(map_id), [zone_to_cells(zone) for zone in zones], walls_cells)
         self.overwrite(map_id, data)
 
     def zones(self, map_id):

@@ -277,15 +277,9 @@ int main(void) {
 	// ciclo di esecuzione main loop:
 	// dopo aver avviato i task nei loro thread
 	// il main aspetta solo il segnale per terminare
-	// oppure la richiesta di riavvio, dopo un cambio di mappa dall'app
-	// Riposiziona base riuscito: il riavvio lo chiede il thread dello stato appena il server ha l'esito; se la rete non c'è
-	// (o il server non risponde) lo chiede il main dopo REPOSITION_RESTART_DELAY, il file della mappa è già spostato
-	int reposition_done_s = 0;
-	while (!fine && !is_restart_requested()) {
-              sleep(SLEEP_TIME);
-              if (read_reposition_status() != REPOSITION_DONE) reposition_done_s = 0;
-              else if (++reposition_done_s * RT_S(SLEEP_TIME) > REPOSITION_RESTART_DELAY) request_restart();
-       }
+	// oppure la richiesta di riavvio: i cambi di mappa ricaricano la mappa senza riavvio, il riavvio resta solo se la
+	// mappatura non fa la ricarica in tempo (task aperiodico)
+	while (!fine && !is_restart_requested()) sleep(SLEEP_TIME);
 
        // Spegni il Watchdog dei task
        drv_forget(&lidar_task);               // lidar
@@ -315,8 +309,7 @@ int main(void) {
        rt_stats_print(&mapping_task);    // mappatura
        rt_aperiodic_print(&aperiodic_task);    // aperiodico
 
-       // dopo un cambio di mappa chi ha avviato il programma lo rilancia: la mappa nuova si carica solo
-       // prima che partano i task
+       // con la richiesta di riavvio chi ha avviato il programma lo rilancia
        if (is_restart_requested()) return RESTART_EXIT_CODE;
 
 	return 0;

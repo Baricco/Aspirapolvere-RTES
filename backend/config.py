@@ -74,6 +74,7 @@ FINE_MAP_CELL_NUMBER = 1024          # celle per lato della griglia fine
 FINE_MAP_CELL_SIZE = 0.05            # lato di una cella fine, in metri
 FINE_MAP_ORIGIN = FINE_MAP_CELL_NUMBER // 2
 MAX_USER_ZONES = 15                  # zone proibite dell'utente in una mappa (la sedicesima è quella della base)
+MAX_VIRTUAL_WALLS = 16               # muri virtuali in una mappa (MAX_VIRTUAL_WALLS di tasks/vacuum/mapping.h)
 MAP_PATCH_HISTORY = 240              # differenze della mappa dal vivo tenute in memoria (2 minuti a una ogni 0,5 s)
 MAP_UPLOAD_MAX_BYTES = 2 * 1024 * 1024
 MAP_NAME_MAX_LENGTH = 40

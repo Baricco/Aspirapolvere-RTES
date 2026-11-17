@@ -11,6 +11,8 @@ class MapColors {
     required this.cliff,
     required this.forbiddenZoneFill,
     required this.forbiddenZoneBorder,
+    required this.virtualWall,
+    required this.target,
     required this.base,
     required this.trail,
     required this.robot,
@@ -23,6 +25,8 @@ class MapColors {
   final Color cliff; // vuoto degli anti-caduta (scale, gradini)
   final Color forbiddenZoneFill;
   final Color forbiddenZoneBorder;
+  final Color virtualWall; // muro virtuale: il robot non lo attraversa e il lidar lo vede come un muro
+  final Color target; // obiettivo dato dall'app
   final Color base; // base di ricarica
   final Color trail; // scia dell'ultima missione
   final Color robot;
@@ -35,6 +39,8 @@ class MapColors {
     cliff: Color(0xFFE2703A),
     forbiddenZoneFill: Color(0x33D64545),
     forbiddenZoneBorder: Color(0xFFD64545),
+    virtualWall: Color(0xFF0E7C78),
+    target: Color(0xFFE2703A),
     base: Color(0xFF9AA7B2),
     trail: Color(0x66808B95),
     robot: Color(0xFF1D232B),
@@ -48,6 +54,8 @@ class MapColors {
     cliff: Color(0xFFD9541E),
     forbiddenZoneFill: Color(0x40FF7B7B),
     forbiddenZoneBorder: Color(0xFFFF7B7B),
+    virtualWall: Color(0xFF3CC2B9),
+    target: Color(0xFFF08A4B),
     base: Color(0xFFC9D1D8),
     trail: Color(0x80808B95),
     robot: Color(0xFFE6EAF0),
@@ -73,3 +81,12 @@ const double baseFaceX = -0.1745;
 
 /// Lato minimo di una zona proibita disegnata: una cella della mappa.
 const double zoneMinSide = 0.05;
+
+/// Lunghezza minima di un muro virtuale disegnato: una cella della mappa (il robot rifiuta i muri più corti).
+const double wallMinLength = 0.05;
+
+/// Spessore del muro virtuale disegnato.
+const double virtualWallWidth = 0.05;
+
+/// Raggio del segno dell'obiettivo dato dall'app.
+const double targetRadius = 0.10;

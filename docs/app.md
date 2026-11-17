@@ -78,11 +78,12 @@ JSON di circa 1,6 KB (circa 750 byte con gzip). Contiene solo dati che i task e 
 
 ```json
 {"format":1,"robot_time":1762700000,"uptime_s":1834,"remote_control":false,
- "navigation":{"state":"follow_path","mission":"clean","interrupted_mission":"none","mission_number":3,"mission_duration_s":312},
+ "navigation":{"state":"follow_path","mission":"clean","interrupted_mission":"none","mission_number":3,"mission_duration_s":312,
+               "target":{"state":"none"}},
  "objective":{"type":"move","x":1.50,"y":-0.30,"theta_deg":0.0},
  "position":{"x":1.23,"y":-0.40,"theta_deg":12.3,"v":0.21,"omega":0.05,"valid":true},
  "map":{"state":"normal","save_failed":false,"started_on_base":true,"file_crc":"9c41e2a0",
-        "forbidden_zones":[{"x":-0.365,"y":-0.22,"w":0.26,"h":0.44}]},
+        "forbidden_zones":[{"x":-0.365,"y":-0.22,"w":0.26,"h":0.44}],"virtual_walls":[{"x1":2.2,"y1":4.65,"x2":2.9,"y2":4.65}]},
  "safety":{"errors":["obstacle"],"max_v_forward":0.30,"max_v_backward":0.50},
  "lidar":{"valid":true,"sector_distances_mm":[0,0,0,0,0,0,0,0,0,0,0,0],"corridor_front_mm":640,"corridor_back_mm":1200},
  "battery":{"voltage":15.1,"percent":78,"level":"ok","charging":false,"charge_complete":false,"temperature_c":31},
@@ -100,6 +101,9 @@ JSON di circa 1,6 KB (circa 750 byte con gzip). Contiene solo dati che i task e 
 - `map.forbidden_zones`: la zona 0 è quella della base. `GET /api/robot/zones` la toglie.
 - `map.reposition`: stato di "Riposiziona base" (sezione 7.9): `idle`, `running`, `done`, `not_found`, `rotated`,
   `failed`.
+- `map.virtual_walls`: i muri virtuali della mappa caricata (sezione 7.7), estremi in metri.
+- `navigation.target`: esito dell'ultimo obiettivo dato dall'app (sezione 5.5): `state` = `none`, `going`, `reached`,
+  `failed`; `x` e `y` solo se c'è stato un obiettivo. Fase della navigazione mentre ci va: `go_to`.
 - **Lasciati fuori di proposito:** il giro intero del lidar, i campi del GD32 non verificati, il magnetico, i tempi
   massimi di `rt_stats_t` (si leggono solo a task fermo), odometria, statistiche del collegamento, contatti, IMU,
   encoder.
@@ -109,7 +113,7 @@ JSON di circa 1,6 KB (circa 750 byte con gzip). Contiene solo dati che i task e 
 Dal thread dello stato (sezione 9.3), con un ciclo ogni 100 ms:
 - **ogni 0,1 s** quando il robot si muove (stato della navigazione attivo, oppure v o ω diversi da 0);
 - **subito** quando cambia qualcosa di importante: stato, missione, guasto, fase del driver, aggancio, telecomando,
-  carica, base, esito di un comando, zone;
+  carica, base, esito di un comando, zone e muri, esito dell'obiettivo;
 - **ogni 10 s** a riposo.
 
 Se il server non risponde lo stato si butta: nessuna coda, conta solo il più nuovo.
@@ -182,7 +186,8 @@ Tutti gli errori hanno la forma `{"reason": ..., "message": ...}`. Ogni comando 
 | `POST /api/robot/remote/cleaning` `{"brushes","suction"}` | `remote_cleaning` | `remote_in_use`, `dustbin_missing` |
 | `POST /api/robot/remote/keepalive` | `remote_keepalive` | `remote_in_use` |
 | `POST /api/robot/remote/release` | `remote_release` | `not_remote_owner` |
-| `PUT /api/robot/zones` `[{"x","y","w","h"}]` | `zones` | lista intera; `not_started_on_base`, `position_lost`, `too_many_zones` (più di 15), `outside_map` |
+| `POST /api/robot/goto` `{"x","y"}` | `go_to` | sezione 5.5; `position_lost`, `no_map`, `busy` (sta tornando alla base, o Riposiziona base), `not_reachable` (cella non libera o fuori dalla griglia) |
+| `PUT /api/robot/zones` `{"zones":[{"x","y","w","h"}],"walls":[{"x1","y1","x2","y2"}]}` | `zones` | liste intere (sezione 7.7); senza `walls`, o con la sola lista delle zone come prima, i muri restano come sono; `not_started_on_base`, `position_lost`, `too_many_zones` (più di 15), `too_many_walls` (più di 16), `outside_map` |
 | `PUT /api/robot/maps/selected` `{"id"}` | `map_select` | sezione 7.5; `not_resting`, `download_failed` |
 | `POST /api/robot/map/reset` | `map_reset` | sezione 7.6; `not_resting`, `not_backed_up` |
 
@@ -196,6 +201,20 @@ Con il robot non raggiungibile ogni comando risponde 503.
   le celle già pulite. Senza missione in corso va in riposo. Il tasto fisico di accensione si comporta allo stesso modo.
 - **Posizione persa:** solo `home` fa qualcosa (aggancio alla cieca); `start`, `pause` e `resume` rispondono
   `position_lost`.
+
+### 5.5 Obiettivo sulla mappa
+
+Chiesto dall'utente il 2026-11-16. Con una **pressione lunga sulla mappa** della schermata principale, e una conferma
+("Mandare il robot qui?"), l'app manda `POST /api/robot/goto` con il punto in metri.
+- La navigazione accetta solo con la posizione sicura, la mappa partita dalla base, il robot che non sta tornando alla
+  base, e la cella del punto libera sulla mappa. Ricorda la situazione di prima (riposo, pausa o missione in corso),
+  esce dalla base se serve e va verso il punto con la ricerca del percorso (`NAV_STATE_GO_TO`).
+- **Arrivato** (centro del robot nella cella): `reached`, e torna a quello che faceva. Missione in corso → la riprende;
+  pausa → resta in pausa lì; riposo → resta lì a riposo.
+- **Non ci arriva** (percorso che non c'è più, o un guasto): `failed`, il robot si mette in pausa (a riposo se era
+  fermo) e l'app mostra "Obiettivo non raggiunto".
+- Un obiettivo nuovo sostituisce quello in corso (e si torna sempre alla situazione di prima del primo); Casa lo annulla.
+- Serve anche per le prove nel simulatore: `--comando T '{"type":"go_to","x":..,"y":..}'`.
 
 ## 6. Telecomando
 
@@ -242,9 +261,17 @@ Costanti nella navigazione, con gli stessi valori di crociera dei task ma defini
   Nel database ci sono nome, CRC e date.
 - **Nomi:** scelti dall'utente, diversi fra loro (`409 name_taken`), mostrati sempre senza estensione. Il default è
   `map-N` con N = numero di mappe + 1, salendo al primo numero libero se quel nome c'è già.
-- Il formato è sempre RTM1 (`docs/formato-mappa.md`, la sezione "Dove sta" va aggiornata).
-- **La mappa non cambia mai con il programma avviato**: si carica solo in `init_mapping`, prima dei task. Per cambiarla
-  il programma si riavvia (sezione 7.5). Così il WCET della mappatura non cambia.
+- Il formato è RTM1, o RTM2 se la mappa ha muri virtuali (`docs/formato-mappa.md`).
+- **Ricarica senza riavvio** (dal 2026-11-16; prima il programma si riavviava a ogni cambio di mappa). La mappatura ha
+  **due serie di griglie** (griglia fine e contatori, circa 1,3 MB in più): una in uso, una libera. Quando il file
+  cambia (cambio di mappa, "Nessuna mappa", Riposiziona base, ancoraggio alla base) il task aperiodico prepara la mappa
+  nuova nella serie libera (`prepare_map_reload`), poi chiede lo scambio (`request_map_swap`). Nel suo job la mappatura
+  **scambia i puntatori** (tempo costante) e copia la griglia di navigazione preparata (64 KB): niente copia da 1 MB nel
+  job, quindi il WCET della mappatura cresce solo di quella copia. Poi tutto quello che dipende dalla mappa riparte come
+  all'avvio: posizione (quella data, o l'origine con il riallineamento della sezione 7.10), zone e muri del file, celle
+  chiuse e regioni della navigazione, mappa dal vivo. La ricarica si fa solo con il robot a riposo sulla base. Se la
+  mappatura non la fa entro `MAP_RELOAD_TIMEOUT` (3 s) il programma si riavvia come prima (codice 3): il file è già
+  quello nuovo, e da lì il task aperiodico non salva più.
 
 ### 7.2 Allineamento fra robot e server
 
@@ -255,6 +282,9 @@ Costanti nella navigazione, con gli stessi valori di crociera dei task ma defini
   nuova `map-N` e la segna come selezionata. Fino ad allora l'app mostra "mappa nuova, non ancora salvata".
 - **All'avvio** il robot manda la sua mappa salvata. Se il CRC non coincide con la selezionata (file cambiato a mano,
   primo avvio dopo la modifica) il server la salva come **mappa nuova** invece di sovrascrivere: nessuna mappa si perde.
+- **Dopo una ricarica** (sezione 7.1) il robot rimanda il file come all'avvio: dopo Riposiziona base diventa una mappa
+  nuova, dopo l'**ancoraggio alla base** (sezione 7.10) invece **sovrascrive la selezionata** (`read_map_reload_overwrites`):
+  è la stessa mappa, solo rimessa al suo posto.
 
 ### 7.3 Mappa dal vivo
 
@@ -263,8 +293,9 @@ visore, e al rientro mostra l'ultima mappa con la scia. Si mostra la **mappa fin
 la griglia di navigazione da 20 cm non viene mai mandata.
 
 **Sul robot** (thread dello stato, core 3, priorità normale; nessun doppio buffer nuovo, nessun mutex):
-1. **All'avvio** manda `map.rtm` come mappa dal vivo intera (`PUT /api/device/map`), oppure una mappa vuota se non ha
-   mappa o non è partito dalla base. La sua copia privata la ottiene decodificando lo stesso file.
+1. **All'avvio**, e dopo ogni ricarica della mappa (`read_map_reload_num` cambiato), manda `map.rtm` come mappa dal vivo
+   intera (`PUT /api/device/map`), oppure una mappa vuota se non ha mappa o non è partito dalla base. La sua copia
+   privata la ottiene decodificando lo stesso file.
 2. **Ogni 0,1 s**, se la posizione è valida, allarga il rettangolo delle posizioni non ancora mandate.
 3. **Ogni 0,5 s**, se il rettangolo non è vuoto:
    - legge solo quel rettangolo allargato di `LIDAR_MAPPING_MAX_RANGE` (6 m) più qualche cella di margine, con
@@ -308,20 +339,20 @@ Si può fare solo con il robot **a riposo sulla base** (altrimenti `not_resting`
 1. Il server manda `map_select` con l'id e il CRC della mappa.
 2. Il thread dei comandi la scarica (`GET /api/device/maps/{id}`) in `map.rtm.download` e controlla il CRC.
 3. Chiede `request_map_replace()` al task aperiodico, che **rinomina** il file sopra `map.rtm` (la rinomina sostituisce
-   in un colpo solo: dopo un'interruzione di corrente c'è o la vecchia mappa intera o la nuova intera) e da quel momento
-   non salva più. La rinomina la fa il task aperiodico perché è lui che salva: un salvataggio non può incrociarsi con
-   la sostituzione.
-4. Il thread manda l'esito e chiede l'uscita: il programma ferma i task ed esce con `RESTART_EXIT_CODE` (3).
-5. Chi ha avviato il programma lo rilancia (ciclo finché il codice di uscita è 3): `tools/driver-robot.sh`,
-   `rtes.sh sim`, `tools/prove-nav/prova.py`, poi l'avvio automatico della fase 6.
+   in un colpo solo: dopo un'interruzione di corrente c'è o la vecchia mappa intera o la nuova intera). La rinomina la
+   fa il task aperiodico perché è lui che salva: un salvataggio non può incrociarsi con la sostituzione.
+4. Il task aperiodico **ricarica la mappa senza riavvio** (sezione 7.1) e solo dopo pubblica l'esito: quando l'app lo
+   riceve il robot usa già la mappa nuova. Un file che non supera i controlli si carica come mappa vuota, come all'avvio.
+5. Solo se la ricarica non avviene in tempo il programma esce con `RESTART_EXIT_CODE` (3) e chi lo ha avviato lo
+   rilancia (`install/usr/sbin/rtes-run` sul robot, `tools/driver-robot.sh`, `rtes.sh sim`, `tools/prove-nav/prova.py`).
 
-In caso di errore prima della rinomina il robot resta con la mappa vecchia. Durante il riavvio l'app mostra "riavvio
-in corso".
+In caso di errore prima della rinomina il robot resta con la mappa vecchia. L'app non mostra più "riavvio in corso"
+(fino al 2026-11-16 il programma si riavviava sempre).
 
 ### 7.6 "Nessuna mappa" e cancellazione
 
 - **"Nessuna mappa"** nel menu delle mappe chiama `POST /api/robot/map/reset`: il robot cancella `map.rtm` (con
-  `request_map_delete()`) e si riavvia; alla prossima missione esplora. Il server manda il comando solo se la sua
+  `request_map_delete()`) e riparte con la mappa vuota, senza riavvio; alla prossima missione esplora. Il server manda il comando solo se la sua
   copia ha lo stesso CRC del file sul robot (`map.file_crc`), altrimenti `not_backed_up`: la copia sul server è
   sempre quella che c'era sul robot.
 - **Cancellare una mappa** dal server si fa **solo dall'app**, nella gestione delle mappe, con `DELETE
@@ -332,11 +363,24 @@ in corso".
 - **Ogni cancellazione chiede conferma con un avviso**; per la mappa selezionata l'avviso dice che il robot resterà
   senza mappa.
 
-### 7.7 Zone proibite
+### 7.7 Zone proibite e muri virtuali
 
 - Per la **mappa selezionata**: comando `zones` al robot, che le applica, salva la mappa e la rimanda al server.
-- Per le **altre mappe**: il server riscrive l'intestazione del file (zone e CRC).
-- `PUT /api/robot/maps/{id}/zones` sceglie da solo fra i due casi.
+- Per le **altre mappe**: il server riscrive l'intestazione del file (zone, muri e CRC).
+- `PUT /api/robot/maps/{id}/zones` sceglie da solo fra i due casi. Corpo `{"zones": [...], "walls": [...]}`; la sola
+  lista delle zone vale ancora (i muri restano come sono).
+
+**Muri virtuali** (decisi con l'utente il 2026-11-16, dopo lo specchio in camera che apriva e richiudeva il mobile
+dietro: l'intensità del lidar non separa i punti riflessi). Fino a `MAX_VIRTUAL_WALLS` (16) segmenti, salvati nel file
+(RTM2), che:
+- il robot **non attraversa**: le celle vicine al segmento hanno i quadranti proibiti come per le zone
+  (`mark_forbidden_quads` con il muro), anche se il lidar non le ha mai viste;
+- il lidar **vede come un muro vero**: un raggio che taglia il segmento si ferma lì (`cut_ray_at_walls`: punto spostato
+  sull'intersezione, celle libere fino alla linea, occupata la cella della linea). I punti non si scartano. I raggi che
+  tagliano un muro non servono all'allineamento delle scansioni (un muro sopra uno specchio: i punti riflessi
+  sposterebbero la posizione). Si controllano solo i muri entro la portata del lidar (`collect_near_walls`), così con i
+  muri lontani non costano niente.
+- Stesso comando e stesso Conferma delle zone; niente muri nel task di sicurezza (scelta dell'utente).
 
 ### 7.9 Riposiziona base
 
@@ -354,18 +398,41 @@ robot sposta quella che ha. App: menu Avanzate, "Riposiziona base", con conferma
    di 90 (la base sta contro un muro): altrimenti `not_found` o `rotated`, e la mappa non cambia.
 3. **Spostamento del file** (task aperiodico): la posizione trovata diventa l'origine. Ogni cella e ogni zona si sposta
    di celle intere (errore al massimo mezza cella, che corregge l'allineamento all'avvio) e ruota di quarti di giro
-   attorno all'origine, esattamente. Usa la griglia a categorie del salvataggio, nessuna memoria nuova; file temporaneo
-   rinominato alla fine; da lì il task aperiodico non salva più. `map.reposition` diventa `done` (o `failed`).
-4. **Riavvio**: appena il server ha ricevuto lo stato con `done` (o comunque dopo `REPOSITION_RESTART_DELAY`, 10 s,
-   senza rete) il programma si riavvia con la mappa spostata. All'avvio il CRC non coincide con la mappa selezionata,
-   quindi il server la salva come **mappa nuova** e la seleziona (sezione 7.2): la vecchia resta, l'utente la cancella
-   se vuole.
+   attorno all'origine, esattamente; i muri virtuali come gli spigoli delle zone. Usa la griglia a categorie del
+   salvataggio, nessuna memoria nuova; file temporaneo rinominato alla fine.
+4. **Ricarica** (dal 2026-11-16, prima il programma si riavviava dopo `REPOSITION_RESTART_DELAY`): il task aperiodico
+   ricarica la mappa spostata senza riavvio (sezione 7.1), con il robot nella posizione trovata, spostata e ruotata
+   come la mappa: non serve un'altra ricerca. Poi `map.reposition` diventa `done` (o `failed`). Il file ha un CRC
+   diverso dalla mappa selezionata, quindi il server la salva come **mappa nuova** e la seleziona (sezione 7.2): la
+   vecchia resta, l'utente la cancella se vuole. Con `done` una pulizia nuova si accetta subito (prima si rifiutava
+   fino al riavvio).
 5. **App**: dopo l'"accettato" mostra "Ricerca della base"; quando `map.reposition` smette di essere `running` mostra
-   l'esito, e con `done` l'avviso di riavvio.
+   l'esito ("Mappa, zone e muri spostati: il robot usa già la mappa nuova").
 
 Prove nel simulatore (stanza ricavata dalla mappa con la base nuova, robot con la mappa vecchia): base spostata di
 10 cm, ritrovata con punteggio 86-88% e file identico a quello spostato a mano; base contro un altro muro (stanza ruotata
 di 90 gradi), ritrovata a -90,5 gradi con punteggio 75-78%, celle e zone identiche a quelle attese.
+
+### 7.10 Ancoraggio alla base e riallineamento all'avvio
+
+Decisi con l'utente il 2026-11-16, dopo la base vista nell'app in mezzo al corridoio (mappa spostata di 20-30 cm). Causa:
+la mappa si salvava a ogni aggancio con dentro la deriva della sessione, e al riavvio il robot ripartiva da (0; 0) su
+una mappa spostata. La mappa resta "morbida" (gli ostacoli possono cambiare) e nessun ostacolo fa da riferimento fisso:
+**l'unico punto che si sa fermo è la base**. Niente esiti per l'app: avvengono da soli.
+- **Ancoraggio a fine missione** (non dopo un rientro per batteria: la missione interrotta si perderebbe). Durante
+  l'aggancio il driver misura la faccia della base con il lidar (`docs/driver.md`, raddrizzamento) e la pubblica nel
+  sistema della mappa (`drv_status_t.dock_base_*`). Agganciato, la navigazione lo chiede alla mappatura
+  (`base_anchor_num`); `anchor_to_base` confronta dove la base è con dove dovrebbe essere, cioè la faccia in
+  (−`BASE_FACE_DIST_M`; 0) = (−0,196; 0) che guarda verso +x. Lo scarto, in celle fini intere (sotto mezza cella niente),
+  è la deriva della sessione: il task aperiodico sposta il file (mappa, zone e muri) e lo ricarica con il robot nella
+  posizione giusta, e la mappa sul server si sovrascrive. Se la base vista è girata di più di `BASE_ANCHOR_MAX_ANGLE`
+  (10°) la misura non si usa. Fino all'esito il robot non accetta una pulizia nuova.
+- **Riallineamento all'avvio** sulla base (e dopo una ricarica senza posizione data). La navigazione lo chiede
+  (`reanchor_num`) appena la mappatura ha una prima scansione allineata. La mappatura usa la ricerca di Riposiziona
+  base solo dentro una finestra attorno all'origine, ±`REANCHOR_WINDOW_M` (1 m) e ±`REANCHOR_WINDOW_ANGLE` (45°), con
+  soglia `REANCHOR_MIN_SCORE_PCT` (65%; Riposiziona base dall'app resta al 75%). Trovata, **sposta solo il robot** nella
+  posizione trovata (`restart_from_pose`), mai la mappa: così vale qualunque sia il modo in cui il robot si è agganciato.
+  Un risultato a un quarto di giro vorrebbe dire una ricerca sbagliata, e non cambia niente.
 
 ### 7.8 Mappe di oggi
 
@@ -458,9 +525,9 @@ non serve CORS; in sviluppo il backend accetta le origini scritte nella configur
 | `GET /api/robot/map[?after=N]` | mappa dal vivo intera o differenze (sezione 7.3) |
 | `GET /api/robot/trail[?after=N]` | scia dell'ultima missione |
 | `GET /api/robot/maps` | elenco: `id`, `name`, `selected`, `saved_at`, `size_bytes` |
-| `GET /api/robot/maps/{id}` | file RTM1 |
+| `GET /api/robot/maps/{id}` | file RTM1 (RTM2 con i muri virtuali) |
 | `PATCH /api/robot/maps/{id}` `{"name"}` | rinomina; `name_taken` |
-| `PUT /api/robot/maps/{id}/zones` | zone (sezione 7.7) |
+| `PUT /api/robot/maps/{id}/zones` | zone e muri virtuali (sezione 7.7) |
 | `DELETE /api/robot/maps/{id}` | cancella dal server |
 | `GET /api/robot/schedules` | elenco degli orari con l'ultimo esito |
 | `POST /api/robot/schedules` `{days, time, enabled}` | aggiunge |
@@ -585,8 +652,9 @@ task.
 | `fault_reset` | l'interprete chiama `drv_azzera_guasto()` (aspetta fino a 50 ms: non si può chiamare da un task real-time); se fallisce `cause_still_present` |
 | `start`, `resume`, `home` | se il driver è in guasto prima `drv_azzera_guasto()`, poi la navigazione |
 | `pause`, `remote_*` | la navigazione |
-| `zones` | richiesta al task aperiodico come oggi, poi attesa di `read_applied_user_zones_version()` |
-| `map_select`, `map_reset` | rete e task aperiodico; `not_resting` se la navigazione non è in riposo o il robot non è sulla base |
+| `zones` | richiesta al task aperiodico come oggi (con i muri, se c'è il campo `walls`), poi attesa di `read_applied_user_zones_version()` |
+| `go_to` | la navigazione (x e y viaggiano nei campi di v e ω, in mm) |
+| `map_select`, `map_reset` | rete e task aperiodico; `not_resting` se la navigazione non è in riposo o il robot non è sulla base; l'esito arriva a mappa ricaricata |
 | `reposition_base` | la navigazione accetta o rifiuta subito, poi mappatura e task aperiodico (sezione 7.9) |
 
 **Comando alla navigazione in una sola variabile `_Atomic uint64_t`**, senza doppio buffer nuovo (sull'ARMv7 una
@@ -596,8 +664,8 @@ lettura o scrittura atomica da 64 bit è un'istruzione sola, senza lock):
 |---|---|
 | numero del comando | 16 |
 | tipo | 4 |
-| v in mm/s | 16 |
-| ω in mrad/s | 16 |
+| v in mm/s (`go_to`: x in mm) | 16 |
+| ω in mrad/s (`go_to`: y in mm) | 16 |
 | spazzole | 1 |
 | aspirazione | 1 |
 
@@ -636,6 +704,22 @@ riavvio.
 **Strumenti:** `tools/prove-nav/prova.py --comando` scrive comandi JSON nella FIFO rinominata; i lanciatori
 rilanciano il programma con codice di uscita 3.
 
+**Modifiche del 2026-11-16** (ricarica, muri virtuali, obiettivo, ancoraggio):
+- `navigation.c/.h`: `NAV_STATE_GO_TO` (in fondo all'enum), `NAV_COMMAND_GO_TO`, `NAV_RESULT_NOT_REACHABLE`,
+  `nav_target_state_t` e in `navigation_status_t` `target_state`, `target_x`, `target_y`; `finish_target`;
+  `reset_after_map_reload` (dopo una ricarica tutto riparte come all'avvio); in `navigation_closed_cells_t`
+  `reanchor_num` e `base_anchor_num` (sezione 7.10).
+- `mapping.c/.h`: due serie di griglie (`mapping_grids_t`, `map_grids[2]`, in `map_state` solo puntatori),
+  `load_map_into`, `prepare_map_reload`, `request_map_swap`, `apply_map_reload`, `read_map_reload_num`,
+  `read_map_reload_has_start_pose`, `read_map_reload_overwrites`; muri virtuali (`mapping_virtual_wall_t`,
+  `MAX_VIRTUAL_WALLS`, `collect_near_walls`, `cut_ray_at_walls`); `anchor_to_base`.
+- `aperiodic.c/.h`: RTM2, `reload_map` dopo sostituzione, cancellazione e spostamento del file, muri nella richiesta
+  delle zone; `request_map_reposition` riceve anche `is_anchor` e la posizione del robot sulla mappa spostata.
+- `cloud/`: `go_to`, `walls` nel comando `zones`, `navigation.target` e `map.virtual_walls` nello stato, mappa dal vivo
+  che riparte dopo la ricarica; spariti il riavvio dopo i comandi della mappa e `is_reposition_done_sent`.
+- `main.c`: senza l'attesa del riavvio dopo Riposiziona base (`REPOSITION_RESTART_DELAY` non c'è più); il codice 3
+  resta solo se la ricarica non avviene in tempo.
+
 ### 9.6 Compilazione
 
 - `tools/build-net-libs.sh` scarica mbedTLS 3.6 (versione a supporto lungo) e libcurl, a versioni fisse con controllo
@@ -648,7 +732,10 @@ rilanciano il programma con codice di uscita 3.
 
 - Navigazione: legge una variabile atomica e pubblica `navigation_status_t` (circa 40 byte) a ogni job.
 - Sicurezza: legge `navigation_status_t` a ogni job; in telecomando fa meno calcoli.
-- Mappatura: nessuna modifica nel job.
+- Mappatura: nessuna modifica nel job nella prima versione. Dal 2026-11-16: nel job della ricarica lo scambio dei
+  puntatori e la copia della griglia di navigazione (64 KB, solo a robot fermo sulla base); a ogni job il controllo dei
+  raggi contro i muri virtuali vicini (al massimo 16 segmenti per raggio, nessuno se i muri sono lontani). Da misurare
+  nei WCET.
 - Nessun mutex nuovo, quindi nessun tempo di blocco nuovo. Cache e bus si misurano con l'app collegata.
 
 ## 10. App
@@ -672,7 +759,7 @@ rilanciano il programma con codice di uscita 3.
 | `config/` | configurazione (nome dell'app, indirizzo), colori dell'interfaccia e **colori della mappa in un file solo**, massimi del joystick |
 | `api/` | client dio: token, refresh, errori `{reason, message}`, richiesta lunga dello stato |
 | `models/` | stato del robot, mappe, orari, registro: classi Dart dai JSON |
-| `map/` | decodifica RTM1, mappa dal vivo con le differenze, scia, disegno, modifica delle zone |
+| `map/` | decodifica RTM1 e RTM2, mappa dal vivo con le differenze, scia, disegno, modifica delle zone e dei muri |
 | `screens/` | una cartella per schermata |
 | `widgets/` | pulsante principale, avvisi, notifiche, joystick, conferma con avviso |
 
@@ -684,7 +771,7 @@ rilanciano il programma con codice di uscita 3.
 - **Rifiuti dei comandi:** notifica in alto, in qualsiasi schermata, con il `message`.
 - **Avvisi:** riquadro sotto la mappa, **alto 0** quando non ce ne sono: guasto con il testo, posizione persa,
   telecomando tenuto da un altro utente, batteria scarica in telecomando, pulizia programmata fallita, mappa non ancora
-  salvata, robot in riavvio.
+  salvata, robot in riavvio (dal 2026-11-16 non si vede più dopo i cambi di mappa: il robot non si riavvia).
 - **Cancellazioni:** sempre con conferma e avviso.
 - **Stato:** richiesta lunga continua (sezione 4.4), con 100 ms nelle schermate con la mappa e 1000 ms nelle altre,
   ferma in background.
@@ -698,7 +785,9 @@ rilanciano il programma con codice di uscita 3.
 - in alto: menu ☰, nome (Maurice), **"Online"/"Offline"** (in inglese) con l'ultimo contatto, batteria;
 - menu delle mappe (le mappe del server più "Nessuna mappa"), attivo solo con il robot a riposo sulla base,
   altrimenti spiega perché; accanto il pulsante della gestione delle mappe;
-- mappa con scia, zone, base e robot; zoom e spostamento con le dita; pulsante per ricentrare sul robot;
+- mappa con scia, zone, muri virtuali, base, robot e obiettivo; zoom e spostamento con le dita; pulsante per
+  ricentrare sul robot; **pressione lunga** su un punto: conferma e obiettivo (sezione 5.5), con le notifiche
+  "Obiettivo raggiunto" e "Obiettivo non raggiunto";
 - **riga di stato in inglese**: missione · stato · durata, per esempio "Cleaning · Following path · 5:12";
 - avvisi;
 - **tre pulsanti sulla stessa riga**: principale (Avvia, Pausa o Riprendi), Casa, Telecomando;
@@ -718,8 +807,10 @@ rilanciano il programma con codice di uscita 3.
 **Gestione mappe:**
 - menu delle mappe, aperto sulla selezionata; la mappa con le sue zone;
 - Rinomina, Seleziona sul robot, Cancella (sezione 7.6);
-- modifica zone: rettangoli disegnati trascinando, spostati e ridimensionati dagli angoli, **cancellati con la x in
-  alto a destra** di ogni rettangolo; **Conferma** manda la lista intera, Annulla torna com'era.
+- modifica "Zone e muri", con l'interruttore **Zone / Muri** per scegliere cosa disegna il dito: zone come
+  rettangoli disegnati trascinando, spostati e ridimensionati dagli angoli, **cancellati con la x in alto a destra** di
+  ogni rettangolo; muri come segmenti disegnati trascinando (almeno una cella), spostati, allungati o girati dagli
+  estremi, cancellati con la x a metà; **Conferma** manda le due liste intere, Annulla torna com'era.
 
 **Programmazione:**
 - un riquadro per orario: a sinistra **7 quadratini dei giorni** (opacità 1 se attivi, 0,5 se no), a destra **l'ora

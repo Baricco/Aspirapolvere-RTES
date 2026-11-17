@@ -140,6 +140,7 @@ class CommandTest(BackendTestCase):
                  ("post", "/api/robot/mission/home", None, "home", {}),
                  ("post", "/api/robot/fault/reset", None, "fault_reset", {}),
                  ("post", "/api/robot/base/reposition", None, "reposition_base", {}),
+                 ("post", "/api/robot/goto", {"x": 1.5, "y": -0.5}, "go_to", {"x": 1.5, "y": -0.5}),
                  ("post", "/api/robot/remote/take", None, "remote_take", {}),
                  ("post", "/api/robot/remote/move", {"v": 0.2, "omega": -0.5}, "remote_move", {"v": 0.2, "omega": -0.5}),
                  ("post", "/api/robot/remote/cleaning", {"brushes": True, "suction": False}, "remote_cleaning",
@@ -147,7 +148,9 @@ class CommandTest(BackendTestCase):
                  ("post", "/api/robot/remote/keepalive", None, "remote_keepalive", {}),
                  ("post", "/api/robot/remote/release", None, "remote_release", {}),
                  ("put", "/api/robot/zones", [{"x": 1, "y": 1, "w": 0.5, "h": 0.5}], "zones",
-                  {"zones": [{"x": 1.0, "y": 1.0, "w": 0.5, "h": 0.5}]})]
+                  {"zones": [{"x": 1.0, "y": 1.0, "w": 0.5, "h": 0.5}]}),
+                 ("put", "/api/robot/zones", {"zones": [], "walls": [{"x1": 0, "y1": 0, "x2": 1, "y2": 0}]}, "zones",
+                  {"zones": [], "walls": [{"x1": 0.0, "y1": 0.0, "x2": 1.0, "y2": 0.0}]})]
         for method, path, body, command_type, params in cases:
             response, taken = self.command(path, self.user, method=method, json=body)
             self.assertEqual(response.status_code, 200, path)
@@ -217,9 +220,12 @@ class CommandTest(BackendTestCase):
                            ("/api/robot/remote/move", {"v": 0.1}),
                            ("/api/robot/remote/move", {"v": float("inf"), "omega": 0}),
                            ("/api/robot/remote/cleaning", {"brushes": 1, "suction": True}),
-                           ("/api/robot/remote/cleaning", None)):
+                           ("/api/robot/remote/cleaning", None),
+                           ("/api/robot/goto", {"x": 1}),
+                           ("/api/robot/goto", {"x": "qui", "y": 0})):
             self.assertEqual(self.client.post(path, headers=self.user, json=body).status_code, 400, body)
-        for body in ({"x": 1}, [{"x": 1, "y": 1, "w": 1}], [[1, 2, 3, 4]], "zone"):
+        for body in ({"x": 1}, [{"x": 1, "y": 1, "w": 1}], [[1, 2, 3, 4]], "zone", {"zones": [], "walls": [{"x1": 1}]},
+                     {"zones": [], "walls": {}}, {"walls": []}):
             self.assertEqual(self.client.put("/api/robot/zones", headers=self.user, json=body).status_code, 400, body)
         self.assertEqual(self.client.post("/api/device/commands/1/result", headers=self.robot, json={}).status_code, 400)
 

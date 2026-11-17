@@ -1,4 +1,4 @@
-/// Disegno della mappa (docs/app.md, sezione 10.4): celle, scia, zone proibite, base e robot.
+/// Disegno della mappa (docs/app.md, sezione 10.4): celle, scia, zone proibite, muri virtuali, base e robot.
 library;
 
 import 'dart:math' as math;
@@ -51,6 +51,8 @@ class MapPainter extends CustomPainter {
     required this.imageRect,
     required this.trail,
     required this.zones,
+    this.walls = const [],
+    this.target,
     required this.showBase,
     required this.robot,
     required this.editing,
@@ -63,6 +65,8 @@ class MapPainter extends CustomPainter {
   final Rect? imageRect; // dove va l'immagine sulla tela
   final List<Offset> trail; // in metri
   final List<Zone> zones; // zone dell'utente
+  final List<VirtualWall> walls; // muri virtuali
+  final Offset? target; // obiettivo dato dall'app, in metri
   final bool showBase;
   final RobotPose? robot;
   final bool editing; // si stanno modificando le zone: maniglie e x
@@ -84,6 +88,10 @@ class MapPainter extends CustomPainter {
     for (final zone in zones) {
       _paintZone(canvas, zone);
     }
+    for (final wall in walls) {
+      _paintWall(canvas, wall);
+    }
+    if (target != null) _paintTarget(canvas, target!);
     if (robot != null) _paintRobot(canvas, robot!);
   }
 
@@ -154,7 +162,37 @@ class MapPainter extends CustomPainter {
     for (final corner in ZoneEditor.corners(zone)) {
       canvas.drawCircle(worldToCanvas(corner.dx, corner.dy), zoneHandleRadius / scale, handle);
     }
-    final deleteCenter = rect.topRight;
+    _paintDelete(canvas, rect.topRight, handle);
+  }
+
+  /// Un muro virtuale: una linea piena; in modifica le maniglie agli estremi e la x a metà.
+  void _paintWall(Canvas canvas, VirtualWall wall) {
+    final paint = Paint()
+      ..color = colors.virtualWall
+      ..strokeWidth = math.max(_meters(virtualWallWidth), 3 / scale)
+      ..strokeCap = StrokeCap.round;
+    canvas.drawLine(worldToCanvas(wall.x1, wall.y1), worldToCanvas(wall.x2, wall.y2), paint);
+    if (!editing) return;
+    final handle = Paint()..color = colors.virtualWall;
+    canvas.drawCircle(worldToCanvas(wall.x1, wall.y1), zoneHandleRadius / scale, handle);
+    canvas.drawCircle(worldToCanvas(wall.x2, wall.y2), zoneHandleRadius / scale, handle);
+    final middle = ZoneEditor.wallDeletePoint(wall);
+    _paintDelete(canvas, worldToCanvas(middle.dx, middle.dy), handle);
+  }
+
+  /// L'obiettivo dato dall'app: un anello con il punto al centro.
+  void _paintTarget(Canvas canvas, Offset point) {
+    final center = worldToCanvas(point.dx, point.dy);
+    final paint = Paint()
+      ..color = colors.target
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = math.max(_meters(0.03), 2 / scale);
+    canvas.drawCircle(center, _meters(targetRadius), paint);
+    canvas.drawCircle(center, _meters(targetRadius) * 0.3, Paint()..color = colors.target);
+  }
+
+  /// La x che cancella una zona o un muro.
+  void _paintDelete(Canvas canvas, Offset deleteCenter, Paint handle) {
     final radius = zoneDeleteRadius / scale;
     canvas.drawCircle(deleteCenter, radius, handle);
     final cross = Paint()

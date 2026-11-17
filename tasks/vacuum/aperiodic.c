@@ -9,6 +9,7 @@
 
 #include "aperiodic.h"
 #include "mapping.h"
+#include "cloud/network.h"
 
 #define MAPS_DIR_DEFAULT    "/mnt/UDISK/rt/maps"    // cartella delle mappe sul robot (sul PC si sceglie con RTES_MAPS)
 #define MAPS_DIR_ENV        "RTES_MAPS"             // variabile d'ambiente con la cartella delle mappe
@@ -30,7 +31,7 @@ typedef struct {
     uint32_t last_zones_num;                        // numero dell'ultima richiesta di zone proibite eseguita
     uint32_t last_file_num;                         // numero dell'ultima richiesta sul file della mappa (sostituzione o cancellazione) eseguita
     uint32_t last_reposition_num;                   // numero dell'ultima richiesta di Riposiziona base eseguita
-    bool is_saving_disabled;                        // true dopo una sostituzione o una cancellazione del file: da lì non si salva più, il programma sta per riavviarsi
+    bool is_saving_disabled;                        // true se la ricarica dopo un cambio del file non è riuscita: da lì non si salva più, il programma sta per riavviarsi
     uint8_t categories[MAP_CATEGORIES_BYTES];       // copia della griglia fine a categorie, 2 bit per cella
 } aperiodic_state_t;
 
@@ -55,6 +56,9 @@ typedef struct {
     uint32_t num;                                           // numero progressivo della richiesta, 0 = nessuna richiesta
     int num_zones;
     mapping_forbidden_zone_t zones[MAX_FORBIDDEN_ZONES - 1];
+    bool has_walls;                                         // false: i muri restano quelli di prima
+    int num_walls;
+    mapping_virtual_wall_t walls[MAX_VIRTUAL_WALLS];
 } aperiodic_zones_request_t;
 
 static exchange_t zones_request_buffer;
@@ -76,6 +80,8 @@ typedef struct {
     uint32_t num;           // numero progressivo della richiesta, 0 = nessuna richiesta
     int dx, dy;             // spostamento in celle fini, fatto per primo
     int quarter_turns;      // poi la rotazione attorno all'origine, in quarti di giro antiorari (0-3)
+    bool is_anchor;         // ancoraggio alla base: il server sovrascrive la mappa selezionata
+    double start_x, start_y, start_theta;   // posizione del robot sulla mappa spostata, da cui riparte dopo la ricarica
 } aperiodic_reposition_request_t;
 
 static exchange_t reposition_request_buffer;
@@ -132,18 +138,20 @@ reposition_status_t read_reposition_status(void) {
     return (reposition_status_t)atomic_load(&reposition_status);
 }
 
-uint32_t request_map_reposition(int dx, int dy, int quarter_turns) {
-    aperiodic_reposition_request_t request = { .num = ++reposition_request_num, .dx = dx, .dy = dy, .quarter_turns = quarter_turns };
+uint32_t request_map_reposition(int dx, int dy, int quarter_turns, bool is_anchor, double start_x, double start_y, double start_theta) {
+    aperiodic_reposition_request_t request = { .num = ++reposition_request_num, .dx = dx, .dy = dy, .quarter_turns = quarter_turns,
+                                               .is_anchor = is_anchor, .start_x = start_x, .start_y = start_y, .start_theta = start_theta };
     exchange_write(&reposition_request_buffer, &request);
     rt_aperiodic_wake(&aperiodic_task);
     return request.num;
 }
 
-uint32_t request_user_zones(const mapping_forbidden_zone_t *zones, int num_zones) {
+uint32_t request_user_zones(const mapping_forbidden_zone_t *zones, int num_zones, bool has_walls, const mapping_virtual_wall_t *walls, int num_walls) {
 
     // scrivi la richiesta con un numero nuovo, poi sveglia il task
-    aperiodic_zones_request_t request = { .num = ++zones_request_num, .num_zones = num_zones };
+    aperiodic_zones_request_t request = { .num = ++zones_request_num, .num_zones = num_zones, .has_walls = has_walls, .num_walls = has_walls ? num_walls : 0 };
     for (int i = 0; i < num_zones && i < MAX_FORBIDDEN_ZONES - 1; i++) request.zones[i] = zones[i];
+    for (int i = 0; i < request.num_walls && i < MAX_VIRTUAL_WALLS; i++) request.walls[i] = walls[i];
     exchange_write(&zones_request_buffer, &request);
     rt_aperiodic_wake(&aperiodic_task);
     return request.num;
@@ -238,17 +246,21 @@ static void encoder_put_u16(map_encoder_t *encoder, uint16_t value) {
 }
 
 bool encode_map_rectangle(const uint8_t *categories, int x, int y, int width, int height,
-                          const mapping_forbidden_zone_t *zones, int num_zones, map_write_function_t write, void *context) {
+                          const mapping_forbidden_zone_t *zones, int num_zones, const mapping_virtual_wall_t *walls, int num_walls,
+                          map_write_function_t write, void *context) {
 
     map_encoder_t encoder = { .write = write, .context = context, .ok = true };
 
-    // magic number, rettangolo e numero di zone
-    for (int i = 0; i < MAP_FILE_MAGIC_LEN; i++) encoder_put(&encoder, (uint8_t)MAP_FILE_MAGIC[i]);
+    // magic number (RTM2 solo se ci sono muri: senza, il file resta leggibile da chi conosce solo RTM1), rettangolo e
+    // numero di zone (e di muri)
+    const char *magic = num_walls > 0 ? MAP_FILE_MAGIC_WALLS : MAP_FILE_MAGIC;
+    for (int i = 0; i < MAP_FILE_MAGIC_LEN; i++) encoder_put(&encoder, (uint8_t)magic[i]);
     encoder_put_u16(&encoder, (uint16_t)x);
     encoder_put_u16(&encoder, (uint16_t)y);
     encoder_put_u16(&encoder, (uint16_t)width);
     encoder_put_u16(&encoder, (uint16_t)height);
     encoder_put(&encoder, (uint8_t)num_zones);
+    if (num_walls > 0) encoder_put(&encoder, (uint8_t)num_walls);
 
     // zone, in celle fini
     for (int i = 0; i < num_zones; i++) {
@@ -256,6 +268,14 @@ bool encode_map_rectangle(const uint8_t *categories, int x, int y, int width, in
         encoder_put_u16(&encoder, (uint16_t)zone_coord_to_cells(zones[i].y));
         encoder_put_u16(&encoder, (uint16_t)zone_size_to_cells(zones[i].w));
         encoder_put_u16(&encoder, (uint16_t)zone_size_to_cells(zones[i].h));
+    }
+
+    // muri, estremi in celle fini (spigoli, come le zone)
+    for (int i = 0; i < num_walls; i++) {
+        encoder_put_u16(&encoder, (uint16_t)zone_coord_to_cells(walls[i].x1));
+        encoder_put_u16(&encoder, (uint16_t)zone_coord_to_cells(walls[i].y1));
+        encoder_put_u16(&encoder, (uint16_t)zone_coord_to_cells(walls[i].x2));
+        encoder_put_u16(&encoder, (uint16_t)zone_coord_to_cells(walls[i].y2));
     }
 
     // celle a sequenze: riga dopo riga, una sequenza può continuare nella riga dopo, al massimo MAP_RUN_MAX celle
@@ -313,10 +333,12 @@ static bool write_to_file(void *context, const uint8_t *data, size_t size) {
 // salva la mappa nel file map.rtm. Ritorna true se ci riesce
 static bool save_map(void) {
 
-    // copia la griglia a categorie e le zone dell'utente, fra un job e l'altro della mappatura
+    // copia la griglia a categorie, le zone dell'utente e i muri, fra un job e l'altro della mappatura
     mapping_forbidden_zone_t zones[MAX_FORBIDDEN_ZONES - 1];
     int num_zones = 0;
-    if (!copy_map_categories(aper_state.categories, 0, 0, FINE_MAP_CELL_NUMBER, FINE_MAP_CELL_NUMBER, zones, &num_zones)) {
+    mapping_virtual_wall_t walls[MAX_VIRTUAL_WALLS];
+    int num_walls = 0;
+    if (!copy_map_categories(aper_state.categories, 0, 0, FINE_MAP_CELL_NUMBER, FINE_MAP_CELL_NUMBER, zones, &num_zones, walls, &num_walls)) {
         fprintf(stderr, "aperiodico: mappa non salvata, la mappatura non lascia la finestra libera per la copia\n");
         return false;
     }
@@ -341,7 +363,7 @@ static bool save_map(void) {
     }
 
     // le sequenze vanno dirette nel file temporaneo, con il CRC calcolato man mano
-    bool ok = encode_map_rectangle(aper_state.categories, x, y, width, height, zones, num_zones, write_to_file, f);
+    bool ok = encode_map_rectangle(aper_state.categories, x, y, width, height, zones, num_zones, walls, num_walls, write_to_file, f);
 
     // chiudi e rinomina sopra il vecchio: fino a questo momento il file vecchio resta intatto
     if (fclose(f) != 0) ok = false;
@@ -351,12 +373,34 @@ static bool save_map(void) {
         return false;
     }
 
-    fprintf(stderr, "aperiodico: mappa salvata in %s (%d x %d celle, %d zone)\n", path, width, height, num_zones);
+    fprintf(stderr, "aperiodico: mappa salvata in %s (%d x %d celle, %d zone, %d muri)\n", path, width, height, num_zones, num_walls);
     return true;
 }
 
-// funzione helper che salva la mappa e ne pubblica l'esito. Dopo una sostituzione o una cancellazione del file non si
-// salva più: il programma sta per riavviarsi con il file nuovo, e un salvataggio lo sovrascriverebbe
+// funzione helper che ricarica la mappa dal file senza riavviare il programma: la prepara nelle griglie libere della
+// mappatura, chiede lo scambio e lo aspetta. Se la mappatura non lo fa in tempo il programma si riavvia come prima
+// (il file è già quello nuovo) e da qui non si salva più. Ritorna true se la mappa è stata ricaricata
+static bool reload_map(bool has_start_pose, double start_x, double start_y, double start_theta, bool is_overwrite) {
+
+    // un file che non supera i controlli si carica come mappa vuota, come all'avvio
+    prepare_map_reload();
+
+    uint32_t reload_num = request_map_swap(has_start_pose, start_x, start_y, start_theta, is_overwrite);
+    int64_t limit = rt_now() + MAP_RELOAD_TIMEOUT;
+    while (read_map_reload_num() != reload_num) {
+        if (rt_now() > limit) {
+            fprintf(stderr, "aperiodico: la mappatura non ha ricaricato la mappa in tempo, il programma si riavvia\n");
+            aper_state.is_saving_disabled = true;
+            request_restart();
+            return false;
+        }
+        rt_sleep_until(rt_now() + ZONES_APPLY_WAIT);
+    }
+    return true;
+}
+
+// funzione helper che salva la mappa e ne pubblica l'esito. Dopo una ricarica non riuscita non si salva più: il
+// programma sta per riavviarsi con il file nuovo, e un salvataggio lo sovrascriverebbe
 static void save_map_and_publish(void) {
 
     if (aper_state.is_saving_disabled) return;
@@ -380,9 +424,10 @@ static void apply_map_file_request(const aperiodic_file_request_t *request) {
         ok = rename(download_path, path) == 0;
     }
 
-    if (ok) aper_state.is_saving_disabled = true;
-
     fprintf(stderr, "aperiodico: mappa %s%s\n", request->is_delete ? "cancellata" : "sostituita", ok ? "" : ": NON RIUSCITO");
+
+    // la mappa nuova (o vuota) si carica subito: l'esito arriva all'app quando il robot la sta già usando
+    if (ok) ok = reload_map(false, 0, 0, 0, false);
 
     atomic_store(&file_request_ok, ok);
     atomic_store(&file_request_done_num, request->num);
@@ -436,16 +481,22 @@ static bool reposition_map_file(const aperiodic_reposition_request_t *request) {
     FILE *f = fopen(path, "rb");
     if (!f) return false;
 
-    // intestazione: numero magico, rettangolo, zone
+    // intestazione: numero magico (RTM1, o RTM2 con i muri), rettangolo, zone (e muri)
     uint32_t crc = 0;
     char magic[MAP_FILE_MAGIC_LEN];
     uint16_t x0, y0, width, height;
-    uint8_t num_zones;
-    bool ok = fread(magic, 1, MAP_FILE_MAGIC_LEN, f) == MAP_FILE_MAGIC_LEN && memcmp(magic, MAP_FILE_MAGIC, MAP_FILE_MAGIC_LEN) == 0;
+    uint8_t num_zones, num_walls = 0;
+    bool ok = fread(magic, 1, MAP_FILE_MAGIC_LEN, f) == MAP_FILE_MAGIC_LEN;
+    bool has_walls = ok && memcmp(magic, MAP_FILE_MAGIC_WALLS, MAP_FILE_MAGIC_LEN) == 0;
+    ok = ok && (has_walls || memcmp(magic, MAP_FILE_MAGIC, MAP_FILE_MAGIC_LEN) == 0);
     if (ok) crc = map_crc32(crc, (const uint8_t *)magic, MAP_FILE_MAGIC_LEN);
     ok = ok && read_file_u16(f, &crc, &x0) && read_file_u16(f, &crc, &y0) && read_file_u16(f, &crc, &width) && read_file_u16(f, &crc, &height);
     ok = ok && fread(&num_zones, 1, 1, f) == 1 && num_zones <= MAX_FORBIDDEN_ZONES - 1;
     if (ok) crc = map_crc32(crc, &num_zones, 1);
+    if (has_walls) {
+        ok = ok && fread(&num_walls, 1, 1, f) == 1 && num_walls <= MAX_VIRTUAL_WALLS;
+        if (ok) crc = map_crc32(crc, &num_walls, 1);
+    }
 
     // zone: i loro spigoli si spostano e ruotano, il rettangolo ruotato è ancora un rettangolo
     mapping_forbidden_zone_t zones[MAX_FORBIDDEN_ZONES - 1];
@@ -459,6 +510,18 @@ static bool reposition_map_file(const aperiodic_reposition_request_t *request) {
         zones[i].y = fmin(v1, v2) * FINE_MAP_CELL_SIZE;
         zones[i].w = fabs(u2 - u1) * FINE_MAP_CELL_SIZE;
         zones[i].h = fabs(v2 - v1) * FINE_MAP_CELL_SIZE;
+    }
+
+    // muri: i due estremi si spostano e ruotano come gli spigoli delle zone
+    mapping_virtual_wall_t walls[MAX_VIRTUAL_WALLS];
+    for (int i = 0; ok && i < num_walls; i++) {
+        uint16_t c[4];
+        ok = read_file_u16(f, &crc, &c[0]) && read_file_u16(f, &crc, &c[1]) && read_file_u16(f, &crc, &c[2]) && read_file_u16(f, &crc, &c[3]);
+        double u1, v1, u2, v2;
+        reposition_corner(c[0] - FINE_MAP_ORIGIN, c[1] - FINE_MAP_ORIGIN, request->dx, request->dy, request->quarter_turns, &u1, &v1);
+        reposition_corner(c[2] - FINE_MAP_ORIGIN, c[3] - FINE_MAP_ORIGIN, request->dx, request->dy, request->quarter_turns, &u2, &v2);
+        walls[i] = (mapping_virtual_wall_t){ .x1 = u1 * FINE_MAP_CELL_SIZE, .y1 = v1 * FINE_MAP_CELL_SIZE,
+                                             .x2 = u2 * FINE_MAP_CELL_SIZE, .y2 = v2 * FINE_MAP_CELL_SIZE };
     }
 
     // celle a sequenze: ognuna va al suo posto nuovo nella griglia a categorie, che parte tutta sconosciuta
@@ -498,17 +561,18 @@ static bool reposition_map_file(const aperiodic_reposition_request_t *request) {
     if (!find_map_rectangle(aper_state.categories, &x, &y, &w, &h)) return false;
     FILE *out = fopen(tmp_path, "wb");
     if (!out) return false;
-    ok = encode_map_rectangle(aper_state.categories, x, y, w, h, zones, num_zones, write_to_file, out);
+    ok = encode_map_rectangle(aper_state.categories, x, y, w, h, zones, num_zones, walls, num_walls, write_to_file, out);
     if (fclose(out) != 0) ok = false;
     if (!ok || rename(tmp_path, path) != 0) {
         remove(tmp_path);
         return false;
     }
 
-    aper_state.is_saving_disabled = true;
     fprintf(stderr, "aperiodico: base riposizionata, mappa spostata di (%d, %d) celle e ruotata di %d quarti di giro\n",
             request->dx, request->dy, request->quarter_turns);
-    return true;
+
+    // la mappa spostata si carica subito, con il robot nella sua posizione sulla mappa nuova
+    return reload_map(true, request->start_x, request->start_y, request->start_theta, request->is_anchor);
 }
 
 // funzione helper che controlla le zone volute, le passa alla mappatura e, appena applicate, salva la mappa (se un file
@@ -517,9 +581,15 @@ static void apply_user_zones_request(const aperiodic_zones_request_t *request) {
 
     // ogni zona deve stare dentro la griglia ed essere larga e alta almeno una cella
     const double half_side = FINE_MAP_ORIGIN * FINE_MAP_CELL_SIZE;
-    if (request->num_zones < 0 || request->num_zones > MAX_FORBIDDEN_ZONES - 1) {
-        fprintf(stderr, "aperiodico: zone rifiutate, al massimo %d\n", MAX_FORBIDDEN_ZONES - 1);
+    if (request->num_zones < 0 || request->num_zones > MAX_FORBIDDEN_ZONES - 1 || request->num_walls < 0 || request->num_walls > MAX_VIRTUAL_WALLS) {
+        fprintf(stderr, "aperiodico: zone rifiutate, al massimo %d zone e %d muri\n", MAX_FORBIDDEN_ZONES - 1, MAX_VIRTUAL_WALLS);
         return;
+    }
+    for (int i = 0; i < request->num_walls; i++) {
+        if (!is_virtual_wall_valid(request->walls[i])) {
+            fprintf(stderr, "aperiodico: zone rifiutate, il muro %d esce dalla griglia o è più corto di una cella\n", i);
+            return;
+        }
     }
     for (int i = 0; i < request->num_zones; i++) {
         const mapping_forbidden_zone_t *z = &request->zones[i];
@@ -531,8 +601,10 @@ static void apply_user_zones_request(const aperiodic_zones_request_t *request) {
     }
 
     // passa le zone alla mappatura, con la versione della richiesta
-    mapping_user_zones_t user_zones = { .version = request->num, .num_zones = request->num_zones };
+    mapping_user_zones_t user_zones = { .version = request->num, .num_zones = request->num_zones, .has_walls = request->has_walls,
+                                        .num_walls = request->num_walls };
     for (int i = 0; i < request->num_zones; i++) user_zones.zones[i] = request->zones[i];
+    for (int i = 0; i < request->num_walls; i++) user_zones.walls[i] = request->walls[i];
     write_user_zones(&user_zones);
 
     // aspetta che la mappatura le applichi (con la posizione persa non le applica: si salveranno più avanti)
@@ -544,7 +616,7 @@ static void apply_user_zones_request(const aperiodic_zones_request_t *request) {
         }
         rt_sleep_until(rt_now() + ZONES_APPLY_WAIT);
     }
-    fprintf(stderr, "aperiodico: %d zone proibite applicate\n", request->num_zones);
+    fprintf(stderr, "aperiodico: %d zone proibite applicate%s\n", request->num_zones, request->has_walls ? " (e i muri virtuali)" : "");
 
     // salva subito, se esiste già un file della mappa
     char path[256];
@@ -569,6 +641,16 @@ void job_aperiodic(void *arg) {
         run_position_search(search_request.num);
     }
 
+    // Richiesta: Salvataggio della Mappa (prima dello spostamento del file: all'aggancio si chiedono tutti e due, e il file
+    // da spostare è quello con la sessione appena finita)
+    aperiodic_save_request_t save_request = {0};
+    exchange_read(&save_request_buffer, &save_request);
+
+    if (save_request.num != aper_state.last_save_num) {
+        aper_state.last_save_num = save_request.num;
+        save_map_and_publish();
+    }
+
     // Richiesta: Riposiziona base (dalla mappatura, dopo la ricerca)
     aperiodic_reposition_request_t reposition_request = {0};
     exchange_read(&reposition_request_buffer, &reposition_request);
@@ -576,15 +658,6 @@ void job_aperiodic(void *arg) {
     if (reposition_request.num != aper_state.last_reposition_num) {
         aper_state.last_reposition_num = reposition_request.num;
         set_reposition_status(reposition_map_file(&reposition_request) ? REPOSITION_DONE : REPOSITION_FAILED);
-    }
-
-    // Richiesta: Salvataggio della Mappa
-    aperiodic_save_request_t save_request = {0};
-    exchange_read(&save_request_buffer, &save_request);
-
-    if (save_request.num != aper_state.last_save_num) {
-        aper_state.last_save_num = save_request.num;
-        save_map_and_publish();
     }
 
     // Richiesta: Scrittura delle Zone Proibite

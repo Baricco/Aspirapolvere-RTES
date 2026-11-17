@@ -17,7 +17,5 @@ char *build_robot_state_if_due(void);
 // il server ha ricevuto l'ultimo stato costruito: fino al prossimo cambiamento non serve rimandarlo.
 // Se non viene chiamata (rete giù) lo stato resta da mandare
 void mark_robot_state_sent(void);
-// true se il server ha ricevuto uno stato con Riposiziona base riuscito: da lì il programma si può riavviare
-bool is_reposition_done_sent(void);
 
 #endif

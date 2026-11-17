@@ -15,6 +15,7 @@ import '../../config/app_config.dart';
 import '../../map/map_painter.dart';
 import '../../map/map_view.dart';
 import '../../widgets/alerts_box.dart';
+import '../../widgets/confirm_dialog.dart';
 import '../../widgets/glass_panel.dart';
 import '../../widgets/joystick.dart';
 import '../../widgets/main_button.dart';
@@ -168,6 +169,9 @@ class _RemoteScreenState extends ConsumerState<RemoteScreen> with StateIntervalM
                         trail: trail?.trail.points ?? const [],
                         trailRevision: trail?.revision ?? 0,
                         zones: state?.userZones ?? const [],
+                        walls: state?.virtualWalls ?? const [],
+                        target: state?.targetState == 'going' && state?.target != null ? Offset(state!.target!.x, state.target!.y) : null,
+                        onLongPress: hasData && state.online ? (point) => confirmGoTo(context, ref, point) : null,
                         showBase: state?.startedOnBase ?? false,
                         robot: hasData && state.positionValid ? RobotPose(state.x, state.y, state.thetaDeg) : null,
                         controller: _mapController,

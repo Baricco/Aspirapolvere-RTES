@@ -200,10 +200,55 @@ void main() {
       editor.endDrag();
       expect(editor.zones, [const Zone(1.5, 0.8, 1.0, 0.8)]);
       // la x sta in alto a destra
-      expect(editor.deleteHit(const Offset(2.5, 1.6), 0.05), 0);
-      expect(editor.deleteHit(const Offset(1.5, 0.8), 0.05), -1);
-      editor.removeAt(0);
+      expect(editor.deleteAt(const Offset(1.5, 0.8), 0.05), false);
+      expect(editor.deleteAt(const Offset(2.5, 1.6), 0.05), true);
       expect(editor.zones, isEmpty);
+    });
+
+    test('obiettivo dato dall\'app nello stato', () {
+      final going = RobotState({
+        'navigation': {
+          'state': 'go_to',
+          'target': {'state': 'going', 'x': 1.5, 'y': -0.5}
+        }
+      });
+      expect(going.targetState, 'going');
+      expect(going.target, (x: 1.5, y: -0.5));
+      final none = RobotState({
+        'navigation': {
+          'target': {'state': 'none'}
+        }
+      });
+      expect((none.targetState, none.target), ('none', null));
+      expect(RobotState({}).targetState, 'none');
+    });
+
+    test('muri virtuali: disegnati, spostati, allungati da un estremo e cancellati con la x a metà', () {
+      final editor = ZoneEditor(const [])..target = EditTarget.walls;
+      // trascinando su un punto vuoto si disegna un muro
+      editor.startDrag(const Offset(1, 1), 0.1);
+      editor.updateDrag(const Offset(1.02, 1));      // più corto di una cella: ancora niente
+      expect(editor.walls, isEmpty);
+      editor.updateDrag(const Offset(2, 1));
+      editor.endDrag();
+      expect(editor.walls, [const VirtualWall(1, 1, 2, 1)]);
+      // trascinando un estremo si sposta solo quello
+      editor.startDrag(const Offset(2, 1), 0.1);
+      editor.updateDrag(const Offset(2, 2));
+      editor.endDrag();
+      expect(editor.walls, [const VirtualWall(1, 1, 2, 2)]);
+      // trascinando sopra il muro si sposta tutto
+      editor.startDrag(const Offset(1.25, 1.25), 0.1);
+      editor.updateDrag(const Offset(1.25, 0.75));
+      editor.endDrag();
+      expect(editor.walls, [const VirtualWall(1, 0.5, 2, 1.5)]);
+      // la x sta a metà
+      expect(editor.deleteAt(const Offset(1, 0.5), 0.05), false);
+      expect(editor.deleteAt(const Offset(1.5, 1), 0.05), true);
+      expect(editor.walls, isEmpty);
+      // al massimo 16 muri
+      final full = ZoneEditor(const [], [for (var i = 0; i < 16; i++) VirtualWall(i.toDouble(), 20, i + 0.5, 20)])..target = EditTarget.walls;
+      expect(full.canAdd, false);
     });
 
     test('al massimo 15 zone, e dentro la mappa', () {

@@ -23,6 +23,7 @@ typedef struct {
     bool is_full_map_pending;           // true se va mandata la copia privata intera (all'avvio, o dopo un 409)
     const char *saved_map_pending;      // motivo con cui va mandato il file map.rtm (SAVED_REASON_*), NULL se non va mandato
     uint32_t last_save_count;           // ultimo read_map_save_count() visto: quando cambia c'è un file nuovo da mandare
+    uint32_t last_reload_num;           // ultimo read_map_reload_num() visto: quando cambia la mappa è stata ricaricata, si riparte come all'avvio
     char file_crc_text[MAP_CRC_TEXT_LEN];   // CRC del file map.rtm, vuoto se il file non c'è
 
     // rettangolo, in celle fini, delle posizioni del robot non ancora mandate
@@ -51,22 +52,34 @@ static inline void set_map_category(uint8_t *categories, int x, int y, uint8_t c
 
 bool decode_map_data(const uint8_t *data, size_t size, uint8_t *categories) {
 
-    // header: magic number, rettangolo dentro la griglia, numero di zone
-    const size_t header_len = MAP_FILE_HEADER_LEN - MAP_FILE_CRC_LEN;
-    if (size < MAP_FILE_HEADER_LEN || memcmp(data, MAP_FILE_MAGIC, MAP_FILE_MAGIC_LEN) != 0) return false;
+    // header: magic number (RTM1, o RTM2 con il numero di muri dopo quello delle zone), rettangolo dentro la griglia, numero di zone
+    size_t header_len = MAP_FILE_HEADER_LEN - MAP_FILE_CRC_LEN;
+    if (size < MAP_FILE_HEADER_LEN) return false;
+    bool has_walls = memcmp(data, MAP_FILE_MAGIC_WALLS, MAP_FILE_MAGIC_LEN) == 0;
+    if (!has_walls && memcmp(data, MAP_FILE_MAGIC, MAP_FILE_MAGIC_LEN) != 0) return false;
 
     int x = read_u16(data + 4), y = read_u16(data + 6), width = read_u16(data + 8), height = read_u16(data + 10);
-    int num_zones = data[12];
+    int num_zones = data[12], num_walls = 0;
+    if (has_walls) {
+        if (size < MAP_FILE_HEADER_LEN + 1) return false;
+        num_walls = data[13];
+        header_len++;
+    }
     if (width == 0 || height == 0 || x + width > FINE_MAP_CELL_NUMBER || y + height > FINE_MAP_CELL_NUMBER) return false;
-    if (num_zones > MAX_FORBIDDEN_ZONES - 1) return false;
+    if (num_zones > MAX_FORBIDDEN_ZONES - 1 || num_walls > MAX_VIRTUAL_WALLS) return false;
 
     // zone: devono stare dentro la griglia
     size_t offset = header_len;
     const size_t end = size - MAP_FILE_CRC_LEN;
-    if (offset + (size_t)num_zones * MAP_FILE_ZONE_LEN > end) return false;
+    if (offset + (size_t)num_zones * MAP_FILE_ZONE_LEN + (size_t)num_walls * MAP_FILE_WALL_LEN > end) return false;
     for (int i = 0; i < num_zones; i++, offset += MAP_FILE_ZONE_LEN) {
         if (read_u16(data + offset) + read_u16(data + offset + 4) > FINE_MAP_CELL_NUMBER ||
             read_u16(data + offset + 2) + read_u16(data + offset + 6) > FINE_MAP_CELL_NUMBER) return false;
+    }
+
+    // muri: gli estremi devono stare dentro la griglia
+    for (int i = 0; i < num_walls; i++, offset += MAP_FILE_WALL_LEN) {
+        for (int k = 0; k < 4; k++) if (read_u16(data + offset + 2 * k) > FINE_MAP_CELL_NUMBER) return false;
     }
 
     // il CRC si controlla prima di scrivere le celle: un file rovinato non tocca la griglia
@@ -208,6 +221,7 @@ void init_live_map(void) {
     live_state.is_full_map_pending = true;
     live_state.saved_map_pending = SAVED_REASON_STARTUP;
     live_state.last_save_count = read_map_save_count();
+    live_state.last_reload_num = read_map_reload_num();
     live_state.is_positions_empty = true;
     refresh_file_crc();
 }
@@ -266,7 +280,7 @@ static bool send_full_map(http_connection_t *connection) {
         width = height = 1;
     }
 
-    bool ok = encode_map_rectangle(confirmed_categories, x, y, width, height, NULL, 0, append_bytes, &encoded);
+    bool ok = encode_map_rectangle(confirmed_categories, x, y, width, height, NULL, 0, NULL, 0, append_bytes, &encoded);
     long code = HTTP_FAILED;
     if (ok) {
         snprintf(request_path, sizeof request_path, PATH_LIVE_MAP, (unsigned)live_state.version);
@@ -294,7 +308,7 @@ static bool send_map_changes(http_connection_t *connection) {
 
     // chi legge rifà la copia se un job della mappatura ci è passato sopra: la mappatura non aspetta mai.
     // Se non ci riesce si riprova al prossimo giro, il rettangolo delle posizioni resta
-    if (!copy_map_categories(current_categories, window_x, window_y, window_width, window_height, NULL, NULL)) return true;
+    if (!copy_map_categories(current_categories, window_x, window_y, window_width, window_height, NULL, NULL, NULL, NULL)) return true;
 
     int x, y, width, height;
     if (!find_changed_rectangle(confirmed_categories, current_categories, window_x, window_y, window_width, window_height, &x, &y, &width, &height)) {
@@ -305,7 +319,7 @@ static bool send_map_changes(http_connection_t *connection) {
     byte_buffer_t encoded = {0};
     char request_path[128];
     long code = HTTP_FAILED;
-    if (encode_map_rectangle(current_categories, x, y, width, height, NULL, 0, append_bytes, &encoded)) {
+    if (encode_map_rectangle(current_categories, x, y, width, height, NULL, 0, NULL, 0, append_bytes, &encoded)) {
         snprintf(request_path, sizeof request_path, PATH_LIVE_MAP_PATCH, (unsigned)live_state.version, (unsigned)(live_state.version + 1));
         code = send_http_request(connection, "POST", request_path, encoded.data, encoded.size, false, NULL, REQUEST_TIMEOUT_S);
     }
@@ -330,6 +344,14 @@ static bool send_map_changes(http_connection_t *connection) {
 }
 
 bool send_live_map(http_connection_t *connection) {
+
+    // mappa ricaricata senza riavvio (cambio di mappa, Riposiziona base, ancoraggio): si riparte come all'avvio, con la
+    // copia privata dal file nuovo e la mappa intera da mandare. Il file va al server come all'avvio (se il CRC non è quello
+    // della selezionata diventa una mappa nuova), dopo l'ancoraggio invece sovrascrive la selezionata
+    if (read_map_reload_num() != live_state.last_reload_num) {
+        init_live_map();
+        if (read_map_reload_overwrites()) live_state.saved_map_pending = SAVED_REASON_SAVE;
+    }
 
     // un salvataggio nuovo: il file va mandato al server (se quello dell'avvio non è ancora partito resta lui: è
     // il server a decidere se il file è una mappa nuova)

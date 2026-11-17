@@ -24,6 +24,8 @@
  * 65665   uint8  strip_axis_x: true se le strisce vanno lungo x, quindi le due metà di una cella sono y bassa e y alta
  * 65666   uint8[2] riservati
  * 65668   uint8[16384] clean_cell_mask: 2 bit per cella, metà pulite (bit = 2 * cella + metà, tasks/vacuum/navigation.c)
+ * 82052   double[5] pursuit_points: x, y del punto vicino e del punto lontano dell'inseguimento, 1 se valgono (tutto a 0 se
+ *         il programma non ha il campo: c'è solo nelle copie di prova)
  *
  * Metà pulite: stanno in `nav_state`, una struttura privata di navigation.c che cambia spesso. Per non dipendere dall'ordine
  * dei campi, la posizione di clean_cell_mask e strip_axis_x si chiede alle informazioni di debug con readelf (una volta sola).
@@ -58,16 +60,18 @@
 #define POSA_DIM   32                    /* sizeof(drv_pose_t), driver/contacts.h */
 #define PULITE_TESTA 4                   /* presente, strip_axis_x, 2 riservati */
 #define PULITE_DIM (CELLE / 4)           /* sizeof(clean_cell_mask): 2 bit per cella */
+#define MIRA_DIM   40                    /* sizeof(pursuit_points): 5 double */
 
 enum { CERCO = 0, LETTA = 1, TERMINATO = 2, ERRORE = 3 };
 
 static const char *uscita = "build/sim/mappa_robot", *simbolo = "navigation_map_data";
 static pid_t figlio;
-static uint8_t file_out[TESTA + CELLE + PULITE_TESTA + PULITE_DIM];
+static uint8_t file_out[TESTA + CELLE + PULITE_TESTA + PULITE_DIM + MIRA_DIM];
 static uint32_t letture, ultima_versione;
 static int fd_mem = -1;                 /* la memoria del programma */
 static uint64_t ind_sc_posa, ind_buf_posa;   /* 0 = il programma non ha quei simboli */
 static uint64_t ind_maschera, ind_asse;      /* 0 = metà pulite non trovate */
+static uint64_t ind_mira;                    /* 0 = punti dell'inseguimento non trovati */
 
 static void al_segnale(int s)
 {
@@ -173,7 +177,7 @@ static int base_caricamento(pid_t pid, const char *percorso, uint64_t *base)
 }
 
 /* Chiede a readelf la posizione di due campi di nav_state nelle informazioni di debug di `exe`. 0 se le trova tutte e due. */
-static int cerca_campi_pulizia(const char *exe, uint64_t *off_maschera, uint64_t *off_asse)
+static int cerca_campi_pulizia(const char *exe, uint64_t *off_maschera, uint64_t *off_asse, uint64_t *off_mira)
 {
 	char cmd[700], riga[400];
 	if (strchr(exe, '\''))
@@ -193,10 +197,11 @@ static int cerca_campi_pulizia(const char *exe, uint64_t *off_maschera, uint64_t
 				riga[--n] = 0;
 			q = strrchr(riga, ' ');
 			pending = !q ? NULL : !strcmp(q + 1, "clean_cell_mask") ? off_maschera :
-			         !strcmp(q + 1, "strip_axis_x") ? off_asse : NULL;
+			         !strcmp(q + 1, "strip_axis_x") ? off_asse : !strcmp(q + 1, "pursuit_points") ? off_mira : NULL;
 		} else if (pending && (q = strstr(riga, "DW_AT_data_member_location:"))) {
 			*pending = strtoull(q + strlen("DW_AT_data_member_location:"), NULL, 0);
-			trovati++;
+			if (pending != off_mira)
+				trovati++;
 			pending = NULL;
 		}
 	}
@@ -214,6 +219,8 @@ static void leggi_pulite(void)
 		return;
 	d[1] = asse;
 	d[0] = 1;
+	if (!ind_mira || pread(fd_mem, d + PULITE_TESTA + PULITE_DIM, MIRA_DIM, (off_t)ind_mira) != MIRA_DIM)
+		memset(d + PULITE_TESTA + PULITE_DIM, 0, MIRA_DIM);
 }
 
 /* Un giro di lettura: trova la griglia (la prima volta, o se il programma ha fatto exec) e la copia nel file. */
@@ -231,7 +238,7 @@ static void leggi(void)
 		snprintf(exe_noto, sizeof exe_noto, "%s", exe);
 		address = 0;
 		ind_sc_posa = ind_buf_posa = 0;
-		ind_maschera = ind_asse = 0;
+		ind_maschera = ind_asse = ind_mira = 0;
 		if (fd_mem >= 0)
 			close(fd_mem);
 		fd_mem = -1;
@@ -261,11 +268,13 @@ static void leggi(void)
 			ind_sc_posa = base + v1;
 			ind_buf_posa = base + v2;
 		}
-		uint64_t v3, d3, off_m = 0, off_a = 0;
+		uint64_t v3, d3, off_m = 0, off_a = 0, off_r = UINT64_MAX;
 		if (!cerca_simbolo(exe, "nav_state", &v3, &d3, &pie2, ignora, sizeof ignora) &&
-		    !cerca_campi_pulizia(exe, &off_m, &off_a) && off_m + PULITE_DIM <= d3 && off_a < d3) {
+		    !cerca_campi_pulizia(exe, &off_m, &off_a, &off_r) && off_m + PULITE_DIM <= d3 && off_a < d3) {
 			ind_maschera = base + v3 + off_m;
 			ind_asse = base + v3 + off_a;
+			if (off_r != UINT64_MAX && off_r + MIRA_DIM <= d3)
+				ind_mira = base + v3 + off_r;
 		}
 		snprintf(p, sizeof p, "/proc/%d/mem", (int)figlio);
 		fd_mem = open(p, O_RDONLY);

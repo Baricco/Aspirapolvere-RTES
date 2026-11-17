@@ -26,8 +26,11 @@
 // nomi degli stati della navigazione, nello stesso ordine di nav_state_t
 static const char *const NAV_STATE_NAMES[] = {
     "wait", "explore", "clean", "follow_borders", "return_home", "hook_up", "follow_path", "unlock", "sleep", "align",
-    "failure", "border_lap", "leave_base", "cross", "pause", "remote", "retrace",
+    "failure", "border_lap", "leave_base", "cross", "pause", "remote", "retrace", "go_to",
 };
+
+// nomi dell'esito dell'obiettivo dell'app, nello stesso ordine di nav_target_state_t
+static const char *const TARGET_STATE_NAMES[] = { "none", "going", "reached", "failed" };
 
 // nomi dei tipi di obiettivo, nello stesso ordine di objective_type_t
 static const char *const OBJECTIVE_NAMES[] = { "stop", "rotate", "move", "const_speed" };
@@ -84,6 +87,7 @@ typedef struct {
     bool is_remote, remote_brushes, remote_suction;
     uint16_t last_command_num;
     nav_command_result_t last_command_result;
+    int target_state;               // esito dell'obiettivo dell'app: l'app mostra l'errore appena diventa "failed"
     int driver_phase, task_fault;
     char fault_text[FAULT_TEXT_MAX];
     int docking_result;
@@ -132,10 +136,6 @@ void mark_robot_state_sent(void) {
     robot_state.last_sent_t = rt_now();
 }
 
-bool is_reposition_done_sent(void) {
-    return robot_state.is_first_sent && robot_state.sent.reposition_status == REPOSITION_DONE;
-}
-
 // funzione helper che legge tutto dai doppi buffer dei task e del driver
 static void read_everything(state_readings_t *readings) {
     readings->navigation = read_navigation_status();
@@ -165,6 +165,7 @@ static void fill_important_state(const state_readings_t *readings, important_sta
     important->remote_suction = readings->navigation.remote_suction;
     important->last_command_num = readings->navigation.last_command_num;
     important->last_command_result = readings->navigation.last_command_result;
+    important->target_state = readings->navigation.target_state;
     important->driver_phase = readings->driver.phase;
     important->task_fault = readings->driver.task_fault;
     snprintf(important->fault_text, sizeof important->fault_text, "%s", readings->driver.fault);
@@ -185,6 +186,8 @@ static void fill_important_state(const state_readings_t *readings, important_sta
     // le zone: solo quelle presenti, il resto dell'array resta azzerato
     important->zones.num_zones = readings->zones.num_zones;
     for (int i = 0; i < readings->zones.num_zones && i < MAX_FORBIDDEN_ZONES; i++) important->zones.forbidden_zones[i] = readings->zones.forbidden_zones[i];
+    important->zones.num_walls = readings->zones.num_walls;
+    for (int i = 0; i < readings->zones.num_walls && i < MAX_VIRTUAL_WALLS; i++) important->zones.walls[i] = readings->zones.walls[i];
 }
 
 // funzione helper che restituisce il nome numero index di una tabella di nomi, "unknown" se è fuori dalla tabella
@@ -221,6 +224,14 @@ static char *build_json(const state_readings_t *readings) {
     cJSON_AddStringToObject(navigation, "interrupted_mission", readings->navigation.interrupted_mission == NAV_STATE_WAIT ? "none" :
                             name_of(NAV_STATE_NAMES, ARRAY_SIZE(NAV_STATE_NAMES), readings->navigation.interrupted_mission));
     cJSON_AddNumberToObject(navigation, "mission_number", readings->navigation.mission_number);
+
+    // obiettivo dell'app: esito e posizione (la posizione solo se c'è stato un obiettivo)
+    cJSON *target = cJSON_AddObjectToObject(navigation, "target");
+    cJSON_AddStringToObject(target, "state", name_of(TARGET_STATE_NAMES, ARRAY_SIZE(TARGET_STATE_NAMES), readings->navigation.target_state));
+    if (readings->navigation.target_state != NAV_TARGET_NONE) {
+        cJSON_AddNumberToObject(target, "x", round_to(readings->navigation.target_x, 3));
+        cJSON_AddNumberToObject(target, "y", round_to(readings->navigation.target_y, 3));
+    }
     cJSON_AddNumberToObject(navigation, "mission_duration_s", (double)robot_state.mission_duration_s);
 
     // obiettivo mandato al movimento
@@ -254,6 +265,15 @@ static char *build_json(const state_readings_t *readings) {
         cJSON_AddNumberToObject(zone, "w", round_to(readings->zones.forbidden_zones[i].w, 3));
         cJSON_AddNumberToObject(zone, "h", round_to(readings->zones.forbidden_zones[i].h, 3));
         cJSON_AddItemToArray(zones, zone);
+    }
+    cJSON *walls = cJSON_AddArrayToObject(map, "virtual_walls");
+    for (int i = 0; i < readings->zones.num_walls && i < MAX_VIRTUAL_WALLS; i++) {
+        cJSON *wall = cJSON_CreateObject();
+        cJSON_AddNumberToObject(wall, "x1", round_to(readings->zones.walls[i].x1, 3));
+        cJSON_AddNumberToObject(wall, "y1", round_to(readings->zones.walls[i].y1, 3));
+        cJSON_AddNumberToObject(wall, "x2", round_to(readings->zones.walls[i].x2, 3));
+        cJSON_AddNumberToObject(wall, "y2", round_to(readings->zones.walls[i].y2, 3));
+        cJSON_AddItemToArray(walls, wall);
     }
 
     // sicurezza

@@ -41,6 +41,9 @@ class MapView extends StatefulWidget {
     this.trail = const [],
     this.trailRevision = 0,
     this.zones = const [],
+    this.walls = const [],
+    this.target,
+    this.onLongPress,
     this.showBase = true,
     this.robot,
     this.controller,
@@ -55,6 +58,11 @@ class MapView extends StatefulWidget {
   final List<Offset> trail;
   final int trailRevision;
   final List<Zone> zones; // ignorate quando c'è l'editor: si disegnano le sue
+  final List<VirtualWall> walls; // come le zone
+  final Offset? target; // obiettivo dato dall'app, in metri
+
+  /// Pressione lunga su un punto della mappa (in metri), quando non si modificano le zone: per dare un obiettivo al robot.
+  final void Function(Offset point)? onLongPress;
   final bool showBase;
   final RobotPose? robot;
   final MapViewController? controller;
@@ -162,9 +170,7 @@ class _MapViewState extends State<MapView> {
     }
     final point = canvasToWorld(event.localPosition);
     final metersPerPoint = fineMapCellSize / pixelsPerCell / _scale;
-    final deleted = editor.deleteHit(point, zoneDeleteRadius * 1.3 * metersPerPoint);
-    if (deleted >= 0) {
-      editor.removeAt(deleted);
+    if (editor.deleteAt(point, zoneDeleteRadius * 1.3 * metersPerPoint)) {
       _zonesChanged();
       return;
     }
@@ -215,7 +221,11 @@ class _MapViewState extends State<MapView> {
             onPointerMove: _pointerMove,
             onPointerUp: _pointerUp,
             onPointerCancel: _pointerUp,
-            child: CustomPaint(
+            child: GestureDetector(
+              onLongPressStart: editor == null && widget.onLongPress != null
+                  ? (details) => widget.onLongPress!(canvasToWorld(details.localPosition))
+                  : null,
+              child: CustomPaint(
               size: const Size(mapCanvasSide, mapCanvasSide),
               painter: MapPainter(
                 colors: colors,
@@ -223,13 +233,17 @@ class _MapViewState extends State<MapView> {
                 imageRect: _imageRect,
                 trail: widget.trail,
                 zones: editor?.zones ?? widget.zones,
+                walls: editor?.walls ?? widget.walls,
+                target: widget.target,
                 showBase: widget.showBase,
                 robot: widget.robot,
                 editing: editor != null,
                 scale: _scale,
                 revision: Object.hash(widget.mapRevision, widget.trailRevision, _editRevision, widget.robot?.x,
-                    widget.robot?.y, widget.robot?.thetaDeg, Object.hashAll(widget.zones), widget.showBase),
+                    widget.robot?.y, widget.robot?.thetaDeg, Object.hashAll(widget.zones), Object.hashAll(widget.walls),
+                    widget.target, widget.showBase),
               ),
+            ),
             ),
           ),
         ),

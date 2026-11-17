@@ -78,6 +78,22 @@
 
 #define V_RETREAT          0.08
 #define RETREAT_DISTANCE     0.25
+
+/* Raddrizzamento: il muro davanti è la retta con più punti del lidar fra WALL_MIN e WALL_MAX metri, entro WALL_HALF_ANGLE
+ * dalla direzione del robot; la base è la parte di quei punti che sporge dal muro fra BASE_MIN e BASE_MAX metri, entro
+ * BASE_HALF_WIDTH lungo il muro (nelle prove: sporge 6,1-6,9 cm, larga 12-13,5 cm). Sui dati veri l'angolo misurato così
+ * coincide con quello della mappa entro 1-2,5°. */
+#define WALL_MIN             0.05
+#define WALL_MAX             1.20
+#define WALL_HALF_ANGLE      1.0472     /* rad (60°) */
+#define WALL_FIT_TOL         0.01       /* m: punti entro tanto dalla retta, all'ultimo passo dell'adattamento */
+#define WALL_MIN_POINTS      30
+#define BASE_MIN             0.03
+#define BASE_MAX             0.15
+#define BASE_HALF_WIDTH      0.35
+#define BASE_MIN_POINTS      5
+#define STRAIGHTEN_MAX_ANGLE 0.7854     /* rad (45°): oltre, la misura del muro non è credibile e si gira come prima */
+#define STRAIGHTEN_MAX_NS    (10000 * 1000000LL)
 #define RETREAT_MAX_NS     (8000 * 1000000LL)
 #define APPROACH_MAX_NS   (120000 * 1000000LL)
 #define TOTAL_MAX_NS      (300000 * 1000000LL)
@@ -192,6 +208,81 @@ static int side(int left, int right)
 
 /* -------------------------------------------------------------------------------------------------- lidar --- */
 
+/* Il muro davanti e la base, da un giro del lidar. Il muro: retta x = k y + q (sistema del robot) adattata ai minimi
+ * quadrati tre volte, ogni volta solo con i punti vicini alla retta precedente (5, 2, 1 cm): la base e gli oggetti davanti
+ * escono dal conto. La base: i punti che sporgono dal muro fra BASE_MIN e BASE_MAX, entro BASE_HALF_WIDTH dal punto del
+ * muro davanti al robot; il suo centro lungo il muro è il punto medio fra il punto più a destra e quello più a sinistra. */
+static void measure_wall_and_base(docking_t *a, const lidar_scan_t *g, int64_t t)
+{
+	static double px[LIDAR_SCAN_MAX_POINTS], py[LIDAR_SCAN_MAX_POINTS];
+	int n = 0;
+
+	a->wall_valid = 0;
+	a->base_seen = 0;
+
+	for (int i = 0; i < g->n; i++) {
+		if (!g->p[i].distance_mm)
+			continue;
+		double x, y;
+		lidar_point_xy(&g->p[i], &x, &y);
+		double r = hypot(x, y);
+		if (x <= 0 || r < WALL_MIN || r > WALL_MAX || fabs(atan2(y, x)) > WALL_HALF_ANGLE)
+			continue;
+		px[n] = x;
+		py[n] = y;
+		n++;
+	}
+	if (n < WALL_MIN_POINTS)
+		return;
+
+	double k = 0, q = 0;
+	const double tol[3] = { 1e9, 0.05, 0.02 };
+	int used = 0;
+	for (int pass = 0; pass < 4; pass++) {
+		double band = pass < 3 ? tol[pass] : WALL_FIT_TOL;
+		double sy = 0, sx = 0, syy = 0, sxy = 0;
+		used = 0;
+		for (int i = 0; i < n; i++) {
+			if (pass > 0 && fabs(px[i] - (k * py[i] + q)) * cos(atan(k)) > band)
+				continue;
+			sy += py[i]; sx += px[i]; syy += py[i] * py[i]; sxy += py[i] * px[i];
+			used++;
+		}
+		double den = used * syy - sy * sy;
+		if (used < WALL_MIN_POINTS || fabs(den) < 1e-9)
+			return;
+		k = (used * sxy - sy * sx) / den;
+		q = (sx - k * sy) / used;
+	}
+
+	/* normale verso il muro: x cos(c) + y sin(c) = dist, con k = -tan(c) */
+	double c = -atan(k);
+	a->wall_angle = c;
+	a->wall_dist = q * cos(c);
+	a->wall_valid = 1;
+	a->t_wall = t;
+
+	/* la base: punti davanti al muro di BASE_MIN..BASE_MAX, entro BASE_HALF_WIDTH lungo il muro */
+	double lo = 1e9, hi = -1e9, prot_sum = 0;
+	int nb = 0;
+	for (int i = 0; i < n; i++) {
+		double normal = px[i] * cos(c) + py[i] * sin(c);
+		double along = -px[i] * sin(c) + py[i] * cos(c);
+		double prot = a->wall_dist - normal;
+		if (prot < BASE_MIN || prot > BASE_MAX || fabs(along) > BASE_HALF_WIDTH)
+			continue;
+		if (along < lo) lo = along;
+		if (along > hi) hi = along;
+		prot_sum += prot;
+		nb++;
+	}
+	if (nb >= BASE_MIN_POINTS) {
+		a->base_seen = 1;
+		a->base_along = (lo + hi) / 2;
+		a->base_protrusion = prot_sum / nb;
+	}
+}
+
 void docking_scan(docking_t *a, const lidar_scan_t *g, int64_t t)
 {
 	if (a->result != DOCK_RUNNING)
@@ -213,6 +304,9 @@ void docking_scan(docking_t *a, const lidar_scan_t *g, int64_t t)
 	a->front_dist = n ? sum / n : DIST_MAX;
 	a->near_points = near;
 	a->t_scan = t;
+
+	if (a->phase == DOCK_P_FINE_TUNE || a->phase == DOCK_P_STRAIGHTEN)
+		measure_wall_and_base(a, g, t);
 }
 
 /* ------------------------------------------------------------------------------------------------ guida --- */
@@ -307,6 +401,7 @@ void docking_frame(docking_t *a, const gd32_sensors_t *s, int64_t t)
 		if (rotate_towards(a, a->yaw_center)) {
 			go_to_phase(a, DOCK_P_APPROACH, t);
 			a->prev_side = 0;
+			a->axis_seen = 0;
 		}
 		break;
 
@@ -325,8 +420,14 @@ void docking_frame(docking_t *a, const gd32_sensors_t *s, int64_t t)
 			break;
 		}
 		if (bumper) {
-			/* con il segnale visto da poco è la base (se il lidar non l'ha vista, è nera), altrimenti è un ostacolo */
-			if (t - a->t_signal < SIGNAL_RECENT_NS) {
+			/* con il segnale visto da poco è la base (se il lidar non l'ha vista, è nera), altrimenti è un ostacolo.
+			   Senza mai il fascio centrale il robot è arrivato fuori asse, di sbieco contro lo spigolo della base: la rifinitura
+			   da lì ruoterebbe con il paraurti premuto. Indietro di BACK_OFF_DISTANCE e si ricomincia a cercare, dove i fasci si
+			   distinguono (prova del 16/11 sera: 4 urti di fila con il paraurti sinistro e i soli fasci esterni) */
+			if (t - a->t_signal < SIGNAL_RECENT_NS && !a->axis_seen && a->axis_retries < AXIS_RETRIES) {
+				a->axis_retries++;
+				go_to_phase(a, DOCK_P_BACK_OFF, t);
+			} else if (t - a->t_signal < SIGNAL_RECENT_NS) {
 				a->after_detach = DOCK_P_FINE_TUNE;
 				go_to_phase(a, DOCK_P_DETACH, t);
 			} else {
@@ -348,6 +449,8 @@ void docking_frame(docking_t *a, const gd32_sensors_t *s, int64_t t)
 		a->v = dist < DIST_NEAR ? V_NEAR : (left == 2 || right == 2 || left == 3 || right == 3) ? V_SHORT_BEAM : V_FAR;
 		double w_limit = dist < DIST_W_NEAR ? W_NEAR : W_FAR;
 		int l = side(left, right);
+		if (l == 1)
+			a->axis_seen = 1;
 		if (l == 1)
 			a->w = 0;
 		else if (l == 2)
@@ -394,8 +497,15 @@ void docking_frame(docking_t *a, const gd32_sensors_t *s, int64_t t)
 		           (right == 8 && left == 2) || (left == 1 && right == 1);
 		a->frame2 = on_axis ? a->frame2 + 1 : 0;
 		if (centered || a->frame2 >= STABLE_FRAMES || t - a->t_phase > FINE_TUNE_MAX_NS) {
-			a->yaw_center = normalize_angle(a->yaw + M_PI);
-			go_to_phase(a, DOCK_P_TURN, t);
+			/* raddrizza se il lidar vede il muro con un angolo credibile, altrimenti gira come prima */
+			if (a->wall_valid && t - a->t_wall < SCAN_OLD_NS && fabs(a->wall_angle) < STRAIGHTEN_MAX_ANGLE) {
+				a->direction = normalize_angle(a->yaw + a->wall_angle);
+				a->t_straight = 0;
+				go_to_phase(a, DOCK_P_STRAIGHTEN, t);
+			} else {
+				a->yaw_center = normalize_angle(a->yaw + M_PI);
+				go_to_phase(a, DOCK_P_TURN, t);
+			}
 		} else if (t - a->t_signal > 3 * SIGNAL_RECENT_NS) {
 			start_search(a, t);
 		}
@@ -419,6 +529,35 @@ void docking_frame(docking_t *a, const gd32_sensors_t *s, int64_t t)
 			} else {
 				start_search(a, t);
 			}
+		}
+		break;
+
+	case DOCK_P_STRAIGHTEN:
+		/* ruota sul posto fino a essere perpendicolare al muro, poi aspetta un giro del lidar fatto da fermo e misura la
+		   base. Senza base (o oltre il tempo massimo) gira lo stesso: l'aggancio non deve dipendere dalla misura */
+		a->v = 0;
+		if (!a->t_straight) {
+			if (rotate_towards(a, a->direction))
+				a->t_straight = t;
+		} else {
+			a->w = 0;
+			if (a->t_wall > a->t_straight && a->wall_valid) {
+				if (a->base_seen) {
+					double c = a->wall_angle, face = a->wall_dist - a->base_protrusion;
+					a->base_x = face * cos(c) - a->base_along * sin(c);
+					a->base_y = face * sin(c) + a->base_along * cos(c);
+					a->base_theta = normalize_angle(c + M_PI);
+					a->base_t = a->t_wall;
+					a->base_number++;
+				}
+				a->yaw_center = normalize_angle(a->yaw + M_PI);
+				go_to_phase(a, DOCK_P_TURN, t);
+				break;
+			}
+		}
+		if (t - a->t_phase > STRAIGHTEN_MAX_NS) {
+			a->yaw_center = normalize_angle(a->yaw + M_PI);
+			go_to_phase(a, DOCK_P_TURN, t);
 		}
 		break;
 

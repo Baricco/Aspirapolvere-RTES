@@ -36,10 +36,12 @@ static const reason_message_t REASON_MESSAGES[] = {
     { "dustbin_missing",        "Manca il cassetto della polvere." },
     { "not_started_on_base",    "Il robot non è partito dalla base: le zone non si possono cambiare." },
     { "too_many_zones",         "Troppe zone proibite." },
-    { "outside_map",            "Una zona esce dalla mappa o è troppo piccola." },
+    { "too_many_walls",         "Troppi muri virtuali." },
+    { "outside_map",            "Una zona o un muro esce dalla mappa o è troppo piccolo." },
     { "not_resting",            "Il robot deve essere a riposo sulla base." },
     { "download_failed",        "Non sono riuscito a scaricare la mappa." },
     { "no_map",                 "Il robot non ha una mappa caricata: deve essere partito dalla base con una mappa." },
+    { "not_reachable",          "Il robot non può arrivare lì: il punto non è libero sulla mappa o non c'è un percorso." },
     { "invalid_command",        "Comando non valido." },
     { "no_answer",              "Il robot non ha eseguito il comando in tempo." },
 };
@@ -71,6 +73,7 @@ static const char *navigation_result_reason(nav_command_result_t navigation_resu
         case NAV_RESULT_IN_FAULT:       return "cause_still_present";
         case NAV_RESULT_NOT_RESTING:    return "not_resting";
         case NAV_RESULT_NO_MAP:         return "no_map";
+        case NAV_RESULT_NOT_REACHABLE:  return "not_reachable";
         default:                        return "invalid_command";
     }
 }
@@ -130,7 +133,9 @@ static bool read_bool(const cJSON *command, const char *name, bool *value) {
     return true;
 }
 
-// comando zones: la lista intera delle zone dell'utente. Richiesta al task aperiodico, poi attesa che la mappatura le applichi
+// comando zones: la lista intera delle zone dell'utente e, se c'è il campo "walls", quella dei muri virtuali
+// ([{"x1","y1","x2","y2"}], in metri; senza il campo i muri restano come sono). Richiesta al task aperiodico, poi attesa
+// che la mappatura le applichi
 static void run_zones_command(const cJSON *command, app_command_result_t *result) {
 
     const cJSON *list = cJSON_GetObjectItemCaseSensitive(command, "zones");
@@ -174,7 +179,33 @@ static void run_zones_command(const cJSON *command, app_command_result_t *result
         }
     }
 
-    uint32_t request_num = request_user_zones(zones, num_zones);
+    // muri virtuali: stessi controlli del task aperiodico
+    const cJSON *wall_list = cJSON_GetObjectItemCaseSensitive(command, "walls");
+    bool has_walls = wall_list != NULL;
+    int num_walls = has_walls ? cJSON_GetArraySize(wall_list) : 0;
+    if (has_walls && !cJSON_IsArray(wall_list)) {
+        refuse(result, "invalid_command");
+        return;
+    }
+    if (num_walls > MAX_VIRTUAL_WALLS) {
+        refuse(result, "too_many_walls");
+        return;
+    }
+    mapping_virtual_wall_t walls[MAX_VIRTUAL_WALLS];
+    for (int i = 0; i < num_walls; i++) {
+        const cJSON *wall = cJSON_GetArrayItem(wall_list, i);
+        mapping_virtual_wall_t *w = &walls[i];
+        if (!read_number(wall, "x1", &w->x1) || !read_number(wall, "y1", &w->y1) || !read_number(wall, "x2", &w->x2) || !read_number(wall, "y2", &w->y2)) {
+            refuse(result, "invalid_command");
+            return;
+        }
+        if (!is_virtual_wall_valid(*w)) {
+            refuse(result, "outside_map");
+            return;
+        }
+    }
+
+    uint32_t request_num = request_user_zones(zones, num_zones, has_walls, walls, num_walls);
 
     // la mappatura le applica nel suo job (ogni 200 ms); poi il task aperiodico salva la mappa
     int64_t limit = rt_now() + ZONES_RESULT_TIMEOUT;
@@ -187,8 +218,8 @@ static void run_zones_command(const cJSON *command, app_command_result_t *result
     }
 }
 
-// comandi map_select e map_reset: si possono fare solo con il robot a riposo sulla base. La mappa non cambia mai con
-// i task avviati: il file viene sostituito (o cancellato) dal task aperiodico, poi il programma si riavvia
+// comandi map_select e map_reset: si possono fare solo con il robot a riposo sulla base. Il file viene sostituito (o
+// cancellato) dal task aperiodico, che poi ricarica la mappa senza riavvio: l'esito arriva a ricarica fatta
 static void run_map_command(const cJSON *command, bool is_select, app_map_download_t download_map, app_command_result_t *result) {
 
     drv_status_t drv_state = {0};
@@ -232,13 +263,7 @@ static void run_map_command(const cJSON *command, bool is_select, app_map_downlo
         rt_sleep_until(rt_now() + COMMAND_RESULT_POLL);
     }
 
-    if (!is_done_ok) {
-        refuse(result, is_select ? "download_failed" : "no_answer");
-        return;
-    }
-
-    // mandato l'esito, il programma va riavviato: la mappa nuova si carica solo prima che partano i task
-    result->is_restart_needed = true;
+    if (!is_done_ok) refuse(result, is_select ? "download_failed" : "no_answer");
 }
 
 // funzione helper che esegue un comando già letto dal JSON
@@ -322,6 +347,16 @@ static void run_parsed_command(const cJSON *command, app_map_download_t download
         }
 
         navigation_command.type = NAV_COMMAND_REMOTE_CLEANING;
+        run_navigation_command(navigation_command, result);
+
+    } else if (strcmp(type, "go_to") == 0) {
+
+        // obiettivo sulla mappa: x e y in metri, poi la navigazione controlla la cella e il percorso
+        if (!read_number(command, "x", &navigation_command.v) || !read_number(command, "y", &navigation_command.omega)) {
+            refuse(result, "invalid_command");
+            return;
+        }
+        navigation_command.type = NAV_COMMAND_GO_TO;
         run_navigation_command(navigation_command, result);
 
     } else if (strcmp(type, "zones") == 0) {

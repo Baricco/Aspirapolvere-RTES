@@ -28,34 +28,39 @@ void request_map_save(void);
 uint32_t request_position_search(void);
 
 // richiesta di nuove zone proibite dell'utente (la chiama l'interprete dei comandi dell'app): la lista intera voluta,
-// senza la zona della base. Il task aperiodico la controlla, la passa alla mappatura e salva la mappa. Ritorna il numero
-// della richiesta: quando read_applied_user_zones_version() lo raggiunge, la mappatura ha applicato le zone
-uint32_t request_user_zones(const mapping_forbidden_zone_t *zones, int num_zones);
+// senza la zona della base, e la lista intera dei muri virtuali (has_walls false: i muri restano quelli di prima). Il task
+// aperiodico la controlla, la passa alla mappatura e salva la mappa. Ritorna il numero della richiesta: quando
+// read_applied_user_zones_version() lo raggiunge, la mappatura ha applicato zone e muri
+uint32_t request_user_zones(const mapping_forbidden_zone_t *zones, int num_zones, bool has_walls, const mapping_virtual_wall_t *walls, int num_walls);
 
 // Riposiziona base (docs/app.md, sezione 7.9): stato dell'operazione, letto dallo stato dell'app e dalla navigazione.
 // Lo scrivono la navigazione (comando accettato), la mappatura (ricerca fallita) e il task aperiodico (file spostato o no)
 typedef enum {
     REPOSITION_IDLE,        // nessun riposizionamento dall'avvio del programma
     REPOSITION_RUNNING,     // comando accettato: lidar acceso, ricerca della posizione, spostamento del file
-    REPOSITION_DONE,        // file della mappa spostato: il programma si riavvia con la mappa nuova
+    REPOSITION_DONE,        // file della mappa spostato e mappa ricaricata (senza riavvio)
     REPOSITION_NOT_FOUND,   // la ricerca non ha trovato una posizione abbastanza sicura: la mappa non cambia
     REPOSITION_ROTATED,     // la base è girata di un angolo lontano da un multiplo di 90 gradi: la mappa non cambia
     REPOSITION_FAILED,      // mappa vuota, nessuna scansione buona o errore sul file: la mappa non cambia
 } reposition_status_t;
 
-#define REPOSITION_RESTART_DELAY    RT_S(10)    // Riposiziona base riuscito: il programma si riavvia appena il server ha l'esito, o comunque dopo questo tempo
+#define MAP_RELOAD_TIMEOUT          RT_S(3)     // tempo massimo per vedere la mappa ricaricata dalla mappatura (un job ogni 200 ms): oltre, il programma si riavvia come prima
 
 void set_reposition_status(reposition_status_t status);
 reposition_status_t read_reposition_status(void);
 
-// richiesta di spostare il file della mappa (la chiama la mappatura, dopo la ricerca): ogni cella e ogni zona si sposta
-// di (dx, dy) celle fini e poi ruota di quarter_turns quarti di giro in senso antiorario attorno all'origine. Il task
-// aperiodico riscrive map.rtm, smette di salvare e scrive REPOSITION_DONE (o REPOSITION_FAILED)
-uint32_t request_map_reposition(int dx, int dy, int quarter_turns);
+// richiesta di spostare il file della mappa (la chiama la mappatura, dopo la ricerca o l'ancoraggio): ogni cella, zona e
+// muro si sposta di (dx, dy) celle fini e poi ruota di quarter_turns quarti di giro in senso antiorario attorno all'origine.
+// Il task aperiodico riscrive map.rtm, ricarica la mappa (senza riavvio) e scrive REPOSITION_DONE (o REPOSITION_FAILED).
+// is_anchor: ancoraggio alla base (il server sovrascrive la mappa selezionata), altrimenti Riposiziona base dell'app (il
+// server la salva come mappa nuova). start_x, start_y, start_theta: la posizione del robot sulla base nella mappa spostata
+uint32_t request_map_reposition(int dx, int dy, int quarter_turns, bool is_anchor, double start_x, double start_y, double start_theta);
+
+#define MAP_START_POSE_EXT ".avvio"     // file accanto alla mappa con la posizione iniziale del robot dopo l'ancoraggio alla base (testo: x y theta, metri e radianti): lo legge e lo cancella il caricamento della mappa
 
 // richieste sul file della mappa (le chiama l'interprete dei comandi dell'app, con il robot a riposo sulla base):
-// sostituire map.rtm con il file scaricato dal server (map.rtm + MAP_DOWNLOAD_EXT) oppure cancellarlo. Da quel momento
-// il task aperiodico non salva più: il programma va riavviato. Ritornano il numero della richiesta
+// sostituire map.rtm con il file scaricato dal server (map.rtm + MAP_DOWNLOAD_EXT) oppure cancellarlo. Il task aperiodico
+// poi ricarica la mappa (senza riavvio) e solo dopo pubblica l'esito. Ritornano il numero della richiesta
 uint32_t request_map_replace(void);
 uint32_t request_map_delete(void);
 
@@ -84,10 +89,12 @@ static inline uint8_t get_map_category(const uint8_t *categories, int x, int y) 
 typedef bool (*map_write_function_t)(void *context, const uint8_t *data, size_t size);
 
 // codifica in RTM1 (docs/formato-mappa.md) il rettangolo di celle fini che parte da (x, y), largo width e alto height,
-// di una griglia a categorie, con le zone proibite date (in metri) e il CRC in fondo. La usano il salvataggio della
-// mappa e la mappa dal vivo dell'app. Ritorna false se chi scrive non riesce
+// di una griglia a categorie, con le zone proibite date (in metri) e il CRC in fondo. Con dei muri virtuali il formato è
+// RTM2 (i muri dopo le zone). La usano il salvataggio della mappa e la mappa dal vivo dell'app. Ritorna false se chi
+// scrive non riesce
 bool encode_map_rectangle(const uint8_t *categories, int x, int y, int width, int height,
-                          const mapping_forbidden_zone_t *zones, int num_zones, map_write_function_t write, void *context);
+                          const mapping_forbidden_zone_t *zones, int num_zones, const mapping_virtual_wall_t *walls, int num_walls,
+                          map_write_function_t write, void *context);
 
 // il rettangolo più piccolo che contiene tutte le celle non sconosciute di una griglia a categorie.
 // Ritorna false se la griglia è vuota

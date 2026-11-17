@@ -16,6 +16,9 @@ const String fullMessageHex =
 const String patchMessageHex =
     '0138d767c5a10100001500000052544d310602fb010400020000c28242021a9ab99a39d767c5a10100001200000052544d31000200020100010000012bb44b24';
 
+// RTM2: un rettangolo 4 x 3 dalla cella (510, 500), una zona (511, 501, 2, 1) e un muro da (512, 512) a (532, 512)
+const String wallRtmHex = '52544d32fe01f401040003000101ff01f5010200010000020002140200024686e74e411c';
+
 Uint8List fromHex(String hex) =>
     Uint8List.fromList([for (var i = 0; i < hex.length; i += 2) int.parse(hex.substring(i, i + 2), radix: 16)]);
 
@@ -48,7 +51,7 @@ void main() {
       }
 
       expect(() => decodeRtm(Uint8List.sublistView(good, 0, 10)), throwsA(isA<MapFormatException>())); // troppo corto
-      expect(() => decodeRtm(changed((data) => data[3] = 0x32)), throwsA(isA<MapFormatException>())); // numero magico
+      expect(() => decodeRtm(changed((data) => data[3] = 0x39)), throwsA(isA<MapFormatException>())); // numero magico
       expect(() => decodeRtm(changed((data) => data[20] ^= 1)), throwsA(isA<MapFormatException>())); // CRC
       expect(() => decodeRtm(changed((data) => data[data.length - 1] ^= 1)), throwsA(isA<MapFormatException>()));
       expect(() => decodeRtm(Uint8List.sublistView(good, 0, good.length - 1)), throwsA(isA<MapFormatException>()));
@@ -60,6 +63,21 @@ void main() {
       expect(metersToCell(-0.22), 508);
       expect(cellToMeters(532), closeTo(1.0, 1e-9));
       expect(cellToMeters(fineMapOrigin), 0);
+    });
+  });
+
+  group('RTM2', () {
+    test('decodifica i muri virtuali di una mappa del backend', () {
+      final map = decodeRtm(fromHex(wallRtmHex));
+      expect([map.x, map.y, map.width, map.height], [510, 500, 4, 3]);
+      expect(map.zones, [
+        [511, 501, 2, 1]
+      ]);
+      expect(map.walls, [
+        [512, 512, 532, 512]
+      ]);
+      expect(map.cells, [1, 1, 1, 1, 1, 1, 2, 2, 2, 2, 2, 2]);
+      expect(decodeRtm(fromHex(roomRtmHex)).walls, isEmpty);
     });
   });
 

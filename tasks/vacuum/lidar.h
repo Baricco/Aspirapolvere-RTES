@@ -7,6 +7,7 @@
 
 
 #define SECTOR_NUMBER 12            // numero di settori in cui si divide la scansione del robot
+#define DIRECTION_NUMBER 12         // direzioni in cui si calcola la strada libera, una ogni 360/DIRECTION_NUMBER gradi
 #define RELIABILITY_FACTOR 0.25     // percentuale minima di punti validi affinchè la scansione sia valida
 #define ROBOT_RADIUS 174.5          // raggio del robot in mm
 
@@ -37,6 +38,10 @@ typedef struct {
     // prima di toccare un ostacolo, espressa in mm
     uint16_t corridor_front_distance;
     uint16_t corridor_back_distance;
+
+    // la strada che il robot può fare dritto in ogni direzione prima di toccare un ostacolo, espressa in mm:
+    // la direzione 0 è davanti, le altre in senso antiorario ogni 360/DIRECTION_NUMBER gradi
+    uint16_t direction_free_distance[DIRECTION_NUMBER];
 
     // Campi Specifici per la pulizia dei bordi
     bool border_found;                          // indica se c'è un ostacolo da seguire entro BORDER_SCOPE dal centro, davanti o a destra del robot

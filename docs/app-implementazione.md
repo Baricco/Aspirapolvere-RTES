@@ -4,6 +4,11 @@ Resoconto del lavoro fatto fra il 2026-11-10 e il 2026-11-11 sul progetto di `do
 robot, app Flutter. Tutto è stato provato sul PC, senza il robot vero e senza il server vero: niente SSH al robot,
 niente copie di file, niente deploy, niente commit.
 
+**Aggiornamento del 2026-11-16:** da questa data il robot ricarica la mappa senza riavviarsi (cambio di mappa,
+"Nessuna mappa", Riposiziona base), ci sono i muri virtuali (RTM2), l'obiettivo sulla mappa (`go_to`) e l'ancoraggio
+alla base. Le parti di questo resoconto che parlano del riavvio con il codice 3 descrivono la prima versione; il
+comportamento di oggi è in `docs/app.md`, sezioni 5.5, 7.1, 7.5, 7.7, 7.9, 7.10 e 9.5.
+
 Dove questo documento dice "simulatore" vuol dire `build/host/sim` con il programma vero del robot
 (`build/host/vacuum` o la sua copia di prova `build/prove-nav/vacdbg`) collegato al backend sul PC in HTTPS, con un
 certificato autofirmato per `localhost`.

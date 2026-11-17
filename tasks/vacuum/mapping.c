@@ -18,16 +18,19 @@
 #define FINE_GRID_MIN_SCORE         (-100)      // minimo punteggio di una cella della griglia fine
 #define LIDAR_HIT_SCORE             30          // punteggio aggiunto ad una cella se il lidar rileva che c'è un'ostacolo
 #define LIDAR_PASS_SCORE            (-10)       // punteggio tolto da una cella se il lidar non vede ostacoli
+#define PASS_MAX_OFFSET_CELLS       0.25        // una cella occupata perde punti solo se il raggio passa entro questa distanza dal suo centro: un raggio che ne taglia solo lo spigolo (di striscio, accanto alla punta di un ostacolo sottile o a un ostacolo storto) non la consuma, espressa in celle fini
 #define INFLATION_MARGIN_MM         46          // margine usato per calcolare un margine di distanza tra il robot e gli ostacoli nella griglia di navigazione, espresso in mm
 #define FINE_CELL_INFLATION_RADIUS  (int)(ceil(((ROBOT_RADIUS + INFLATION_MARGIN_MM) / 1000) / FINE_MAP_CELL_SIZE)) // indica di quanto vengono ingrossate le celle con ostacoli nella mappa di navigazione, il margine serve per essere certi che il robot non sbatta contro gli ostacoli, considerando anche le dimensioni del robot e un piccolo margine d'errore
 #define FINE_CELL_OCCUPATION_THRESHOLD 50        // soglia sopra al quale una cella è considerata occupata
 #define UNKNOWN_CELL_THRESHOLD      8           // numero minimo di celle fini da osservare affinchè la cella di navigazione risulti osservata
-#define NEAR_OBSTACLE_NO_WRITE_M    0.5         // se entro questa distanza dal robot c'è un ostacolo della mappa, la scansione serve solo per allinearsi e non si scrive, espressa in m
+#define NEAR_OBSTACLE_NO_WRITE_M    0.17        // se entro questa distanza dal robot c'è un ostacolo della mappa, la scansione serve solo per allinearsi e non si scrive, espressa in m (era 0,5: nella prova del 16/11 sera saltava il 68% delle scansioni)
 #define ROTATION_SPEED_MAX_THRESHOLD 1.5        // massima velocità angolare che può avere il robot prima che la scansione del lidar venga scartata, oltre questa velocità la scansione è deformata. espressa in rad/s
 #define VOID_OBSTACLE                -128       // punteggio speciale da assegnare ad una cella che viene rilevata come "dirupo" dai sensori anti-caduta, una volta che una cella viene messa a questo valore, non può essere modificata dal ciclo di aggiornamento lidar-based
 #define LOW_OBSTACLE                 127        // punteggio speciale da assegnare ad una cella che viene rilevata come ostacolo dal bumper, ma non rilevato dal lidar, una volta che una cella viene messa a questo valore, non può essere modificata dal ciclo di aggiornamento lidar-based
 
 #define BODY_CLEAR_MARGIN_M 0.01         // le celle fini con il centro dentro il corpo del robot si segnano libere, tranne quelle entro questo margine dal bordo (errore della posizione), espresso in m
+
+#define NAV_CELLS_TOTAL (NAV_MAP_CELL_NUMBER * NAV_MAP_CELL_NUMBER)     // celle della griglia di navigazione
 #define BODY_CLEAR_RADIUS_M (ROBOT_RADIUS / 1000.0 - BODY_CLEAR_MARGIN_M)    // raggio entro cui il centro di una cella fine è sotto il corpo del robot, espresso in m
 
 // Posizione dei sensori di contatto rispetto al centro del robot (x in avanti, y a sinistra, angoli positivi a sinistra).
@@ -93,6 +96,11 @@
 #define CONFIRM_MAX_OMEGA           0.5         // durante la conferma le scansioni fatte ruotando più veloce di così non si controllano (sono deformate), espressa in rad/s
 #define REPOSITION_MIN_SCORE_PCT    75          // Riposiziona base: punteggio minimo della ricerca, in percentuale del massimo. Più alto di SEARCH_MIN_SCORE_PCT (nel simulatore la posizione giusta fa 78-88%): meglio dire "non trovata" che spostare la mappa nel posto sbagliato
 #define REPOSITION_MAX_ANGLE_ERROR  (20 * M_PI / 180)   // Riposiziona base: scarto massimo dell'angolo trovato da un multiplo di 90 gradi (la base sta contro un muro); il resto lo corregge l'allineamento all'avvio, espresso in radianti
+#define BASE_FACE_DIST_M            0.196       // ancoraggio alla base: distanza fra il centro del robot agganciato dritto e la faccia della base, lungo l'asse della base (mediana di 9 agganci veri, visita2-12 del 15-16/11: 19,0-21,3 cm), espressa in m
+#define BASE_ANCHOR_MAX_ANGLE       (10 * M_PI / 180)   // ancoraggio alla base: oltre questo angolo fra la base vista e l'asse x la misura non si usa (la mappa non si gira), espresso in radianti
+#define REANCHOR_MIN_SCORE_PCT      65          // riallineamento automatico: punteggio minimo della ricerca, solo dentro la finestra attorno all'origine (sui dati veri la posizione giusta fa 71-84%)
+#define REANCHOR_WINDOW_M           1.0         // riallineamento automatico: il robot si cerca entro questa distanza dall'origine, lungo x e lungo y, espressa in m
+#define REANCHOR_WINDOW_ANGLE       (45 * M_PI / 180)   // riallineamento automatico: e entro questo angolo da 0, espresso in radianti
 #define REPOSITION_TIMEOUT          RT_S(30)    // Riposiziona base: tempo massimo per avere una scansione buona dopo il comando
 
 // Ogni cella della griglia della ricerca è un uint16_t con 3 numeri da 3 bit: il primo livello a cui il blocco che parte dalla cella
@@ -179,7 +187,8 @@ typedef struct {
     int16_t bound;          // limite superiore del punteggio di tutte le posizioni del blocco
 } search_node_t;
 
-// Definizione dello stato interno del task di mappatura
+// Griglie della mappatura che si scambiano con la ricarica della mappa: ce ne sono due serie, una in uso e una libera,
+// in cui il task aperiodico prepara la mappa nuova
 typedef struct {
 
     // Mappa fine usata internamente dal task di mappatura
@@ -190,10 +199,22 @@ typedef struct {
 
     // numero di celle fini occupate entro il raggio di ingrossamento per ogni quadrante di una cella della griglia di navigazione
     // 1 contatore per ogni cella fine all'interno del quadrante della cella di navigazione
-    uint8_t num_occupied_fine_cells[4][NAV_MAP_CELL_NUMBER * NAV_MAP_CELL_NUMBER];
+    uint8_t num_occupied_fine_cells[4][NAV_CELLS_TOTAL];
 
     // numero di celle fini già viste per ogni cella della griglia di navigazione
-    uint8_t num_observed_fine_cells[NAV_MAP_CELL_NUMBER * NAV_MAP_CELL_NUMBER];
+    uint8_t num_observed_fine_cells[NAV_CELLS_TOTAL];
+
+} mapping_grids_t;
+
+// Definizione dello stato interno del task di mappatura
+typedef struct {
+
+    // le griglie in uso (una delle due serie di mapping_grids_t): puntatori, così la ricarica le scambia in tempo costante
+    int8_t *fine_grid;
+    uint8_t (*num_occupied_fine_cells)[NAV_CELLS_TOTAL];
+    uint8_t *num_observed_fine_cells;
+    int grids_in_use;                   // indice della serie in uso in map_grids
+    uint32_t last_reload_request;       // ultima richiesta di ricarica già eseguita
 
     // numero dell'ultima scansione del lidar (restituito da drv_scan)
     uint32_t last_scan_num;
@@ -206,6 +227,7 @@ typedef struct {
 
     // numero dell'ultima cella chiusa aggiornata dal task di navigazione
     uint32_t last_closed_num;
+    uint32_t last_reopen_num;
 
     // stima allineata del robot
     double aligned_x, aligned_y, aligned_theta;
@@ -226,6 +248,13 @@ typedef struct {
     mapping_forbidden_zone_t user_zones[MAX_FORBIDDEN_ZONES - 1];
     int num_user_zones;
     uint32_t user_zones_version;    // versione delle zone volute già applicata
+
+    // muri virtuali caricati con la mappa o voluti dall'utente, e quelli abbastanza vicini al robot da poter tagliare un raggio
+    // del lidar in questo job (calcolati da prepare_lidar_points, così con i muri lontani non costano niente)
+    mapping_virtual_wall_t user_walls[MAX_VIRTUAL_WALLS];
+    int num_user_walls;
+    mapping_virtual_wall_t near_walls[MAX_VIRTUAL_WALLS];
+    int num_near_walls;
     uint8_t forbidden_quads[NAV_MAP_CELL_NUMBER * NAV_MAP_CELL_NUMBER];   // quadranti proibiti dalle zone dell'utente, bit come NAV_CELL_QUAD
 
     // punti misurati dal lidar da usare per l'allineamento 
@@ -265,6 +294,13 @@ typedef struct {
         uint8_t attempts;                           // numero di ricerche o conferme fallite dall'ultimo sollevamento
         int64_t put_down_t;                         // istante del riappoggio, valgono solo le scansioni del lidar iniziate dopo (con Riposiziona base: istante del comando)
         uint32_t last_reposition_num;               // ultimo reposition_num della navigazione già visto
+        uint32_t last_reanchor_num;                 // ultimo reanchor_num della navigazione già visto
+        bool is_reanchor;                           // la ricerca in corso è il riallineamento automatico, non Riposiziona base dell'app
+        bool is_window;                             // la ricerca guarda solo la finestra del riallineamento attorno all'origine, con la sua soglia
+        double start_x, start_y, start_theta;       // posizione iniziale dopo un ancoraggio alla base con riavvio (dal file MAP_START_POSE_EXT), 0 se non c'è
+        bool has_start_pose;                        // la posizione iniziale viene dal file: la ricerca all'avvio non serve
+        uint32_t last_base_anchor_num;              // ultimo base_anchor_num della navigazione già visto
+        uint32_t last_dock_base_number;             // ultima misura della base dal driver già usata
         bool is_repositioning;                      // Riposiziona base in corso: la mappatura non scrive, cerca la posizione del robot sulla base
         bool grid_ready;                            // indica se la griglia corrisponde alla mappa
         int x0, y0;                                 // cella fine corrispondente alla cella (0, 0) della griglia della ricerca
@@ -290,6 +326,26 @@ typedef struct {
 // stato del task di mappatura
 static mapping_state_t map_state;
 
+// le due serie di griglie (una in uso, una libera per la ricarica) e la griglia di navigazione preparata con la ricarica
+static mapping_grids_t map_grids[2];
+static uint8_t reload_nav_grid[NAV_CELLS_TOTAL];
+
+// ricarica della mappa: la prepara e la chiede il task aperiodico, la esegue la mappatura. I dati si scrivono prima del
+// numero della richiesta (release) e si leggono dopo (acquire): fra due ricariche il task aperiodico aspetta sempre la fine
+static struct {
+    mapping_forbidden_zone_t zones[MAX_FORBIDDEN_ZONES - 1];   // zone e muri letti dal file
+    int num_zones;
+    mapping_virtual_wall_t walls[MAX_VIRTUAL_WALLS];
+    int num_walls;
+    bool has_start_pose;
+    double start_x, start_y, start_theta;
+    bool is_overwrite;
+} reload_data;
+static _Atomic uint32_t reload_request_num;     // numero dell'ultima ricarica chiesta
+static _Atomic uint32_t reload_done_num;        // numero dell'ultima ricarica fatta
+static _Atomic bool reload_has_start_pose;      // dell'ultima ricarica fatta
+static _Atomic bool reload_is_overwrite;        // dell'ultima ricarica fatta
+
 // indica se il robot è partito dalla base di ricarica, è atomico perché lo legge il task di navigazione
 static _Atomic bool started_on_base;
 
@@ -312,9 +368,10 @@ static _Atomic uint32_t map_job_counter;
 
 
 
-// funzione helper che prende l'indice di una cella della mappa di navigazione
-// e restituisce la bit mask con i quadranti bloccati e lo stato a 0
-static uint8_t calc_nav_cell_bitmask(uint16_t index) {
+// funzione helper che prende i contatori delle celle occupate (di una delle due serie di griglie), i quadranti proibiti
+// (NULL se non ce ne sono) e l'indice di una cella della mappa di navigazione, e restituisce la bit mask con i quadranti
+// bloccati e lo stato a 0
+static uint8_t calc_bitmask_of(uint8_t (*num_occupied)[NAV_CELLS_TOTAL], const uint8_t *forbidden_quads, uint16_t index) {
     
     // Inizializza la bitmask a 0
     uint8_t bitmask = 0;
@@ -323,19 +380,25 @@ static uint8_t calc_nav_cell_bitmask(uint16_t index) {
     for (int q = 0; q < 4; q++) {
         // se un quadrante ha una delle celle fini bloccate al suo interno 
         // se è 0 non ha celle fini bloccate, l'8° bit serve come flag per il passaggio del robot
-        if (map_state.num_occupied_fine_cells[q][index] >= 1 && map_state.num_occupied_fine_cells[q][index] <= 127) {
+        if (num_occupied[q][index] >= 1 && num_occupied[q][index] <= 127) {
             // metti a 1 il bit corrispondente nella bitmask
             bitmask |= NAV_CELL_QUAD[q];
         }
     }
 
     // i quadranti proibiti dalle zone dell'utente sono bloccati come quelli con gli ostacoli
-    bitmask |= map_state.forbidden_quads[index];
+    if (forbidden_quads != NULL) bitmask |= forbidden_quads[index];
 
     // due quadranti liberi in diagonale restano liberi tutti e due: il passo in diagonale è sempre permesso
     // (deciso con l'utente il 2026-11-08, guasto di p5; prima qui si bloccava anche un terzo quadrante)
 
     return bitmask;
+}
+
+// funzione helper che prende l'indice di una cella della mappa di navigazione
+// e restituisce la bit mask con i quadranti bloccati e lo stato a 0 (griglie in uso)
+static uint8_t calc_nav_cell_bitmask(uint16_t index) {
+    return calc_bitmask_of(map_state.num_occupied_fine_cells, map_state.forbidden_quads, index);
 }
 
 // funzione che legge la mappa interpolando con interpolazione bilineare. prende la posizione nella mappa x, y espressa in metri
@@ -504,6 +567,12 @@ int init_mapping(void) {
     // inizializza il doppio buffer delle zone volute dall'utente
     exchange_init(&double_buffer_zones, &zones_buffer1, &zones_buffer2, sizeof(mapping_user_zones_t));
 
+    // in uso la prima serie di griglie, la seconda resta libera per la ricarica della mappa
+    map_state.grids_in_use = 0;
+    map_state.fine_grid = map_grids[0].fine_grid;
+    map_state.num_occupied_fine_cells = map_grids[0].num_occupied_fine_cells;
+    map_state.num_observed_fine_cells = map_grids[0].num_observed_fine_cells;
+
     // inizializza il doppio buffer del risultato della ricerca della posizione
     exchange_init(&double_buffer_search, &search_buffer1, &search_buffer2, sizeof(search_result_t));
 
@@ -603,7 +672,7 @@ static inline void get_x_y_min_max_area_around_cell(int cell_x, int cell_y, int 
 
 // Funzione helper per aggiornare il numero di celle occupate, sia per la cella
 // cell_x cell_y, sia per le 9 celle attorno
-static void update_occupied_cells(const int fine_x, const int fine_y, const int value) {
+static void add_occupied_cells(uint8_t (*num_occupied)[NAV_CELLS_TOTAL], const int fine_x, const int fine_y, const int value) {
     
     // calcola le celle attorno a quella corrente (fine_x, fine_y)
     int nav_x_min = 0;
@@ -638,10 +707,15 @@ static void update_occupied_cells(const int fine_x, const int fine_y, const int 
                 // se la distanza è <= (ROBOT_RADIUS + INFLATION_MARGIN_MM) / 1000
                 //  aumenta il numero di celle occupate del quadrante corrente
                 if (dist <= (ROBOT_RADIUS + INFLATION_MARGIN_MM) / 1000)
-                    map_state.num_occupied_fine_cells[quad][nav_index] += value;
+                    num_occupied[quad][nav_index] += value;
             }
         }
     }
+}
+
+// funzione helper che aggiorna i contatori delle celle occupate in uso attorno alla cella fine (fine_x, fine_y)
+static void update_occupied_cells(const int fine_x, const int fine_y, const int value) {
+    add_occupied_cells(map_state.num_occupied_fine_cells, fine_x, fine_y, value);
 }
 
 // funzione helper che restituisce la cella di navigazione e l'indice (in NAV_CELL_QUAD) del quadrante che contiene il punto
@@ -878,7 +952,22 @@ static bool is_near_obstacle(const double x, const double y) {
 // Funzione Helper che esegue l'algoritmo di Bresenham
 // Questa funzione trova le celle della griglia fine per cui è passato
 // il raggio del lidar e ad ognuna somma lo score corrispondente
-static void exec_bresenham_algorithm(const int x_coord_start, const int y_coord_start, const int x_coord_end, const int y_coord_end) {
+// funzione helper che dice se il raggio dal punto (start_x, start_y) al punto (end_x, end_y), in celle fini con i decimali,
+// passa entro PASS_MAX_OFFSET_CELLS dal centro della cella (cell_x, cell_y). length è la lunghezza del raggio, in celle
+static inline bool is_ray_through_cell_center(const double start_x, const double start_y, const double end_x, const double end_y,
+                                              const double length, const int cell_x, const int cell_y) {
+    if (length <= 0) return true;
+    const double cross = (cell_x + 0.5 - start_x) * (end_y - start_y) - (cell_y + 0.5 - start_y) * (end_x - start_x);
+    return fabs(cross) <= PASS_MAX_OFFSET_CELLS * length;
+}
+
+// start_x, start_y, end_x, end_y: gli stessi estremi del raggio in celle fini con i decimali, per sapere quanto il raggio passa
+// vicino al centro delle celle occupate che attraversa
+static void exec_bresenham_algorithm(const int x_coord_start, const int y_coord_start, const int x_coord_end, const int y_coord_end,
+                                     const double start_x, const double start_y, const double end_x, const double end_y) {
+
+    // lunghezza del raggio in celle, per la distanza dai centri delle celle occupate
+    const double ray_length = hypot(end_x - start_x, end_y - start_y);
 
     // calcola la distanza tra i due punti nell'asse x
     int dx = abs(x_coord_end - x_coord_start);
@@ -916,7 +1005,11 @@ static void exec_bresenham_algorithm(const int x_coord_start, const int y_coord_
             // Aggiungi il pass_score, escludendo le ultime due celle perchè se no
             // ci sono problemi con l'allineamento per ostacoli che si trovano
             // a cavallo tra due celle
-            if (abs(x_coord_end - cur_cell_x) + abs(y_coord_end - cur_cell_y) > 2) add_score_to_fine_cell(cur_cell_y << 10 | cur_cell_x, LIDAR_PASS_SCORE);
+            // Una cella occupata perde punti solo se il raggio la attraversa davvero, vicino al centro, e non di spigolo
+            if (abs(x_coord_end - cur_cell_x) + abs(y_coord_end - cur_cell_y) > 2 &&
+                (map_state.fine_grid[cur_cell_y << 10 | cur_cell_x] <= FINE_CELL_OCCUPATION_THRESHOLD ||
+                 is_ray_through_cell_center(start_x, start_y, end_x, end_y, ray_length, cur_cell_x, cur_cell_y)))
+                add_score_to_fine_cell(cur_cell_y << 10 | cur_cell_x, LIDAR_PASS_SCORE);
 
             // raddoppia errore e salvatelo in una variabile per fare i confronti
             int e2 = 2 * err;
@@ -1048,6 +1141,43 @@ static void pose_at_time(int64_t time_ns, double *x, double *y, double *theta) {
 // funzione helper che prepara i punti dell'ultima scansione per l'allineamento e ne restituisce il numero.
 // i punti di una scansione sono misurati in istanti diversi: ogni punto viene messo sulla mappa con la posizione
 // che il robot aveva nel suo istante, poi viene espresso rispetto a un'unica posizione, ref
+// funzione helper che sceglie i muri virtuali che un raggio del lidar partito dal punto (x, y) della mappa può tagliare:
+// quelli più vicini della portata del lidar. Con i muri lontani il controllo dei raggi non costa niente
+static void collect_near_walls(double x, double y) {
+    map_state.num_near_walls = 0;
+    for (int i = 0; i < map_state.num_user_walls; i++) {
+        if (calc_virtual_wall_distance(x, y, map_state.user_walls[i]) < LIDAR_MAPPING_MAX_RANGE) map_state.near_walls[map_state.num_near_walls++] = map_state.user_walls[i];
+    }
+}
+
+// funzione helper che controlla se il raggio dal punto (origin_x, origin_y) al punto (*x, *y), sulla mappa, taglia uno dei
+// muri virtuali vicini: se sì porta il punto sul muro più vicino all'origine (il raggio si ferma lì come su un muro vero) e
+// ritorna true
+static bool cut_ray_at_walls(double origin_x, double origin_y, double *x, double *y) {
+
+    const double ray_x = *x - origin_x, ray_y = *y - origin_y;
+    double best_t = 2;
+
+    for (int i = 0; i < map_state.num_near_walls; i++) {
+        const mapping_virtual_wall_t *wall = &map_state.near_walls[i];
+        const double wall_x = wall->x2 - wall->x1, wall_y = wall->y2 - wall->y1;
+        const double cross = ray_x * wall_y - ray_y * wall_x;
+        if (fabs(cross) < 1e-12) continue;      // raggio parallelo al muro
+
+        // origine + t * raggio = estremo 1 + u * muro: il raggio taglia il muro se t è in (0, 1] e u in [0, 1]
+        const double to_wall_x = wall->x1 - origin_x, to_wall_y = wall->y1 - origin_y;
+        const double t = (to_wall_x * wall_y - to_wall_y * wall_x) / cross;
+        const double u = (to_wall_x * ray_y - to_wall_y * ray_x) / cross;
+        if (t > 0 && t <= 1 && u >= 0 && u <= 1 && t < best_t) best_t = t;
+    }
+
+    if (best_t > 1) return false;
+
+    *x = origin_x + best_t * ray_x;
+    *y = origin_y + best_t * ray_y;
+    return true;
+}
+
 static int prepare_lidar_points(double ref_x, double ref_y, double ref_theta) {
 
     const lidar_scan_t *scan = &map_state.last_scan;
@@ -1058,6 +1188,12 @@ static int prepare_lidar_points(double ref_x, double ref_y, double ref_theta) {
     double sin_ref = sin(ref_theta);
 
     int num_points = 0;
+
+    // muri virtuali vicini alla posizione prevista: i punti visti attraverso un muro non servono all'allineamento (un muro
+    // virtuale sopra uno specchio: i punti riflessi sposterebbero la posizione)
+    double ref_map_x = ref_x, ref_map_y = ref_y, ref_map_theta = ref_theta;
+    odom_to_map(&ref_map_x, &ref_map_y, &ref_map_theta);
+    collect_near_walls(ref_map_x, ref_map_y);
 
     for (int i = 0; i < scan->n; i++) {
 
@@ -1078,6 +1214,15 @@ static int prepare_lidar_points(double ref_x, double ref_y, double ref_theta) {
         double sin_robot = sin(robot_theta);
         double abs_x = robot_x + rel_x * cos_robot - rel_y * sin_robot;
         double abs_y = robot_y + rel_x * sin_robot + rel_y * cos_robot;
+
+        // un raggio che taglia un muro virtuale non si usa (il controllo è sulla mappa, con la posizione prevista)
+        if (map_state.num_near_walls > 0) {
+            double map_robot_x = robot_x, map_robot_y = robot_y, map_robot_theta = robot_theta;
+            odom_to_map(&map_robot_x, &map_robot_y, &map_robot_theta);
+            double map_point_x = map_robot_x + rel_x * cos(map_robot_theta) - rel_y * sin(map_robot_theta);
+            double map_point_y = map_robot_y + rel_x * sin(map_robot_theta) + rel_y * cos(map_robot_theta);
+            if (cut_ray_at_walls(map_robot_x, map_robot_y, &map_point_x, &map_point_y)) continue;
+        }
 
         // esprimi il punto rispetto alla posizione di riferimento: è la rotazione inversa di quella sopra
         double dx = abs_x - ref_x;
@@ -1187,11 +1332,13 @@ static void correct_theta_with_walls(int num_points) {
 // ref_x, ref_y e ref_theta sono la posizione data dall'odometria alla fine della scansione.
 static void update_aligned_pose(double ref_x, double ref_y, double ref_theta) {
 
-    // Alla prima scansione la mappa è vuota e non c'è niente con cui allineare, la stima parte dall'odometria
+    // Alla prima scansione la stima parte dall'odometria, girata dell'angolo iniziale se il riallineamento ne ha lasciato uno
+    // (il robot agganciato storto sulla base)
     if (!map_state.aligned_valid) {
-        map_state.aligned_x = ref_x;
-        map_state.aligned_y = ref_y;
-        map_state.aligned_theta = ref_theta;
+        const double c = cos(map_state.search.start_theta), s = sin(map_state.search.start_theta);
+        map_state.aligned_x = map_state.search.start_x + ref_x * c - ref_y * s;
+        map_state.aligned_y = map_state.search.start_y + ref_x * s + ref_y * c;
+        map_state.aligned_theta = wrap_angle(ref_theta + map_state.search.start_theta);
         map_state.aligned_valid = true;
     } else {
         // la stima precedente più lo spostamento dell'odometria dall'ultima scansione.
@@ -1251,13 +1398,18 @@ static void update_aligned_pose(double ref_x, double ref_y, double ref_theta) {
 // funzione helper che calcola lo stato di una cella di navigazione dalle celle fini, senza guardare gli stati che si
 // conservano (proibita, troppo stretta): bloccata se tutti e 4 i quadranti sono bloccati, libera se abbastanza celle fini
 // sono state osservate, altrimenti sconosciuta
-static mapping_nav_cell_state calc_nav_cell_state(int nav_index, uint8_t cell_mask) {
+static mapping_nav_cell_state calc_state_of(const uint8_t *num_observed, int nav_index, uint8_t cell_mask) {
 
     if (cell_mask == NAV_CELL_QUAD_MASK) return NAV_CELL_BLOCKED;
 
-    if (map_state.num_observed_fine_cells[nav_index] >= UNKNOWN_CELL_THRESHOLD) return NAV_CELL_FREE;
+    if (num_observed[nav_index] >= UNKNOWN_CELL_THRESHOLD) return NAV_CELL_FREE;
 
     return NAV_CELL_UNKNOWN;
+}
+
+// funzione helper che calcola lo stato di una cella di navigazione dalle griglie in uso
+static mapping_nav_cell_state calc_nav_cell_state(int nav_index, uint8_t cell_mask) {
+    return calc_state_of(map_state.num_observed_fine_cells, nav_index, cell_mask);
 }
 
 // funzione helper che riporta una cella fine con un valore speciale (vuoto o ostacolo basso) a sconosciuta: è l'inverso
@@ -1549,6 +1701,15 @@ static int push_search_nodes(const int *x, const int *y, int count, int level) {
 
         if (x[i] >= map_state.search.width || y[i] >= map_state.search.height) continue;
 
+        // riallineamento: solo i blocchi che toccano la finestra attorno all'origine (la griglia resta tutta la mappa,
+        // perché i punti della scansione cadono anche lontano)
+        if (map_state.search.is_window) {
+            const int half = (int)lround(REANCHOR_WINDOW_M / FINE_MAP_CELL_SIZE);
+            const int wx0 = FINE_MAP_ORIGIN - half - map_state.search.x0, wy0 = FINE_MAP_ORIGIN - half - map_state.search.y0;
+            const int side = 1 << level;
+            if (x[i] + side - 1 < wx0 || x[i] > wx0 + 2 * half || y[i] + side - 1 < wy0 || y[i] > wy0 + 2 * half) continue;
+        }
+
         if (get_search_level(map_state.search.grid[y[i] * map_state.search.width + x[i]], SEARCH_FREE_SHIFT) > level) continue;
 
         int bound = calc_search_bound(x[i], y[i], level);
@@ -1613,6 +1774,10 @@ static bool search_step(void) {
         if (map_state.search.stack_len == 0) {
 
             map_state.search.angle++;
+
+            // riallineamento: solo gli angoli entro REANCHOR_WINDOW_ANGLE da 0
+            while (map_state.search.is_window && map_state.search.angle < SEARCH_NUM_ANGLES &&
+                   fabs(wrap_angle(map_state.search.angle * 2 * M_PI / SEARCH_NUM_ANGLES)) > REANCHOR_WINDOW_ANGLE) map_state.search.angle++;
 
             if (map_state.search.angle >= SEARCH_NUM_ANGLES) return true;
 
@@ -1763,7 +1928,8 @@ void run_position_search(uint32_t request_num) {
     // prepara la ricerca: si parte dall'angolo -1, così il primo passo apre l'angolo 0
     map_state.search.angle = -1;
     map_state.search.stack_len = 0;
-    map_state.search.best_score = (SEARCH_MIN_SCORE_PCT * 2 * map_state.search.num_points + 99) / 100 - 1;
+    const int min_score_pct = map_state.search.is_window ? REANCHOR_MIN_SCORE_PCT : SEARCH_MIN_SCORE_PCT;
+    map_state.search.best_score = (min_score_pct * 2 * map_state.search.num_points + 99) / 100 - 1;
     map_state.search.best_angle = -1;
 
     // ramificazione e potatura, un pezzo alla volta
@@ -1792,6 +1958,59 @@ void run_position_search(uint32_t request_num) {
 // Riposiziona base (docs/app.md, sezione 7.9): con il robot fermo sulla base, cerca la sua posizione nella mappa con la
 // stessa ricerca del sollevamento, poi chiede al task aperiodico di spostare il file della mappa in modo che quella posizione
 // diventi l'origine. Finché è in corso la mappatura non scrive niente (durante la ricerca la mappa è prestata)
+// Ancoraggio alla base, all'aggancio di fine missione. La base è l'unico punto della casa che si sa fermo: in una mappa
+// ancorata la sua faccia sta in (-BASE_FACE_DIST_M; 0) e guarda verso +x (il robot agganciato dritto in (0; 0) a 0 gradi).
+// Durante l'aggancio il driver l'ha vista con il lidar, dritto davanti a lei a pochi centimetri, e l'ha portata nella mappa
+// con la posizione del robot di quel momento (drv_status_t.dock_base_*). Lo scarto fra dove la base è e dove dovrebbe essere
+// è lo spostamento della mappa accumulato nella sessione: la mappa (file e zone) si sposta di quello, in celle fini intere,
+// e il programma riparte con il robot nella posizione giusta della mappa spostata. Sotto mezza cella non si sposta niente.
+// Non c'è ricerca: la misura viene dal driver, e qui si fanno solo pochi conti
+static void anchor_to_base(void) {
+
+    drv_status_t drv_state = {0};
+    drv_status(&drv_state);
+
+    // nessuna misura nuova della base in questo aggancio (il raddrizzamento non ha visto la base): la mappa resta com'è
+    if (drv_state.dock_base_number == 0 || drv_state.dock_base_number == map_state.search.last_dock_base_number || map_state.state != MAP_NORMAL) {
+        fprintf(stderr, "mappatura: ancoraggio alla base: nessuna misura della base in questo aggancio, la mappa non si sposta\n");
+        set_reposition_status(REPOSITION_IDLE);
+        return;
+    }
+    map_state.search.last_dock_base_number = drv_state.dock_base_number;
+
+    // la base deve guardare verso +x: se no la mappa è girata rispetto alla base, e uno spostamento non basta
+    if (fabs(wrap_angle(drv_state.dock_base_theta)) > BASE_ANCHOR_MAX_ANGLE) {
+        fprintf(stderr, "mappatura: ancoraggio alla base: la base guarda a %.1f gradi invece che a 0, la mappa non si sposta\n",
+                drv_state.dock_base_theta * 180 / M_PI);
+        set_reposition_status(REPOSITION_IDLE);
+        return;
+    }
+
+    // scarto fra dove la base dovrebbe essere e dove è, e spostamento in celle fini intere
+    const double err_x = -BASE_FACE_DIST_M - drv_state.dock_base_x;
+    const double err_y = -drv_state.dock_base_y;
+    const int dx = (int)lround(err_x / FINE_MAP_CELL_SIZE);
+    const int dy = (int)lround(err_y / FINE_MAP_CELL_SIZE);
+    fprintf(stderr, "mappatura: ancoraggio alla base: faccia in (%.3f, %.3f) a %.1f gradi, scarto (%.3f, %.3f), spostamento (%d, %d) celle\n",
+            drv_state.dock_base_x, drv_state.dock_base_y, drv_state.dock_base_theta * 180 / M_PI, err_x, err_y, dx, dy);
+
+    if (dx == 0 && dy == 0) {
+        set_reposition_status(REPOSITION_IDLE);
+        return;
+    }
+
+    // il robot è fermo sui contatti: la sua posizione nella mappa spostata è quella di adesso più lo spostamento
+    request_map_reposition(dx, dy, 0, true, map_state.aligned_x + dx * FINE_MAP_CELL_SIZE, map_state.aligned_y + dy * FINE_MAP_CELL_SIZE,
+                           map_state.aligned_theta);
+}
+
+// funzione helper che chiude Riposiziona base o il riallineamento automatico senza spostare la mappa: Riposiziona base
+// dà all'app l'esito, il riallineamento torna a riposo (non è stato chiesto da nessuno)
+static void end_reposition(const reposition_status_t status) {
+    map_state.search.is_repositioning = false;
+    set_reposition_status(map_state.search.is_reanchor ? REPOSITION_IDLE : status);
+}
+
 static void reposition_base(const movement_position_data_t *cur_pos, bool is_same_scan) {
 
     (void)cur_pos;
@@ -1800,12 +2019,15 @@ static void reposition_base(const movement_position_data_t *cur_pos, bool is_sam
 
         case SEARCH_WAIT_SCAN: {
 
-            // mappa vuota o nessuna scansione buona in tempo: non c'è niente da fare
-            if (!map_state.aligned_valid || rt_now() - map_state.search.put_down_t > REPOSITION_TIMEOUT) {
-                map_state.search.is_repositioning = false;
-                set_reposition_status(REPOSITION_FAILED);
+            // nessuna scansione buona in tempo: non c'è niente da fare
+            if (rt_now() - map_state.search.put_down_t > REPOSITION_TIMEOUT) {
+                end_reposition(REPOSITION_FAILED);
                 return;
             }
+
+            // all'avvio la mappatura può non avere ancora una posizione allineata (il lidar va a regime in un paio di
+            // secondi): si aspetta, entro REPOSITION_TIMEOUT
+            if (!map_state.aligned_valid) return;
 
             // serve una scansione iniziata dopo il comando (sulla base il lidar era spento)
             if (is_same_scan || map_state.last_scan.t_start_ns <= map_state.search.put_down_t) return;
@@ -1816,6 +2038,7 @@ static void reposition_base(const movement_position_data_t *cur_pos, bool is_sam
 
             map_state.search.is_cancel_requested = false;
             map_state.search.is_stopped_by_user = false;
+            map_state.search.is_window = map_state.search.is_reanchor;
             map_state.search.request_num = request_position_search();
             map_state.search.phase = SEARCH_WAIT_RESULT;
             return;
@@ -1828,14 +2051,16 @@ static void reposition_base(const movement_position_data_t *cur_pos, bool is_sam
 
             // da qui la mappa è di nuovo della mappatura
             map_state.search.is_repositioning = false;
+            map_state.search.is_window = false;
+            const int min_score_pct = map_state.search.is_reanchor ? REANCHOR_MIN_SCORE_PCT : REPOSITION_MIN_SCORE_PCT;
             map_state.search.phase = SEARCH_WAIT_SCAN;
 
-            if (result.outcome != SEARCH_FOUND || result.score_pct < REPOSITION_MIN_SCORE_PCT) {
+            if (result.outcome != SEARCH_FOUND || result.score_pct < min_score_pct) {
                 if (result.outcome == SEARCH_FOUND)
                     fprintf(stderr, "mappatura: riposizionamento della base: posizione migliore (%.3f, %.3f) a %.1f gradi, punteggio %d%%: troppo basso\n",
                             result.x, result.y, result.theta * 180 / M_PI, result.score_pct);
                 else fprintf(stderr, "mappatura: riposizionamento della base: posizione non trovata\n");
-                set_reposition_status(REPOSITION_NOT_FOUND);
+                end_reposition(REPOSITION_NOT_FOUND);
                 return;
             }
 
@@ -1844,7 +2069,7 @@ static void reposition_base(const movement_position_data_t *cur_pos, bool is_sam
             double angle_error = wrap_angle(result.theta - quarters * (M_PI / 2));
             if (fabs(angle_error) > REPOSITION_MAX_ANGLE_ERROR) {
                 fprintf(stderr, "mappatura: riposizionamento della base: angolo %.1f gradi, troppo lontano da un multiplo di 90\n", result.theta * 180 / M_PI);
-                set_reposition_status(REPOSITION_ROTATED);
+                end_reposition(REPOSITION_ROTATED);
                 return;
             }
 
@@ -1853,14 +2078,35 @@ static void reposition_base(const movement_position_data_t *cur_pos, bool is_sam
             int dx = -(int)lround(result.x / FINE_MAP_CELL_SIZE);
             int dy = -(int)lround(result.y / FINE_MAP_CELL_SIZE);
             int quarter_turns = (int)(((-quarters) % 4 + 4) % 4);
-            fprintf(stderr, "mappatura: riposizionamento della base: robot in (%.3f, %.3f) a %.1f gradi, punteggio %d%%\n",
+            fprintf(stderr, "mappatura: %s della base: robot in (%.3f, %.3f) a %.1f gradi, punteggio %d%%\n",
+                    map_state.search.is_reanchor ? "riallineamento" : "riposizionamento",
                     result.x, result.y, result.theta * 180 / M_PI, result.score_pct);
-            request_map_reposition(dx, dy, quarter_turns);
+
+            // ricerca all'avvio: la mappa non si sposta mai (la sposta solo l'ancoraggio alla base, con la base vista dal lidar):
+            // il robot si mette nella posizione trovata, che vale qualunque sia il modo in cui si è agganciato. Un quarto di
+            // giro vorrebbe dire una ricerca sbagliata: allora non si cambia niente
+            if (map_state.search.is_reanchor) {
+                if (quarter_turns == 0)
+                    restart_from_pose(map_state.last_odom_x, map_state.last_odom_y, map_state.last_odom_theta,
+                                      result.x, result.y, result.theta, MAP_NORMAL);
+                else fprintf(stderr, "mappatura: riallineamento della base: quarto di giro, la posizione non cambia\n");
+                end_reposition(REPOSITION_IDLE);
+                return;
+            }
+
+            // la posizione del robot nella mappa spostata: quella trovata, spostata e ruotata come la mappa (il programma
+            // non si riavvia più: il robot riparte da qui senza un'altra ricerca)
+            const double moved_u = result.x / FINE_MAP_CELL_SIZE + dx, moved_v = result.y / FINE_MAP_CELL_SIZE + dy;
+            double start_u = moved_u, start_v = moved_v;
+            if (quarter_turns == 1) { start_u = -moved_v; start_v = moved_u; }
+            else if (quarter_turns == 2) { start_u = -moved_u; start_v = -moved_v; }
+            else if (quarter_turns == 3) { start_u = moved_v; start_v = -moved_u; }
+            request_map_reposition(dx, dy, quarter_turns, false, start_u * FINE_MAP_CELL_SIZE, start_v * FINE_MAP_CELL_SIZE,
+                                   wrap_angle(result.theta + quarter_turns * (M_PI / 2)));
             return;
         }
         default:
-            map_state.search.is_repositioning = false;
-            set_reposition_status(REPOSITION_FAILED);
+            end_reposition(REPOSITION_FAILED);
             return;
     }
 }
@@ -2011,6 +2257,7 @@ static void reset_session_data(void) {
 
     // le celle chiuse la navigazione le ricomincia a contare da zero
     map_state.last_closed_num = 0;
+    map_state.last_reopen_num = 0;
     map_state.last_mark.is_valid = false;
 
     // la mappa cambia: la griglia della ricerca andrà rifatta
@@ -2109,9 +2356,19 @@ static void mark_forbidden_cells(const mapping_forbidden_zone_t zone) {
     pthread_mutex_unlock(&navigation_map_data.mutex);
 }
 
+// funzione helper che restituisce il rettangolo che contiene il muro virtuale, come una zona: serve a scorrere le celle
+// vicine al muro con le funzioni delle zone
+static mapping_forbidden_zone_t wall_bounding_zone(const mapping_virtual_wall_t wall) {
+    mapping_forbidden_zone_t zone = { .x = fmin(wall.x1, wall.x2), .y = fmin(wall.y1, wall.y2) };
+    zone.w = fmax(wall.x1, wall.x2) - zone.x;
+    zone.h = fmax(wall.y1, wall.y2) - zone.y;
+    return zone;
+}
+
 // Funzione helper che segna come proibiti i quadranti in cui il centro del robot farebbe entrare il corpo nella zona:
-// quelli con il centro a meno del raggio del robot dalla zona. Una cella con tutti e quattro i quadranti proibiti è proibita
-static void mark_forbidden_quads(const mapping_forbidden_zone_t zone) {
+// quelli con il centro a meno del raggio del robot dalla zona. Una cella con tutti e quattro i quadranti proibiti è proibita.
+// Se wall non è NULL la zona è il rettangolo che contiene il muro virtuale e la distanza si misura dal muro
+static void mark_forbidden_quads(const mapping_forbidden_zone_t zone, const mapping_virtual_wall_t *wall) {
 
     const double radius = ROBOT_RADIUS / 1000.0;
 
@@ -2130,7 +2387,8 @@ static void mark_forbidden_quads(const mapping_forbidden_zone_t zone) {
             for (int quad = 0; quad < 4; quad++) {
                 double quad_x, quad_y;
                 quad_to_coord(cur_index, NAV_CELL_QUAD[quad], &quad_x, &quad_y);
-                if (calc_forbidden_zone_distance(quad_x, quad_y, zone) < radius) map_state.forbidden_quads[cur_index] |= NAV_CELL_QUAD[quad];
+                double distance = wall != NULL ? calc_virtual_wall_distance(quad_x, quad_y, *wall) : calc_forbidden_zone_distance(quad_x, quad_y, zone);
+                if (distance < radius) map_state.forbidden_quads[cur_index] |= NAV_CELL_QUAD[quad];
             }
 
             // ricalcola quadranti e stato: proibita se lo sono tutti e quattro i quadranti, la proibita e la troppo stretta restano
@@ -2192,14 +2450,16 @@ static void publish_base_zone(void) {
     zone_list.forbidden_zones[0].h = RECHARGING_STATION_ZONE_H;
     zone_list.num_zones = 1;
 
-    // dopo la base, le zone dell'utente caricate con la mappa
+    // dopo la base, le zone dell'utente caricate con la mappa, poi i muri virtuali
     for (int i = 0; i < map_state.num_user_zones; i++) zone_list.forbidden_zones[zone_list.num_zones++] = map_state.user_zones[i];
+    for (int i = 0; i < map_state.num_user_walls; i++) zone_list.walls[zone_list.num_walls++] = map_state.user_walls[i];
 
     write_forbidden_zone_list(&zone_list);
 
-    // la base proibisce celle intere, le zone dell'utente solo i quadranti
+    // la base proibisce celle intere, le zone dell'utente e i muri solo i quadranti
     mark_forbidden_cells(zone_list.forbidden_zones[0]);
-    for (int i = 1; i < zone_list.num_zones; i++) mark_forbidden_quads(zone_list.forbidden_zones[i]);
+    for (int i = 1; i < zone_list.num_zones; i++) mark_forbidden_quads(zone_list.forbidden_zones[i], NULL);
+    for (int i = 0; i < zone_list.num_walls; i++) mark_forbidden_quads(wall_bounding_zone(zone_list.walls[i]), &zone_list.walls[i]);
 }
 
 // funzione helper che applica le zone volute dall'utente (scritte dal task aperiodico): toglie le celle proibite delle
@@ -2216,6 +2476,13 @@ static void apply_user_zones(void) {
 
     map_state.num_user_zones = wanted.num_zones;
     for (int i = 0; i < wanted.num_zones; i++) map_state.user_zones[i] = wanted.zones[i];
+
+    // i muri cambiano solo se la richiesta li porta (un'app vecchia manda solo le zone)
+    if (wanted.has_walls) {
+        for (int i = 0; i < map_state.num_user_walls; i++) unmark_forbidden_quads(wall_bounding_zone(map_state.user_walls[i]));
+        map_state.num_user_walls = wanted.num_walls;
+        for (int i = 0; i < wanted.num_walls; i++) map_state.user_walls[i] = wanted.walls[i];
+    }
 
     publish_base_zone();
 
@@ -2260,7 +2527,7 @@ static inline uint8_t fine_cell_category(int8_t score) {
 // mappatura non sta lavorando. Il contatore dei job è dispari durante un job: se è dispari si aspetta, se cambia durante
 // la copia la copia mescola due versioni e si rifà. La mappatura non aspetta mai
 bool copy_map_categories(uint8_t *categories, int rect_x, int rect_y, int rect_width, int rect_height,
-                         mapping_forbidden_zone_t *user_zones, int *num_user_zones) {
+                         mapping_forbidden_zone_t *user_zones, int *num_user_zones, mapping_virtual_wall_t *user_walls, int *num_user_walls) {
 
     // il rettangolo, in byte lungo x (4 celle per byte) e in righe lungo y
     const uint32_t bytes_per_row = FINE_MAP_CELL_NUMBER / 4;
@@ -2290,6 +2557,10 @@ bool copy_map_categories(uint8_t *categories, int rect_x, int rect_y, int rect_w
         if (user_zones != NULL) {
             *num_user_zones = map_state.num_user_zones;
             for (int i = 0; i < map_state.num_user_zones; i++) user_zones[i] = map_state.user_zones[i];
+        }
+        if (user_walls != NULL) {
+            *num_user_walls = map_state.num_user_walls;
+            for (int i = 0; i < map_state.num_user_walls; i++) user_walls[i] = map_state.user_walls[i];
         }
 
         // i dati letti vanno guardati prima di rileggere il contatore
@@ -2325,24 +2596,28 @@ static bool read_map_u16(FILE *f, uint32_t *crc, uint16_t *value) {
     return true;
 }
 
-// funzione helper che legge il file della mappa e scrive le celle nella griglia fine. Fa tutti i
-// controlli del formato: se uno fallisce la griglia torna vuota e ritorna false
-static bool read_map_file(FILE *f, int *x0, int *y0, int *width, int *height) {
+// funzione helper che legge il file della mappa e scrive le celle nella griglia fine data (già vuota), le zone e i muri.
+// Fa tutti i controlli del formato: se uno fallisce la griglia torna vuota e ritorna false
+static bool read_map_file(FILE *f, int8_t *fine_grid, mapping_forbidden_zone_t *out_zones, int *out_num_zones,
+                          mapping_virtual_wall_t *out_walls, int *out_num_walls, int *x0, int *y0, int *width, int *height) {
 
     uint32_t crc = 0;
     uint8_t magic[MAP_FILE_MAGIC_LEN];
-    uint16_t x, y, w, h;
-    uint8_t zones_byte;
+    uint16_t x = 0, y = 0, w = 0, h = 0;
+    uint8_t zones_byte, walls_byte = 0;
 
-    // header: magic number, rettangolo dentro la griglia, numero di zone
-    bool ok = read_map_bytes(f, &crc, magic, MAP_FILE_MAGIC_LEN) && memcmp(magic, MAP_FILE_MAGIC, MAP_FILE_MAGIC_LEN) == 0;
+    // header: magic number (RTM1, o RTM2 con i muri), rettangolo dentro la griglia, numero di zone (e di muri)
+    bool ok = read_map_bytes(f, &crc, magic, MAP_FILE_MAGIC_LEN);
+    bool has_walls = ok && memcmp(magic, MAP_FILE_MAGIC_WALLS, MAP_FILE_MAGIC_LEN) == 0;
+    ok = ok && (has_walls || memcmp(magic, MAP_FILE_MAGIC, MAP_FILE_MAGIC_LEN) == 0);
     ok = ok && read_map_u16(f, &crc, &x) && read_map_u16(f, &crc, &y) && read_map_u16(f, &crc, &w) && read_map_u16(f, &crc, &h);
     ok = ok && w > 0 && h > 0 && x + w <= FINE_MAP_CELL_NUMBER && y + h <= FINE_MAP_CELL_NUMBER;
     ok = ok && read_map_bytes(f, &crc, &zones_byte, 1);
+    if (has_walls) ok = ok && read_map_bytes(f, &crc, &walls_byte, 1);
 
     // numero di zone: al massimo una in meno della lista, il primo posto è della base
-    int num_zones = zones_byte;
-    ok = ok && num_zones <= MAX_FORBIDDEN_ZONES - 1;
+    int num_zones = zones_byte, num_walls = walls_byte;
+    ok = ok && num_zones <= MAX_FORBIDDEN_ZONES - 1 && num_walls <= MAX_VIRTUAL_WALLS;
 
     // zone, da celle fini a metri
     mapping_forbidden_zone_t zones[MAX_FORBIDDEN_ZONES - 1];
@@ -2354,6 +2629,18 @@ static bool read_map_file(FILE *f, int *x0, int *y0, int *width, int *height) {
         zones[i].y = (zy - FINE_MAP_ORIGIN) * FINE_MAP_CELL_SIZE;
         zones[i].w = zw * FINE_MAP_CELL_SIZE;
         zones[i].h = zh * FINE_MAP_CELL_SIZE;
+    }
+
+    // muri, da spigoli di celle fini a metri
+    mapping_virtual_wall_t walls[MAX_VIRTUAL_WALLS];
+    for (int i = 0; ok && i < num_walls; i++) {
+        uint16_t c[4] = {0};
+        ok = read_map_u16(f, &crc, &c[0]) && read_map_u16(f, &crc, &c[1]) && read_map_u16(f, &crc, &c[2]) && read_map_u16(f, &crc, &c[3]);
+        ok = ok && c[0] <= FINE_MAP_CELL_NUMBER && c[1] <= FINE_MAP_CELL_NUMBER && c[2] <= FINE_MAP_CELL_NUMBER && c[3] <= FINE_MAP_CELL_NUMBER;
+        walls[i].x1 = (c[0] - FINE_MAP_ORIGIN) * FINE_MAP_CELL_SIZE;
+        walls[i].y1 = (c[1] - FINE_MAP_ORIGIN) * FINE_MAP_CELL_SIZE;
+        walls[i].x2 = (c[2] - FINE_MAP_ORIGIN) * FINE_MAP_CELL_SIZE;
+        walls[i].y2 = (c[3] - FINE_MAP_ORIGIN) * FINE_MAP_CELL_SIZE;
     }
 
     // celle a sequenze, riga dopo riga
@@ -2370,7 +2657,7 @@ static bool read_map_file(FILE *f, int *x0, int *y0, int *width, int *height) {
             int8_t score = category == MAP_CAT_FREE ? LOAD_SCORE_FREE :
                            category == MAP_CAT_OCCUPIED ? LOAD_SCORE_OCCUPIED :
                            category == MAP_CAT_VOID ? VOID_OBSTACLE : 0;
-            map_state.fine_grid[cell_y << 10 | cell_x] = score;
+            fine_grid[cell_y << 10 | cell_x] = score;
         }
     }
 
@@ -2381,14 +2668,71 @@ static bool read_map_file(FILE *f, int *x0, int *y0, int *width, int *height) {
     ok = ok && fgetc(f) == EOF;
 
     if (!ok) {
-        memset(map_state.fine_grid, 0, sizeof map_state.fine_grid);
+        memset(fine_grid, 0, sizeof map_grids[0].fine_grid);
         return false;
     }
 
-    for (int i = 0; i < num_zones; i++) map_state.user_zones[i] = zones[i];
-    map_state.num_user_zones = num_zones;
+    for (int i = 0; i < num_zones; i++) out_zones[i] = zones[i];
+    *out_num_zones = num_zones;
+    for (int i = 0; i < num_walls; i++) out_walls[i] = walls[i];
+    *out_num_walls = num_walls;
     *x0 = x; *y0 = y; *width = w; *height = h;
     return true;
+}
+
+// funzione helper che carica map.rtm in una serie di griglie già vuote e ne calcola contatori e griglia di navigazione
+// (nav_grid, solo il rettangolo della mappa più una cella di margine). La usano il caricamento all'avvio (griglie in uso)
+// e la ricarica (griglie libere, nel task aperiodico). Ritorna 1 se ha caricato la mappa, 0 se il file non c'è, -1 se
+// non supera i controlli (le griglie restano vuote)
+static int load_map_into(mapping_grids_t *grids, uint8_t *nav_grid, mapping_forbidden_zone_t *zones, int *num_zones,
+                         mapping_virtual_wall_t *walls, int *num_walls) {
+
+    *num_zones = 0;
+    *num_walls = 0;
+
+    char path[256];
+    if (map_file_path(path, sizeof path, "") != 0) return 0;
+    FILE *f = fopen(path, "rb");
+    if (!f) {
+        fprintf(stderr, "mappatura: nessuna mappa in %s, si esplora\n", path);
+        return 0;
+    }
+    int x0, y0, width, height;
+    bool ok = read_map_file(f, grids->fine_grid, zones, num_zones, walls, num_walls, &x0, &y0, &width, &height);
+    fclose(f);
+    if (!ok) {
+        fprintf(stderr, "mappatura: la mappa %s non supera i controlli, si esplora\n", path);
+        return -1;
+    }
+
+    // contatori: celle osservate per cella di navigazione, celle occupate (anche il vuoto) attorno ai quadranti
+    for (int y = y0; y < y0 + height; y++) {
+        for (int x = x0; x < x0 + width; x++) {
+            int8_t score = grids->fine_grid[y << 10 | x];
+            if (score == 0) continue;
+            grids->num_observed_fine_cells[(x >> 2) | ((y >> 2) << 8)]++;
+            if (score > FINE_CELL_OCCUPATION_THRESHOLD || score == VOID_OBSTACLE) add_occupied_cells(grids->num_occupied_fine_cells, x, y, 1);
+        }
+    }
+
+    // griglia di navigazione del rettangolo, più una cella di margine per l'ingrossamento degli ostacoli (i bordi della griglia restano bloccati)
+    int nav_x_min = x0 / FINE_CELL_IN_NAV_CELL - 1, nav_x_max = (x0 + width) / FINE_CELL_IN_NAV_CELL + 1;
+    int nav_y_min = y0 / FINE_CELL_IN_NAV_CELL - 1, nav_y_max = (y0 + height) / FINE_CELL_IN_NAV_CELL + 1;
+    if (nav_x_min < 1) nav_x_min = 1;
+    if (nav_y_min < 1) nav_y_min = 1;
+    if (nav_x_max > NAV_MAP_CELL_NUMBER - 2) nav_x_max = NAV_MAP_CELL_NUMBER - 2;
+    if (nav_y_max > NAV_MAP_CELL_NUMBER - 2) nav_y_max = NAV_MAP_CELL_NUMBER - 2;
+
+    for (int nav_y = nav_y_min; nav_y <= nav_y_max; nav_y++) {
+        for (int nav_x = nav_x_min; nav_x <= nav_x_max; nav_x++) {
+            int nav_index = nav_y << 8 | nav_x;
+            uint8_t cell_mask = calc_bitmask_of(grids->num_occupied_fine_cells, NULL, nav_index);
+            nav_grid[nav_index] = calc_state_of(grids->num_observed_fine_cells, nav_index, cell_mask) | cell_mask;
+        }
+    }
+
+    fprintf(stderr, "mappatura: mappa caricata da %s (%d x %d celle, %d zone, %d muri)\n", path, width, height, *num_zones, *num_walls);
+    return 1;
 }
 
 // funzione helper chiamata da init_mapping: se il robot è sulla base, carica la mappa attiva e ricalcola contatori e
@@ -2410,50 +2754,122 @@ static void load_map_if_on_base(void) {
     }
 
     char path[256];
-    if (map_file_path(path, sizeof path, "") != 0) return;
-    FILE *f = fopen(path, "rb");
-    if (!f) {
-        fprintf(stderr, "mappatura: nessuna mappa in %s, si esplora\n", path);
-        return;
-    }
-    int x0, y0, width, height;
-    bool ok = read_map_file(f, &x0, &y0, &width, &height);
-    fclose(f);
-    if (!ok) {
-        fprintf(stderr, "mappatura: la mappa %s non supera i controlli, si esplora\n", path);
-        return;
-    }
 
-    // contatori: celle osservate per cella di navigazione, celle occupate (anche il vuoto) attorno ai quadranti
-    for (int y = y0; y < y0 + height; y++) {
-        for (int x = x0; x < x0 + width; x++) {
-            int8_t score = map_state.fine_grid[y << 10 | x];
-            if (score == 0) continue;
-            map_state.num_observed_fine_cells[(x >> 2) | ((y >> 2) << 8)]++;
-            if (score > FINE_CELL_OCCUPATION_THRESHOLD || score == VOID_OBSTACLE) update_occupied_cells(x, y, 1);
+    // posizione iniziale lasciata dall'ancoraggio alla base (vale una volta sola: il file si cancella). Il robot è sulla
+    // base, quindi la posizione è vicina all'origine: un valore fuori dalla finestra della ricerca vuol dire un file rovinato
+    if (map_file_path(path, sizeof path, MAP_START_POSE_EXT) == 0) {
+        FILE *pose_file = fopen(path, "r");
+        if (pose_file) {
+            double x = 0, y = 0, theta = 0;
+            if (fscanf(pose_file, "%lf %lf %lf", &x, &y, &theta) == 3 && fabs(x) <= REANCHOR_WINDOW_M && fabs(y) <= REANCHOR_WINDOW_M &&
+                fabs(theta) <= REANCHOR_WINDOW_ANGLE) {
+                map_state.search.start_x = x;
+                map_state.search.start_y = y;
+                map_state.search.start_theta = theta;
+                map_state.search.has_start_pose = true;
+                fprintf(stderr, "mappatura: posizione iniziale dall'ancoraggio alla base: (%.3f, %.3f) a %.1f gradi\n", x, y, theta * 180 / M_PI);
+            }
+            fclose(pose_file);
         }
+        remove(path);
     }
 
-    // griglia di navigazione del rettangolo, più una cella di margine per l'ingrossamento degli ostacoli (i bordi della griglia restano bloccati)
-    int nav_x_min = x0 / FINE_CELL_IN_NAV_CELL - 1, nav_x_max = (x0 + width) / FINE_CELL_IN_NAV_CELL + 1;
-    int nav_y_min = y0 / FINE_CELL_IN_NAV_CELL - 1, nav_y_max = (y0 + height) / FINE_CELL_IN_NAV_CELL + 1;
-    if (nav_x_min < 1) nav_x_min = 1;
-    if (nav_y_min < 1) nav_y_min = 1;
-    if (nav_x_max > NAV_MAP_CELL_NUMBER - 2) nav_x_max = NAV_MAP_CELL_NUMBER - 2;
-    if (nav_y_max > NAV_MAP_CELL_NUMBER - 2) nav_y_max = NAV_MAP_CELL_NUMBER - 2;
+    // prima che partano i task: si carica direttamente nelle griglie in uso
+    pthread_mutex_lock(&navigation_map_data.mutex);
+    load_map_into(&map_grids[map_state.grids_in_use], navigation_map_data.navigation_grid, map_state.user_zones, &map_state.num_user_zones,
+                  map_state.user_walls, &map_state.num_user_walls);
+    navigation_map_data.version_number++;
+    pthread_mutex_unlock(&navigation_map_data.mutex);
+}
+
+bool prepare_map_reload(void) {
+
+    // le griglie libere e la griglia di navigazione di scorta ripartono vuote, con i bordi bloccati come in init_mapping
+    mapping_grids_t *grids = &map_grids[1 - map_state.grids_in_use];
+    memset(grids, 0, sizeof *grids);
+    memset(reload_nav_grid, 0, sizeof reload_nav_grid);
+    for (int i = 0; i < NAV_MAP_CELL_NUMBER; i++) {
+        reload_nav_grid[i] = NAV_CELL_BLOCKED | NAV_CELL_QUAD_MASK;
+        reload_nav_grid[((NAV_MAP_CELL_NUMBER - 1) << 8) | i] = NAV_CELL_BLOCKED | NAV_CELL_QUAD_MASK;
+        reload_nav_grid[i << 8] = NAV_CELL_BLOCKED | NAV_CELL_QUAD_MASK;
+        reload_nav_grid[(i << 8) | (NAV_MAP_CELL_NUMBER - 1)] = NAV_CELL_BLOCKED | NAV_CELL_QUAD_MASK;
+    }
+
+    return load_map_into(grids, reload_nav_grid, reload_data.zones, &reload_data.num_zones, reload_data.walls, &reload_data.num_walls) >= 0;
+}
+
+uint32_t request_map_swap(bool has_start_pose, double start_x, double start_y, double start_theta, bool is_overwrite) {
+    reload_data.has_start_pose = has_start_pose;
+    reload_data.start_x = has_start_pose ? start_x : 0;
+    reload_data.start_y = has_start_pose ? start_y : 0;
+    reload_data.start_theta = has_start_pose ? start_theta : 0;
+    reload_data.is_overwrite = is_overwrite;
+    return atomic_fetch_add_explicit(&reload_request_num, 1, memory_order_release) + 1;
+}
+
+uint32_t read_map_reload_num(void) {
+    return atomic_load(&reload_done_num);
+}
+
+bool read_map_reload_has_start_pose(void) {
+    return atomic_load(&reload_has_start_pose);
+}
+
+bool read_map_reload_overwrites(void) {
+    return atomic_load(&reload_is_overwrite);
+}
+
+// funzione helper chiamata nel job quando il task aperiodico ha preparato una ricarica: scambia le griglie (puntatori),
+// copia la griglia di navigazione preparata (64 KB), rimette zone e muri del file e riparte come all'avvio, dalla
+// posizione data o da (0; 0; 0) con l'odometria di adesso. Tutto il resto della mappatura che dipende dalla mappa riparte da zero
+static void apply_map_reload(const movement_position_data_t *cur_pos) {
+
+    map_state.grids_in_use = 1 - map_state.grids_in_use;
+    map_state.fine_grid = map_grids[map_state.grids_in_use].fine_grid;
+    map_state.num_occupied_fine_cells = map_grids[map_state.grids_in_use].num_occupied_fine_cells;
+    map_state.num_observed_fine_cells = map_grids[map_state.grids_in_use].num_observed_fine_cells;
 
     pthread_mutex_lock(&navigation_map_data.mutex);
-    for (int nav_y = nav_y_min; nav_y <= nav_y_max; nav_y++) {
-        for (int nav_x = nav_x_min; nav_x <= nav_x_max; nav_x++) {
-            int nav_index = nav_y << 8 | nav_x;
-            uint8_t cell_mask = calc_nav_cell_bitmask(nav_index);
-            navigation_map_data.navigation_grid[nav_index] = calc_nav_cell_state(nav_index, cell_mask) | cell_mask;
-        }
-    }
+    memcpy(navigation_map_data.navigation_grid, reload_nav_grid, sizeof reload_nav_grid);
     navigation_map_data.version_number++;
     pthread_mutex_unlock(&navigation_map_data.mutex);
 
-    fprintf(stderr, "mappatura: mappa caricata da %s (%d x %d celle, %d zone)\n", path, width, height, map_state.num_user_zones);
+    // zone e muri del file, poi la base: la ricarica si fa solo sulla base, quindi la mappa ha l'origine qui
+    memset(map_state.forbidden_quads, 0, sizeof map_state.forbidden_quads);
+    map_state.num_user_zones = reload_data.num_zones;
+    for (int i = 0; i < reload_data.num_zones; i++) map_state.user_zones[i] = reload_data.zones[i];
+    map_state.num_user_walls = reload_data.num_walls;
+    for (int i = 0; i < reload_data.num_walls; i++) map_state.user_walls[i] = reload_data.walls[i];
+    map_state.base_check_jobs = BASE_CHECK_JOBS;
+    publish_base_zone();
+    atomic_store(&started_on_base, true);
+
+    // celle chiuse: la navigazione ricomincia la sua lista da zero
+    map_state.last_closed_num = 0;
+    map_state.last_reopen_num = 0;
+
+    // ricerca della posizione e riallineamento come all'avvio
+    map_state.search.is_repositioning = false;
+    map_state.search.is_window = false;
+    map_state.search.phase = SEARCH_WAIT_SCAN;
+    map_state.search.attempts = 0;
+    map_state.search.has_start_pose = reload_data.has_start_pose;
+    map_state.search.start_x = reload_data.start_x;
+    map_state.search.start_y = reload_data.start_y;
+    map_state.search.start_theta = reload_data.start_theta;
+    map_state.is_initial_theta_pending = true;
+
+    // la posizione: quella data, legata all'odometria di adesso (restart_from_pose azzera anche incastro e ultima posizione)
+    restart_from_pose(cur_pos->odom_x, cur_pos->odom_y, cur_pos->odom_theta, reload_data.start_x, reload_data.start_y,
+                      reload_data.start_theta, MAP_NORMAL);
+
+    fprintf(stderr, "mappatura: mappa ricaricata senza riavvio (%d zone, %d muri), robot in (%.3f, %.3f) a %.1f gradi\n",
+            map_state.num_user_zones, map_state.num_user_walls, reload_data.start_x, reload_data.start_y, reload_data.start_theta * 180 / M_PI);
+
+    // pubblica: prima i dati, poi il numero
+    atomic_store(&reload_has_start_pose, reload_data.has_start_pose);
+    atomic_store(&reload_is_overwrite, reload_data.is_overwrite);
+    atomic_store(&reload_done_num, map_state.last_reload_request);
 }
 
 // lavoro di un job del task (lo chiama job_mapping, che ci mette attorno il contatore dei job)
@@ -2477,14 +2893,19 @@ static void job_mapping_body(void *arg) {
     drv_status_t cur_drv_state = {0};
     drv_status(&cur_drv_state);
 
+    // ricarica della mappa preparata dal task aperiodico (robot a riposo sulla base): lo scambio prende tutto il job
+    uint32_t reload_request = atomic_load_explicit(&reload_request_num, memory_order_acquire);
+    if (reload_request != map_state.last_reload_request) {
+        map_state.last_reload_request = reload_request;
+        apply_map_reload(&cur_pos);
+        return;
+    }
+
     // se il robot è sollevato la sua posizione è persa: pubblicalo una volta sola ed esci,
     // da sollevato non si scrive niente sulla mappa
     if (cur_drv_state.lifted) {
         // un Riposiziona base in corso non vale più: il robot non è più sulla base
-        if (map_state.search.is_repositioning) {
-            map_state.search.is_repositioning = false;
-            set_reposition_status(REPOSITION_FAILED);
-        }
+        if (map_state.search.is_repositioning) end_reposition(REPOSITION_FAILED);
         if (map_state.state != MAP_LOST) {
             map_state.state = MAP_LOST;
             map_state.search.attempts = 0;
@@ -2535,14 +2956,34 @@ static void job_mapping_body(void *arg) {
     // Riposiziona base: un comando nuovo della navigazione fa partire la ricerca; finché è in corso la mappa non si scrive
     {
         navigation_closed_cells_t closed_cells = read_closed_cells();
-        if (closed_cells.reposition_num != map_state.search.last_reposition_num) {
+        // il riallineamento automatico (reanchor_num) usa la stessa ricerca: cambia solo l'esito quando non c'è niente da fare
+        bool is_reposition_request = closed_cells.reposition_num != map_state.search.last_reposition_num;
+        bool is_reanchor_request = closed_cells.reanchor_num != map_state.search.last_reanchor_num;
+
+        // aggancio di fine missione: ancoraggio alla base vista dal lidar (senza ricerca, finisce in questo job)
+        if (closed_cells.base_anchor_num != map_state.search.last_base_anchor_num) {
+            map_state.search.last_base_anchor_num = closed_cells.base_anchor_num;
+            anchor_to_base();
+        }
+
+        // all'avvio dopo un ancoraggio con riavvio la posizione è già quella giusta: la ricerca non serve
+        if (is_reanchor_request && !is_reposition_request && map_state.search.has_start_pose) {
+            map_state.search.last_reanchor_num = closed_cells.reanchor_num;
+            is_reanchor_request = false;
+            fprintf(stderr, "mappatura: riallineamento all'avvio non necessario, la posizione viene dall'ancoraggio alla base\n");
+            set_reposition_status(REPOSITION_IDLE);
+        }
+
+        if (is_reposition_request || is_reanchor_request) {
             map_state.search.last_reposition_num = closed_cells.reposition_num;
+            map_state.search.last_reanchor_num = closed_cells.reanchor_num;
+            map_state.search.is_reanchor = !is_reposition_request;
             if (map_state.state == MAP_NORMAL && map_state.search.phase != SEARCH_WAIT_RESULT) {
                 map_state.search.is_repositioning = true;
                 map_state.search.phase = SEARCH_WAIT_SCAN;
                 map_state.search.put_down_t = rt_now();
             } else {
-                set_reposition_status(REPOSITION_FAILED);
+                end_reposition(REPOSITION_FAILED);
             }
         }
         if (map_state.search.is_repositioning) {
@@ -2663,6 +3104,9 @@ static void job_mapping_body(void *arg) {
             double x_coord_abs = cur_robot_x + (x_coord_rel * cos_theta - y_coord_rel * sin_theta);
             double y_coord_abs = cur_robot_y + (x_coord_rel * sin_theta + y_coord_rel * cos_theta);
 
+            // un raggio che taglia un muro virtuale si ferma sul muro, come su un muro vero
+            if (map_state.num_near_walls > 0) cut_ray_at_walls(cur_robot_x, cur_robot_y, &x_coord_abs, &y_coord_abs);
+
             
             // calcola l'indice della cella della mappa fine del punto corrente
             uint32_t cur_point_cell_index = coord_to_fine_index(x_coord_abs, y_coord_abs);
@@ -2677,7 +3121,9 @@ static void job_mapping_body(void *arg) {
             // le celle della fine map per cui passa il raggio del lidar
             // e aggiornare sia i punti per cui è passato il raggio
             // e non ha trovato ostacoli, sia l'ultimo punto dove il raggio si è infranto
-            exec_bresenham_algorithm(robot_cell_x, robot_cell_y, cur_point_cell_x, cur_point_cell_y);
+            exec_bresenham_algorithm(robot_cell_x, robot_cell_y, cur_point_cell_x, cur_point_cell_y,
+                                     cur_robot_x / FINE_MAP_CELL_SIZE + FINE_MAP_ORIGIN, cur_robot_y / FINE_MAP_CELL_SIZE + FINE_MAP_ORIGIN,
+                                     x_coord_abs / FINE_MAP_CELL_SIZE + FINE_MAP_ORIGIN, y_coord_abs / FINE_MAP_CELL_SIZE + FINE_MAP_ORIGIN);
 
         }
     }
@@ -2713,6 +3159,16 @@ static void job_mapping_body(void *arg) {
     // metti l'indice dell'ultima cella letta all'ultimo indice letto dopo il for, in questo
     // modo last_closed_num si comporta come un buffer circolare
     map_state.last_closed_num = closed_cells.num;
+
+    // le celle chiuse da riaprire tornano allo stato calcolato dalla mappa
+    for (uint32_t i = map_state.last_reopen_num; i < closed_cells.reopen_num; i++) {
+        uint16_t cur_idx = closed_cells.reopen_cells[i % CLOSED_CELLS_MAX];
+        if (get_nav_cell_state(navigation_map_data.navigation_grid[cur_idx]) != NAV_CELL_TOO_NARROW) continue;
+        uint8_t cell_mask = calc_nav_cell_bitmask(cur_idx);
+        navigation_map_data.navigation_grid[cur_idx] = calc_nav_cell_state(cur_idx, cell_mask) | cell_mask;
+        hasChanged = true;
+    }
+    map_state.last_reopen_num = closed_cells.reopen_num;
 
     // Scorri le celle all'interno dell'area aggiornata
     for (int cur_nav_y = nav_y_min; cur_nav_y <= nav_y_max; cur_nav_y++) {

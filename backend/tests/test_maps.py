@@ -52,7 +52,7 @@ class RtmFormatTest(unittest.TestCase):
 
         bad_files = {
             "troppo corto": good[:10],
-            "numero magico": with_crc(b"RTM2" + good[4:-4]),
+            "numero magico": with_crc(b"RTM9" + good[4:-4]),
             "rettangolo fuori": with_crc(good[:4] + struct.pack("<4H", 1020, 0, 20, 10) + good[12:-4]),
             "larghezza zero": with_crc(good[:4] + struct.pack("<4H", 0, 0, 0, 10) + good[12:-4]),
             "troppe zone": with_crc(good[:12] + bytes([16]) + good[13:-4]),
@@ -70,6 +70,33 @@ class RtmFormatTest(unittest.TestCase):
         cells = maps.zone_to_cells({"x": -0.365, "y": -0.22, "w": 0.26, "h": 0.44})
         self.assertEqual(cells, (505, 508, 5, 9))
         self.assertEqual(maps.zone_from_cells((532, 532, 10, 10)), {"x": 1.0, "y": 1.0, "w": 0.5, "h": 0.5})
+
+    def test_walls_make_an_rtm2_file(self):
+        cells = bytes([maps.MAP_CAT_FREE] * 300)
+        walls = [maps.wall_to_cells({"x1": 2.2, "y1": 4.65, "x2": 2.9, "y2": 4.65})]
+        self.assertEqual(walls, [(556, 605, 570, 605)])     # come il robot (test_live_map della copia)
+        data = maps.encode_rtm(100, 200, 30, 10, [(510, 500, 12, 8)], cells, walls)
+        self.assertEqual(data[:4], b"RTM2")
+        self.assertEqual(struct.unpack_from("<4H2B", data, 4), (100, 200, 30, 10, 1, 1))
+        self.assertEqual(struct.unpack_from("<4H", data, 14 + 8), (556, 605, 570, 605))
+        decoded = maps.decode_rtm(data)
+        self.assertEqual((decoded.zones, decoded.walls, decoded.cells), ([(510, 500, 12, 8)], walls, cells))
+        self.assertEqual(maps.wall_from_cells(walls[0]), {"x1": 2.2, "y1": 4.65, "x2": 2.9, "y2": 4.65})
+        # senza muri il file resta RTM1, leggibile dalle app di prima
+        self.assertEqual(maps.encode_rtm(100, 200, 30, 10, [], cells)[:4], b"RTM1")
+        self.assertEqual(maps.decode_rtm(maps.encode_rtm(100, 200, 30, 10, [], cells)).walls, [])
+        # un muro fuori dalla griglia non passa
+        body = bytearray(data[:-4])
+        struct.pack_into("<H", body, 22, 2000)
+        with self.assertRaises(maps.MapFormatError):
+            maps.decode_rtm(bytes(body) + struct.pack("<I", zlib.crc32(bytes(body))))
+
+    def test_replace_zones_keeps_the_walls_unless_given(self):
+        old = room_rtm()
+        with_wall = maps.replace_zones(old, [], [(500, 500, 520, 500)])
+        self.assertEqual(maps.decode_rtm(with_wall).walls, [(500, 500, 520, 500)])
+        self.assertEqual(maps.decode_rtm(maps.replace_zones(with_wall, [(1, 2, 3, 4)])).walls, [(500, 500, 520, 500)])
+        self.assertEqual(maps.replace_zones(with_wall, [], [])[:4], b"RTM1")
 
     def test_replace_zones_keeps_the_cells(self):
         old = room_rtm(zones=[(1, 2, 3, 4)])
@@ -348,7 +375,21 @@ class SavedMapsTest(BackendTestCase):
         response, taken = self.command(f"/api/robot/maps/{selected}/zones", self.user, method="put", json=zones)
         self.assertEqual(response.status_code, 200)
         self.assertEqual((taken[0]["type"], taken[0]["zones"]), ("zones", zones))
+        # zone e muri insieme
+        walls = [{"x1": 0.0, "y1": 0.0, "x2": 1.0, "y2": 0.0}]
+        body = {"zones": zones, "walls": walls}
+        self.assertEqual(self.client.put(f"/api/robot/maps/{other}/zones", headers=self.user, json=body).status_code, 200)
+        decoded = maps.decode_rtm(self.client.get(f"/api/robot/maps/{other}", headers=self.user).data)
+        self.assertEqual((decoded.zones, decoded.walls), ([(532, 532, 10, 10)], [(512, 512, 532, 512)]))
+        response, taken = self.command(f"/api/robot/maps/{selected}/zones", self.user, method="put", json=body)
+        self.assertEqual((response.status_code, taken[0]["walls"]), (200, walls))
         # rifiuti
+        too_many_walls = {"zones": [], "walls": walls * (config.MAX_VIRTUAL_WALLS + 1)}
+        response = self.client.put(f"/api/robot/maps/{other}/zones", headers=self.user, json=too_many_walls)
+        self.assertEqual((response.status_code, response.get_json()["reason"]), (409, "too_many_walls"))
+        short = {"zones": [], "walls": [{"x1": 0, "y1": 0, "x2": 0.01, "y2": 0}]}
+        response = self.client.put(f"/api/robot/maps/{other}/zones", headers=self.user, json=short)
+        self.assertEqual((response.status_code, response.get_json()["reason"]), (409, "outside_map"))
         too_many = zones * (config.MAX_USER_ZONES + 1)
         response = self.client.put(f"/api/robot/maps/{other}/zones", headers=self.user, json=too_many)
         self.assertEqual((response.status_code, response.get_json()["reason"]), (409, "too_many_zones"))

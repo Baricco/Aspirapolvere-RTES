@@ -38,7 +38,10 @@
 
 #define THRESHOLD_DISTANCE  0.25              // soglia di distanza per considerare vicino un ostacolo/zona proibita, espresso in metri
 #define STOP_DISTANCE       0.01              // distanza dal bordo del robot alla quale la sicurezza porta la velocità in avanti a zero, espressa in metri
-#define MOVEMENT_SAFE_GAIN  1.0               // guadagno usato nella formula per calcolare la velocità massima del robot in base agli ostacoli/zone proibite rilevate, espresso in 1/secondi
+#define SAFE_DECEL          1.0               // decelerazione con cui il robot frena davanti a un ostacolo, la rampa MAX_DECEL_V del movimento, espressa in m/s^2
+#define SAFE_TURN_MIN_OMEGA 0.05        // sotto questa velocità di rotazione il robot va dritto e conta solo la direzione davanti, espressa in rad/s
+#define SAFE_TURN_MAX_STEPS 3             // direzioni del lidar al massimo verso cui il robot sta girando, oltre quella davanti
+#define SAFE_DELAY          0.5               // ritardo fra la misura dell'ostacolo e l'inizio della frenata, espresso in s
 #define LIDAR_SCAN_MAX_AGE  RT_MS(500)        // età massima che può avere una scan del lidar prima di essere considerata invalida, espressa in nanosecondi
 
 typedef struct {    

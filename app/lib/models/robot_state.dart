@@ -24,6 +24,29 @@ class Zone {
   int get hashCode => Object.hash(x, y, w, h);
 }
 
+/// Un muro virtuale, in metri sulla mappa: un segmento che il robot non attraversa e che il lidar vede come un muro.
+class VirtualWall {
+  const VirtualWall(this.x1, this.y1, this.x2, this.y2);
+
+  final double x1, y1, x2, y2;
+
+  factory VirtualWall.fromJson(Map<String, dynamic> json) => VirtualWall(
+        (json['x1'] as num).toDouble(),
+        (json['y1'] as num).toDouble(),
+        (json['x2'] as num).toDouble(),
+        (json['y2'] as num).toDouble(),
+      );
+
+  Map<String, dynamic> toJson() => {'x1': x1, 'y1': y1, 'x2': x2, 'y2': y2};
+
+  @override
+  bool operator ==(Object other) =>
+      other is VirtualWall && other.x1 == x1 && other.y1 == y1 && other.x2 == x2 && other.y2 == y2;
+
+  @override
+  int get hashCode => Object.hash(x1, y1, x2, y2);
+}
+
 /// Scadenze mancate e attivazioni perse di un task real-time.
 class TaskStats {
   const TaskStats(this.name, this.deadlineMisses, this.missedActivations);
@@ -63,6 +86,12 @@ class RobotState {
   int get missionNumber => (_navigation['mission_number'] as num?)?.toInt() ?? 0;
   int get missionDurationS => (_navigation['mission_duration_s'] as num?)?.toInt() ?? 0;
   bool get hasMission => mission != 'none';
+
+  /// Obiettivo dato dall'app: none, going, reached o failed; la posizione solo se ce n'è stato uno.
+  Map<String, dynamic> get _target => _object(_navigation['target']);
+  String get targetState => _target['state'] as String? ?? 'none';
+  ({double x, double y})? get target =>
+      _target['x'] is num && _target['y'] is num ? (x: (_target['x'] as num).toDouble(), y: (_target['y'] as num).toDouble()) : null;
   bool get remoteControl => raw['remote_control'] == true;
   int get uptimeS => (raw['uptime_s'] as num?)?.toInt() ?? 0;
 
@@ -99,6 +128,12 @@ class RobotState {
     final zones = forbiddenZones;
     return startedOnBase && zones.isNotEmpty ? zones.sublist(1) : zones;
   }
+
+  /// I muri virtuali della mappa caricata sul robot.
+  List<VirtualWall> get virtualWalls => [
+        for (final wall in (_map['virtual_walls'] as List? ?? const []))
+          if (wall is Map<String, dynamic>) VirtualWall.fromJson(wall),
+      ];
 
   // --- batteria ---
   Map<String, dynamic> get _battery => _object(raw['battery']);
@@ -174,6 +209,7 @@ class RobotState {
     'follow_borders': 'Cleaning edges',
     'clean': 'Cleaning',
     'return_home': 'Returning home',
+    'go_to': 'Going to target',
   };
 
   static const Map<String, String> _stateLabels = {
@@ -193,5 +229,6 @@ class RobotState {
     'cross': 'Crossing obstacle',
     'pause': 'Paused',
     'remote': 'Remote control',
+    'go_to': 'Planning target',
   };
 }

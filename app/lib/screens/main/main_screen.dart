@@ -62,10 +62,8 @@ class _MainScreenState extends ConsumerState<MainScreen> with StateIntervalMixin
           ? api.send('POST', '/api/robot/map/reset')
           : api.send('PUT', '/api/robot/maps/selected', {'id': mapId}),
     );
-    if (ok) {
-      ref.read(restartProvider.notifier).start();
-      ref.invalidate(mapsProvider);
-    }
+    // il robot carica la mappa nuova senza riavviarsi: l'esito arriva a mappa già caricata
+    if (ok) ref.invalidate(mapsProvider);
   }
 
   /// Riposiziona base (docs/app.md, sezione 7.9): conferma, poi il comando. Il robot risponde subito se accetta;
@@ -73,8 +71,8 @@ class _MainScreenState extends ConsumerState<MainScreen> with StateIntervalMixin
   Future<void> _repositionBase() async {
     final confirmed = await confirmWithWarning(context,
         title: 'Riposiziona base',
-        warning: 'Il robot, fermo sulla base, cerca dove si trova nella mappa e la sposta insieme alle zone proibite. '
-            'Poi si riavvia: sul server resta anche la mappa di prima.',
+        warning: 'Il robot, fermo sulla base, cerca dove si trova nella mappa e la sposta insieme alle zone proibite e ai muri. '
+            'Sul server resta anche la mappa di prima.',
         confirmLabel: 'Riposiziona');
     if (!confirmed) return;
     final ok = await runCommand(ref, (api) => api.send('POST', '/api/robot/base/reposition'));
@@ -88,8 +86,7 @@ class _MainScreenState extends ConsumerState<MainScreen> with StateIntervalMixin
     final notifications = ref.read(notificationProvider.notifier);
     switch (result) {
       case 'done':
-        notifications.show('Base riposizionata', 'Mappa e zone spostate. Il robot si riavvia con la mappa nuova.');
-        ref.read(restartProvider.notifier).start();
+        notifications.show('Base riposizionata', 'Mappa, zone e muri spostati: il robot usa già la mappa nuova.');
         ref.invalidate(mapsProvider);
       case 'not_found':
         notifications.show('Base non trovata', 'Il robot non riconosce la stanza dalla base: la mappa non è cambiata.');
@@ -104,6 +101,13 @@ class _MainScreenState extends ConsumerState<MainScreen> with StateIntervalMixin
   Widget build(BuildContext context) {
     ref.listen(robotStateProvider.select((robotState) => robotState?.mapReposition), (previous, next) {
       if (previous == 'running' && next != null && next != 'running') _showRepositionResult(next);
+    });
+    ref.listen(robotStateProvider.select((robotState) => robotState?.targetState), (previous, next) {
+      if (previous != 'going') return;
+      if (next == 'reached') ref.read(notificationProvider.notifier).show('Obiettivo raggiunto', 'Il robot è arrivato.');
+      if (next == 'failed') {
+        ref.read(notificationProvider.notifier).show('Obiettivo non raggiunto', 'Il robot non riesce ad arrivarci: si è messo in pausa.');
+      }
     });
     final state = ref.watch(robotStateProvider);
     final liveMap = ref.watch(liveMapProvider);
@@ -129,6 +133,9 @@ class _MainScreenState extends ConsumerState<MainScreen> with StateIntervalMixin
             trail: trail?.trail.points ?? const [],
             trailRevision: trail?.revision ?? 0,
             zones: state?.userZones ?? const [],
+            walls: state?.virtualWalls ?? const [],
+            target: state?.targetState == 'going' && state?.target != null ? Offset(state!.target!.x, state.target!.y) : null,
+            onLongPress: hasData && state.online ? (point) => confirmGoTo(context, ref, point) : null,
             showBase: state?.startedOnBase ?? false,
             robot: hasData && state.positionValid ? RobotPose(state.x, state.y, state.thetaDeg) : null,
             controller: _mapController,

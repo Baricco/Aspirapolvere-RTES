@@ -26,7 +26,8 @@ MESSAGES = {
     "remote_in_use": "Il telecomando è in uso da {user}.",
     "not_remote_owner": "Il telecomando non è tuo.",
     "too_many_zones": "Troppe zone proibite: al massimo %d." % config.MAX_USER_ZONES,
-    "outside_map": "Una zona esce dalla mappa o è troppo piccola.",
+    "too_many_walls": "Troppi muri virtuali: al massimo %d." % config.MAX_VIRTUAL_WALLS,
+    "outside_map": "Una zona o un muro esce dalla mappa o è troppo piccolo.",
     "not_backed_up": "La mappa sul robot non è ancora stata copiata sul server: non si può cancellare.",
     "name_taken": "Esiste già una mappa con questo nome.",
     "map_selected": "Questa mappa è selezionata sul robot: prima scegli \"Nessuna mappa\".",
@@ -132,16 +133,32 @@ def is_number(value):
     return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
 
 
-def parse_zones(body):
-    """Lista di zone [{"x", "y", "w", "h"}] in metri, oppure None se il corpo non ha quella forma."""
-    if not isinstance(body, list):
+def parse_items(items, keys):
+    """Lista di oggetti con i campi numerici keys, oppure None se non ha quella forma."""
+    if not isinstance(items, list):
         return None
-    zones = []
-    for zone in body:
-        if not isinstance(zone, dict) or not all(is_number(zone.get(key)) for key in ("x", "y", "w", "h")):
+    parsed = []
+    for item in items:
+        if not isinstance(item, dict) or not all(is_number(item.get(key)) for key in keys):
             return None
-        zones.append({key: float(zone[key]) for key in ("x", "y", "w", "h")})
-    return zones
+        parsed.append({key: float(item[key]) for key in keys})
+    return parsed
+
+
+def parse_zones(body):
+    """Zone in metri e muri virtuali: (zone, muri) dal corpo {"zones": [{"x", "y", "w", "h"}], "walls": [{"x1", "y1",
+    "x2", "y2"}]}, oppure (zone, None) dalla sola lista delle zone (app di prima: i muri restano come sono). None se il
+    corpo non ha nessuna delle due forme."""
+    if isinstance(body, list):
+        zones = parse_items(body, ("x", "y", "w", "h"))
+        return None if zones is None else (zones, None)
+    if not isinstance(body, dict):
+        return None
+    zones = parse_items(body.get("zones"), ("x", "y", "w", "h"))
+    walls = parse_items(body["walls"], ("x1", "y1", "x2", "y2")) if "walls" in body else None
+    if zones is None or ("walls" in body and walls is None):
+        return None
+    return zones, walls
 
 
 def int_argument(name):
@@ -203,11 +220,23 @@ def fault_reset():
     return command_response("fault_reset")
 
 
+@robot_blueprint.post("/goto")
+@require_session
+def go_to():
+    """Obiettivo sulla mappa: il robot ci va e poi torna a quello che faceva. Se la cella non è libera o non c'è un
+    percorso rifiuta (not_reachable); se non riesce ad arrivarci lo dice nello stato (navigation.target) e si mette in pausa."""
+    body = request.get_json(silent=True)
+    if not isinstance(body, dict) or not is_number(body.get("x")) or not is_number(body.get("y")):
+        return invalid_parameters("Servono x e y.")
+    return command_response("go_to", {"x": float(body["x"]), "y": float(body["y"])})
+
+
 @robot_blueprint.post("/base/reposition")
 @require_session
 def reposition_base():
     """Riposiziona base (docs/app.md, sezione 7.9): il robot risponde subito se accetta, l'esito arriva nello stato
-    (map.reposition). Se riesce il robot si riavvia, e la mappa spostata diventa una mappa nuova, selezionata (7.2)."""
+    (map.reposition). Se riesce il robot ricarica la mappa spostata senza riavviarsi, e il file diventa una mappa nuova,
+    selezionata (7.2)."""
     return command_response("reposition_base")
 
 
@@ -265,21 +294,22 @@ def get_zones():
     return jsonify(user_zones_from_state(services().link.current_state()))
 
 
-def zones_command(zones):
-    reason = maps.check_zones(zones)
+def zones_command(zones, walls):
+    params = {"zones": zones} if walls is None else {"zones": zones, "walls": walls}
+    reason = maps.check_zones(zones, walls)
     if reason:
-        status, body = rejected(services(), g.user_id, "zones", {"zones": zones}, reason)
+        status, body = rejected(services(), g.user_id, "zones", params, reason)
         return api_error(status, body["reason"], body["message"])
-    return command_response("zones", {"zones": zones})
+    return command_response("zones", params)
 
 
 @robot_blueprint.put("/zones")
 @require_session
 def put_zones():
-    zones = parse_zones(request.get_json(silent=True))
-    if zones is None:
+    parsed = parse_zones(request.get_json(silent=True))
+    if parsed is None:
         return invalid_parameters("Serve la lista delle zone.")
-    return zones_command(zones)
+    return zones_command(*parsed)
 
 
 # --------------------------------------------------------------------------------- mappa dal vivo e scia
@@ -306,7 +336,7 @@ def get_trail():
 @robot_blueprint.post("/map/reset")
 @require_session
 def map_reset():
-    """"Nessuna mappa": il robot cancella map.rtm e si riavvia. Solo se il server ha la copia di quel file."""
+    """"Nessuna mappa": il robot cancella map.rtm e riparte senza mappa (senza riavvio). Solo se il server ha la copia di quel file."""
     app_services = services()
     map_state = app_services.link.current_state().get("map") or {}
     robot_crc = map_state.get("file_crc")
@@ -366,19 +396,20 @@ def rename_map(map_id):
 @robot_blueprint.put("/maps/<int:map_id>/zones")
 @require_session
 def put_map_zones(map_id):
-    """Zone di una mappa: per la selezionata le applica il robot, per le altre il server riscrive il file."""
-    zones = parse_zones(request.get_json(silent=True))
-    if zones is None:
+    """Zone (e muri virtuali) di una mappa: per la selezionata le applica il robot, per le altre il server riscrive il file."""
+    parsed = parse_zones(request.get_json(silent=True))
+    if parsed is None:
         return invalid_parameters("Serve la lista delle zone.")
+    zones, walls = parsed
     store = services().map_store
     if store.get(map_id) is None:
         return not_found("La mappa non esiste.")
     if map_id == store.selected_id():
-        return zones_command(zones)
-    reason = maps.check_zones(zones)
+        return zones_command(zones, walls)
+    reason = maps.check_zones(zones, walls)
     if reason:
         return api_error(409, reason, MESSAGES[reason])
-    store.set_zones(map_id, zones)
+    store.set_zones(map_id, zones, walls)
     return api_ok()
 
 

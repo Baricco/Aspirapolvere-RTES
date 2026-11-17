@@ -64,8 +64,14 @@ static uint32_t richieste_zone, richieste_file;
 static int sostituzioni, cancellazioni;
 static bool file_riesce = true;
 
-uint32_t request_user_zones(const mapping_forbidden_zone_t *zones, int num_zones)
+static mapping_virtual_wall_t muri_chiesti[MAX_VIRTUAL_WALLS];
+static int num_muri_chiesti = -1;
+static bool muri_nella_richiesta;
+uint32_t request_user_zones(const mapping_forbidden_zone_t *zones, int num_zones, bool has_walls, const mapping_virtual_wall_t *walls, int num_walls)
 {
+	muri_nella_richiesta = has_walls;
+	num_muri_chiesti = num_walls;
+	for (int i = 0; i < num_walls; i++) muri_chiesti[i] = walls[i];
 	num_zone_chieste = num_zones;
 	for (int i = 0; i < num_zones; i++) zone_chieste[i] = zones[i];
 	richieste_zone++;
@@ -226,6 +232,19 @@ static void fault(void)
 	stato_driver.phase = DRV_READY;
 }
 
+static void obiettivo(void)
+{
+	/* x e y in metri viaggiano nei bit di v e omega, al millimetro */
+	app_command_result_t result = esegui("{\"type\":\"go_to\",\"x\":1.613,\"y\":-1.4}");
+	CONTROLLA(result.ok && num_comandi == 1 && comandi[0].type == NAV_COMMAND_GO_TO);
+	CONTROLLA(comandi[0].v == 1.613 && comandi[0].omega == -1.4);
+	CONTROLLA(rifiutato(esegui("{\"type\":\"go_to\",\"x\":1}"), "invalid_command") && num_comandi == 0);
+	/* la navigazione dice che lì non si arriva */
+	esito_navigazione = NAV_RESULT_NOT_REACHABLE;
+	CONTROLLA(rifiutato(esegui("{\"type\":\"go_to\",\"x\":30,\"y\":0}"), "not_reachable"));
+	esito_navigazione = NAV_RESULT_OK;
+}
+
 static void zone(void)
 {
 	app_command_result_t result = esegui("{\"type\":\"zones\",\"zones\":[{\"x\":1.0,\"y\":-2.0,\"w\":0.5,\"h\":0.25},{\"x\":-3,\"y\":3,\"w\":1,\"h\":1}]}");
@@ -234,8 +253,24 @@ static void zone(void)
 	CONTROLLA(zone_chieste[0].x == 1.0 && zone_chieste[0].y == -2.0 && zone_chieste[0].w == 0.5 && zone_chieste[0].h == 0.25);
 	CONTROLLA(zone_chieste[1].x == -3 && zone_chieste[1].h == 1);
 
+	/* senza il campo walls i muri restano come sono */
+	CONTROLLA(!muri_nella_richiesta);
+
 	/* lista vuota: toglie tutte le zone */
 	CONTROLLA(esegui("{\"type\":\"zones\",\"zones\":[]}").ok && num_zone_chieste == 0);
+
+	/* muri virtuali: la lista intera, controllata come fa il task aperiodico */
+	CONTROLLA(esegui("{\"type\":\"zones\",\"zones\":[],\"walls\":[{\"x1\":2.2,\"y1\":4.65,\"x2\":2.9,\"y2\":4.65}]}").ok);
+	CONTROLLA(muri_nella_richiesta && num_muri_chiesti == 1 && muri_chiesti[0].x1 == 2.2 && muri_chiesti[0].y2 == 4.65);
+	CONTROLLA(esegui("{\"type\":\"zones\",\"zones\":[],\"walls\":[]}").ok && muri_nella_richiesta && num_muri_chiesti == 0);
+	CONTROLLA(rifiutato(esegui("{\"type\":\"zones\",\"zones\":[],\"walls\":[{\"x1\":0,\"y1\":0,\"x2\":0.01,\"y2\":0}]}"), "outside_map"));
+	CONTROLLA(rifiutato(esegui("{\"type\":\"zones\",\"zones\":[],\"walls\":[{\"x1\":0,\"y1\":0,\"x2\":30,\"y2\":0}]}"), "outside_map"));
+	CONTROLLA(rifiutato(esegui("{\"type\":\"zones\",\"zones\":[],\"walls\":[{\"x1\":0,\"y1\":0,\"x2\":1}]}"), "invalid_command"));
+	CONTROLLA(rifiutato(esegui("{\"type\":\"zones\",\"zones\":[],\"walls\":{}}"), "invalid_command"));
+	char muri[4096] = "{\"type\":\"zones\",\"zones\":[],\"walls\":[";
+	for (int i = 0; i < MAX_VIRTUAL_WALLS + 1; i++) strcat(muri, i ? ",{\"x1\":0,\"y1\":0,\"x2\":1,\"y2\":0}" : "{\"x1\":0,\"y1\":0,\"x2\":1,\"y2\":0}");
+	strcat(muri, "]}");
+	CONTROLLA(rifiutato(esegui(muri), "too_many_walls"));
 
 	/* 15 zone vanno bene, 16 no */
 	char molte[2048] = "{\"type\":\"zones\",\"zones\":[";
@@ -271,7 +306,7 @@ static void cambio_di_mappa(void)
 
 	/* map_select: scarica in map.rtm.download, controlla il CRC, chiede la sostituzione, poi serve il riavvio */
 	app_command_result_t result = esegui("{\"id\":9,\"type\":\"map_select\",\"map_id\":42,\"crc\":\"9c41e2a0\"}");
-	CONTROLLA(result.ok && result.is_restart_needed);
+	CONTROLLA(result.ok && !result.is_restart_needed);     /* la mappa si ricarica senza riavvio */
 	CONTROLLA(mappa_scaricata == 42 && strcmp(percorso_scaricato, "/cartella/map.rtm.download") == 0);
 	CONTROLLA(strcmp(crc_controllato, "9c41e2a0") == 0);
 	CONTROLLA(sostituzioni == 1 && cancellazioni == 0 && num_comandi == 0);
@@ -298,7 +333,7 @@ static void cambio_di_mappa(void)
 
 	/* map_reset: chiede la cancellazione, poi serve il riavvio */
 	result = esegui("{\"type\":\"map_reset\"}");
-	CONTROLLA(result.ok && result.is_restart_needed && cancellazioni == 1);
+	CONTROLLA(result.ok && !result.is_restart_needed && cancellazioni == 1);
 
 	/* solo a riposo sulla base */
 	int prima = sostituzioni + cancellazioni;
@@ -349,6 +384,7 @@ int main(void)
 	ESEGUI(rifiuti_della_navigazione);
 	ESEGUI(telecomando);
 	ESEGUI(fault);
+	ESEGUI(obiettivo);
 	ESEGUI(zone);
 	ESEGUI(cambio_di_mappa);
 	ESEGUI(comandi_non_validi);

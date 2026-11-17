@@ -9,7 +9,12 @@
  *
  * Fasi: cerca (ruota finché trova il segnale e lo perde) -> centra (torna verso il centro dell'arco) -> avvicina
  * (avanti seguendo il confine fra i fasci 1 e 2, che è l'asse della base) -> rifinisci (a pochi cm, oscillando piano) ->
+ * raddrizza (ruota sul posto finché è perpendicolare al muro davanti, visto dal lidar, e misura la base) ->
  * gira (180° con l'IMU) -> ultimi centimetri -> contatto: fermo, aspetta la carica. Se non riesce avanza, e riprova.
+ * Il raddrizzamento serve perché gli infrarossi centrano il robot sull'asse ma non lo raddrizzano: un errore di direzione
+ * a fine rifinitura (fino a 26° nelle prove visita del 15-16/11) passava intero sui contatti dopo la rotazione.
+ * La misura della base (la sua faccia vista dal lidar, nel sistema del robot) la usa la mappatura per tenere la base
+ * sempre nello stesso punto della mappa (drv_status_t.dock_base_*).
  * Lasciato fuori dall'originale perché non è servito finora: lo spostamento laterale ad archi (fatto quando è vicino alla
  * base lontano dall'asse) e la seconda manovra col lidar (CActionTransferMotionCharge).
  *
@@ -50,6 +55,7 @@ typedef enum {
 	DOCK_P_CONTACT,   /* fermo sui contatti: aspetta la carica */
 	DOCK_P_RETREAT,     /* avanti, per riprovare */
 	DOCK_P_PRESS,      /* sul primo contatto: ancora pochi mm in retromarcia, finché la carica è stabile */
+	DOCK_P_STRAIGHTEN, /* col muso a pochi cm: ruota finché è perpendicolare al muro davanti, poi misura la base */
 } dock_phase_t;
 
 typedef struct {
@@ -77,6 +83,7 @@ typedef struct {
 	/* ricerca e direzione */
 	int seen, starts_inside, turn_dir;
 	int axis_frames, axis_retries;
+	int axis_seen;              /* in questo avvicinamento il robot ha visto il fascio centrale (side() == 1): è passato dall'asse */
 	double yaw_first, yaw_center, direction;
 	double yaw_a, yaw_b;
 	int has_a, has_b;
@@ -89,6 +96,22 @@ typedef struct {
 	/* sui contatti */
 	int contact_frames, total_frames;
 	int64_t t_no_contact;
+
+	/* muro e base davanti, dall'ultimo giro del lidar (solo in rifinitura e raddrizzamento) */
+	int wall_valid;        /* 1 se il giro ha abbastanza punti sulla retta del muro */
+	double wall_angle;     /* direzione della normale al muro (dal robot verso il muro) nel sistema del robot, radianti */
+	double wall_dist;      /* distanza del muro dal centro del robot, lungo la normale, metri */
+	int base_seen;         /* 1 se davanti al muro c'è la faccia della base */
+	double base_along;     /* centro della faccia lungo il muro (0 = sulla normale per il centro del robot, + a sinistra) */
+	double base_protrusion; /* di quanto la faccia sporge dal muro, metri */
+	int64_t t_wall;        /* fine del giro da cui vengono le misure */
+	int64_t t_straight;    /* quando il raddrizzamento è arrivato (0 = non ancora) */
+
+	/* misura della base fatta a fine raddrizzamento, nel sistema del robot: centro della faccia e direzione in cui la
+	   base guarda (verso la stanza). base_number cresce a ogni misura nuova */
+	uint32_t base_number;
+	double base_x, base_y, base_theta;
+	int64_t base_t;
 } docking_t;
 
 void docking_init(docking_t *a);

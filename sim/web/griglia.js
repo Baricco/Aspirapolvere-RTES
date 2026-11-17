@@ -52,6 +52,10 @@ const Griglia = (() => {
       }
     }
     c2.putImageData(img, 0, 0);
+    // punti dell'inseguimento (sim/osserva.c, solo nelle copie di prova): coordinate dell'odometria del programma
+    const mira = PULITE + PULITE_TESTA + N * N / 4;
+    if (d.mostraPulite && b.length >= mira + 40 && dv.getFloat64(mira + 32, true) === 1)
+      d.mira = [0, 1, 2, 3].map(k => dv.getFloat64(mira + 8 * k, true));
     return d;
   }
 
@@ -109,6 +113,11 @@ const Griglia = (() => {
     ctx.rotate(o.dir);                                        // asse x della griglia = direzione iniziale del robot
     ctx.imageSmoothingEnabled = false;
     ctx.drawImage(tela, -N / 2 * CELLA, -N / 2 * CELLA, N * CELLA, N * CELLA);
+    if (dati.mira) {                                          // inseguimento: punto vicino (sterzo) e punto lontano (velocità)
+      [[dati.mira[0], dati.mira[1], "#e6007e"], [dati.mira[2], dati.mira[3], "#00a0e6"]].forEach(([x, y, c]) => {
+        ctx.beginPath(); ctx.arc(x, y, 0.05, 0, 2 * Math.PI); ctx.fillStyle = c; ctx.fill();
+      });
+    }
     ctx.restore();
   }
 

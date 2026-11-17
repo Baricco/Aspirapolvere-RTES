@@ -18,6 +18,9 @@
 // Numero massimo di zone proibite che si possono definire in una mappa
 #define MAX_FORBIDDEN_ZONES 16
 
+// Numero massimo di muri virtuali in una mappa: segmenti che il robot non attraversa e che il lidar vede come un muro
+#define MAX_VIRTUAL_WALLS 16
+
 // Costanti legate alla mappa di navigazione (grossolana) e quella fine (di competenza di mapping e basta)
 // ! FINE_MAP_CELL_NUMBER deve essere divisibile per FINE_CELL_IN_NAV_CELL
 // ! NAV_MAP_CELL_NUMBER deve essere <= 256, per usare gli uint8_t come coordinate di navigazione
@@ -36,6 +39,8 @@
 #define MAP_FILE_MAGIC_LEN      4           // dimensione in byte del numero magico
 #define MAP_FILE_HEADER_LEN     17          // dimensione in byte dell'header: numero magico, rettangolo (4 uint16), numero di zone (1 byte)
 #define MAP_FILE_ZONE_LEN       8           // dimensione in byte di una zona proibita: x, y, larghezza, altezza (uint16, in celle fini)
+#define MAP_FILE_MAGIC_WALLS    "RTM2"      // numero magico del formato con i muri virtuali: dopo il numero di zone c'è il numero di muri (1 byte), dopo le zone i muri. Senza muri si scrive ancora RTM1
+#define MAP_FILE_WALL_LEN       8           // dimensione in byte di un muro virtuale: x e y dei due estremi (uint16, in celle fini, spigoli delle celle come le zone)
 #define MAP_FILE_CRC_LEN        4           // dimensione in byte del CRC-32 in fondo
 #define MAP_RUN_MAX             63          // celle massime in una sequenza (6 bit): le sequenze più lunghe si spezzano
 #define MAP_RUN_CATEGORY_SHIFT  6           // la categoria sta nei 2 bit alti del byte della sequenza
@@ -190,12 +195,38 @@ static inline double calc_forbidden_zone_distance(const double x, const double y
     return hypot(dx, dy);
 }
 
-// Struttura dati che contiene la lista di zone proibite nella mappa
+// Struttura dati che identifica un muro virtuale (segmento), in metri sulla mappa
+typedef struct {
+
+    double x1, y1;      // primo estremo
+    double x2, y2;      // secondo estremo
+
+} mapping_virtual_wall_t;
+
+// funzione helper che restituisce la distanza tra il punto (x, y) e il muro virtuale, espressa in metri
+static inline double calc_virtual_wall_distance(const double x, const double y, const mapping_virtual_wall_t wall) {
+    const double dx = wall.x2 - wall.x1, dy = wall.y2 - wall.y1;
+    const double len2 = dx * dx + dy * dy;
+    double t = len2 > 0 ? ((x - wall.x1) * dx + (y - wall.y1) * dy) / len2 : 0;
+    t = fmin(fmax(t, 0), 1);
+    return hypot(x - (wall.x1 + t * dx), y - (wall.y1 + t * dy));
+}
+
+// funzione helper che controlla un muro virtuale voluto dall'utente: estremi dentro la griglia, lungo almeno una cella fine
+static inline bool is_virtual_wall_valid(const mapping_virtual_wall_t wall) {
+    const double half_side = FINE_MAP_ORIGIN * FINE_MAP_CELL_SIZE;
+    return fabs(wall.x1) <= half_side && fabs(wall.y1) <= half_side && fabs(wall.x2) <= half_side && fabs(wall.y2) <= half_side &&
+           hypot(wall.x2 - wall.x1, wall.y2 - wall.y1) >= FINE_MAP_CELL_SIZE;
+}
+
+// Struttura dati che contiene la lista di zone proibite nella mappa, e i muri virtuali (li legge anche lo stato dell'app)
 typedef struct {
 
     mapping_forbidden_zone_t forbidden_zones[MAX_FORBIDDEN_ZONES];      // lista di zone proibite
     int8_t num_zones;                                                   // numero di zone presenti nell'array
 
+    mapping_virtual_wall_t walls[MAX_VIRTUAL_WALLS];                    // muri virtuali
+    int8_t num_walls;                                                   // numero di muri presenti nell'array
 
 } mapping_forbidden_zone_list_t;
 
@@ -229,16 +260,19 @@ int init_mapping(void);
 // mappa. user_zones può essere NULL se le zone non servono. Ritorna false se non ci riesce (la mappatura non lascia mai
 // la finestra libera)
 bool copy_map_categories(uint8_t *categories, int rect_x, int rect_y, int rect_width, int rect_height,
-                         mapping_forbidden_zone_t *user_zones, int *num_user_zones);
+                         mapping_forbidden_zone_t *user_zones, int *num_user_zones, mapping_virtual_wall_t *user_walls, int *num_user_walls);
 // funzione chiamata dal task aperiodico: esegue la ricerca della posizione numero request_num (chiesta dalla mappatura con
 // request_position_search) e ne pubblica il risultato. La mappa le è prestata: mentre la posizione è persa la mappatura non la scrive
 void run_position_search(uint32_t request_num);
-// zone proibite volute dall'utente (senza quella della base): le scrive il task aperiodico, la mappatura le applica nel suo
-// job (con la posizione normale) e lo dice con read_applied_user_zones_version
+// zone proibite volute dall'utente (senza quella della base) e muri virtuali: le scrive il task aperiodico, la mappatura
+// le applica nel suo job (con la posizione normale) e lo dice con read_applied_user_zones_version
 typedef struct {
     uint32_t version;                                       // numero progressivo, 0 = nessuna richiesta
     int num_zones;
     mapping_forbidden_zone_t zones[MAX_FORBIDDEN_ZONES - 1];
+    bool has_walls;                                         // false: i muri restano quelli di prima (un'app vecchia manda solo le zone)
+    int num_walls;
+    mapping_virtual_wall_t walls[MAX_VIRTUAL_WALLS];
 } mapping_user_zones_t;
 
 void write_user_zones(const mapping_user_zones_t *user_zones);
@@ -253,6 +287,30 @@ void write_forbidden_zone_list(const mapping_forbidden_zone_list_t *new_forbidde
 uint32_t read_nav_map_version_number(void);
 uint32_t read_nav_map(uint8_t *navigation_map);
 void job_mapping(void *arg);
+
+// Ricarica della mappa senza riavvio (dopo un cambio di mappa dall'app, Riposiziona base o l'ancoraggio alla base), solo
+// con il robot a riposo sulla base. La mappatura ha due serie di griglie (griglia fine e contatori) e una griglia di
+// navigazione di scorta: il task aperiodico prepara la mappa nuova in quelle libere, poi la mappatura le scambia in un
+// suo job (si scambiano i puntatori: tempo costante) e riparte dalla posizione data.
+
+// chiamata dal task aperiodico: legge map.rtm nelle griglie libere (senza file, o con un file che non supera i controlli,
+// la mappa nuova è vuota). Ritorna false se il file c'è ma non supera i controlli
+bool prepare_map_reload(void);
+
+// chiamata dal task aperiodico dopo prepare_map_reload: chiede lo scambio. has_start_pose: il robot riparte da
+// (start_x, start_y, start_theta) sulla mappa nuova, altrimenti da (0; 0; 0) con il riallineamento alla base come all'avvio.
+// is_overwrite: il server sovrascrive la mappa selezionata con il file (ancoraggio), altrimenti lo tratta come all'avvio.
+// Ritorna il numero della ricarica: quando read_map_reload_num() lo raggiunge, lo scambio è fatto
+uint32_t request_map_swap(bool has_start_pose, double start_x, double start_y, double start_theta, bool is_overwrite);
+
+// numero di ricariche fatte (0 all'avvio): quando cambia, navigazione e mappa dal vivo ripartono come all'avvio
+uint32_t read_map_reload_num(void);
+
+// dell'ultima ricarica fatta: true se il robot è ripartito da una posizione data (niente riallineamento alla base)
+bool read_map_reload_has_start_pose(void);
+
+// dell'ultima ricarica fatta: true se il server deve sovrascrivere la mappa selezionata con il file
+bool read_map_reload_overwrites(void);
 
 
 #endif

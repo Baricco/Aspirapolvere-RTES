@@ -6,7 +6,7 @@
 #include <math.h>
 #include "driver/driver.h"
 
-#define CLOSED_CELLS_MAX 16 
+#define CLOSED_CELLS_MAX 32
 
 typedef struct {
     
@@ -15,6 +15,10 @@ typedef struct {
     uint32_t mission_num;                           // numero della pulizia: quando cambia, la mappatura azzera quello che in una pulizia non si aggiorna più
     uint32_t stop_search_num;                       // cresce quando un tasto viene premuto con la posizione persa: la mappatura annulla la ricerca e aspetta che il robot sia sulla base
     uint32_t reposition_num;                        // cresce a ogni Riposiziona base accettato: la mappatura cerca la posizione del robot sulla base nella mappa
+    uint32_t reopen_num;                            // numero di celle chiuse da riaprire
+    uint16_t reopen_cells[CLOSED_CELLS_MAX];        // lista circolare con gli indici delle celle chiuse da riaprire
+    uint32_t reanchor_num;                          // cresce all'avvio sulla base: la mappatura cerca la posizione del robot nella mappa (solo la posizione del robot, la mappa non si sposta)
+    uint32_t base_anchor_num;                       // cresce a ogni aggancio di fine missione: la mappatura tiene la base vista dal lidar (drv_status_t.dock_base_*) nello stesso punto della mappa
 } navigation_closed_cells_t;
 
 
@@ -65,7 +69,16 @@ typedef enum {
     NAV_STATE_PAUSE,            // pulizia in pausa (tasto di accensione): robot fermo, riprende alla prossima pressione
     NAV_STATE_REMOTE,           // modalità telecomando: il robot va alla velocità chiesta dall'app
     NAV_STATE_RETRACE,          // il robot ripercorre la propria scia per rientrare nella zona collegata alla base
+    NAV_STATE_GO_TO,            // cerca il percorso verso l'obiettivo dato dall'app; arrivato, torna a quello che faceva prima
 } nav_state_t;
+
+// Esito dell'ultimo obiettivo dato dall'app (NAV_COMMAND_GO_TO), pubblicato nello stato
+typedef enum {
+    NAV_TARGET_NONE,            // nessun obiettivo, o annullato (Casa)
+    NAV_TARGET_GOING,           // il robot ci sta andando
+    NAV_TARGET_REACHED,         // arrivato
+    NAV_TARGET_FAILED,          // non ci è arrivato (percorso che non c'è, o un guasto): il robot è in pausa, o a riposo se era fermo
+} nav_target_state_t;
 
 // Costanti del telecomando: gli stessi valori di crociera dei task, ma definiti a parte
 #define REMOTE_MAX_V            0.35            // velocità massima in avanti in telecomando, espressa in m/s
@@ -88,6 +101,7 @@ typedef enum {
     NAV_COMMAND_REMOTE_KEEPALIVE,   // telecomando: segno di vita dell'app
     NAV_COMMAND_REMOTE_RELEASE,     // telecomando: lo rilascia
     NAV_COMMAND_REPOSITION_BASE,    // Riposiziona base: con il robot a riposo sulla base, la mappa si sposta sulla posizione della base
+    NAV_COMMAND_GO_TO,              // vai all'obiettivo (x, y) sulla mappa, poi torna a quello che facevi: x e y viaggiano in v e omega
 } nav_command_type_t;
 
 // Esito di un comando, pubblicato dalla navigazione in navigation_status_t
@@ -101,14 +115,15 @@ typedef enum {
     NAV_RESULT_IN_FAULT,            // il driver è ancora in guasto
     NAV_RESULT_NOT_RESTING,         // Riposiziona base: il robot non è a riposo sulla base
     NAV_RESULT_NO_MAP,              // Riposiziona base: il programma non è partito dalla base, quindi non c'è una mappa caricata
+    NAV_RESULT_NOT_REACHABLE,       // obiettivo: la cella non è libera sulla mappa, o non c'è un percorso per arrivarci
 } nav_command_result_t;
 
 // Un comando per la navigazione
 typedef struct {
     uint16_t num;                   // numero progressivo: un numero diverso dall'ultimo visto vuol dire comando nuovo. 0 = nessun comando
     nav_command_type_t type;
-    double v;                       // solo NAV_COMMAND_REMOTE_MOVE: velocità, espressa in m/s
-    double omega;                   // solo NAV_COMMAND_REMOTE_MOVE: velocità di rotazione, espressa in rad/s
+    double v;                       // solo NAV_COMMAND_REMOTE_MOVE: velocità, espressa in m/s (NAV_COMMAND_GO_TO: x dell'obiettivo, in m)
+    double omega;                   // solo NAV_COMMAND_REMOTE_MOVE: velocità di rotazione, espressa in rad/s (NAV_COMMAND_GO_TO: y dell'obiettivo, in m)
     bool brushes;                   // solo NAV_COMMAND_REMOTE_CLEANING: spazzole accese
     bool suction;                   // solo NAV_COMMAND_REMOTE_CLEANING: aspirazione accesa
 } navigation_command_t;
@@ -170,6 +185,8 @@ typedef struct {
     bool remote_suction;                        // telecomando: aspirazione chiesta dall'app
     uint16_t last_command_num;                  // numero dell'ultimo comando dell'app eseguito
     nav_command_result_t last_command_result;   // e il suo esito
+    nav_target_state_t target_state;            // esito dell'ultimo obiettivo dato dall'app
+    double target_x, target_y;                  // e dove sta, sulla mappa in metri
 } navigation_status_t;
 
 // caratteristiche del task navigation

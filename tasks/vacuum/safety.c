@@ -65,11 +65,16 @@ safety_alarm_t read_safety(void) {
 
 
 
-// Helper che calcola la velocità massima che il robot può raggiungere in sicurezza, data la distanza dell'ostacolo più vicino, limitata tra 0 e MAX_ABSOLUTE_SPEED
+// Helper che calcola la velocità massima che il robot può raggiungere in sicurezza, data la distanza dell'ostacolo più vicino, limitata tra 0 e MAX_ABSOLUTE_SPEED:
+// la più alta con cui la strada fatta durante il ritardo più lo spazio di frenata stanno nella distanza meno STOP_DISTANCE
 static double get_max_speed(double obstacle_distance) {
     
-    // calcolo della velocità massima usando il guadagno e la distanza dell'ostacolo
-    double max_speed = MOVEMENT_SAFE_GAIN * (obstacle_distance - STOP_DISTANCE);
+    // spazio a disposizione prima di arrivare a STOP_DISTANCE dall'ostacolo
+    double free = obstacle_distance - STOP_DISTANCE;
+    if (free <= 0) return 0;
+
+    // v * SAFE_DELAY + v^2 / (2 * SAFE_DECEL) = free, risolta per v
+    double max_speed = -SAFE_DECEL * SAFE_DELAY + sqrt(SAFE_DECEL * SAFE_DELAY * SAFE_DECEL * SAFE_DELAY + 2 * SAFE_DECEL * free);
 
     // clamp tra 0 e MAX_ABSOLUTE_SPEED
     if (max_speed <= 0) return 0;
@@ -227,6 +232,18 @@ void job_safety(void *arg) {
 
         // calcola la distanza minima davanti al robot (prendi i tre settori anteriori), convertiti in metri
         obstacle_front_distance = scan_data.corridor_front_distance / 1000.0;
+
+        // se il robot sta girando conta anche la strada libera nelle direzioni verso cui arriverà nel tempo SAFE_DELAY
+        movement_position_data_t turn_position = read_movement();
+        if (fabs(turn_position.omega) > SAFE_TURN_MIN_OMEGA) {
+            int steps = (int)ceil(fabs(turn_position.omega) * SAFE_DELAY / (2 * M_PI / DIRECTION_NUMBER));
+            if (steps > SAFE_TURN_MAX_STEPS) steps = SAFE_TURN_MAX_STEPS;
+            int side = turn_position.omega > 0 ? 1 : -1;
+            for (int k = 1; k <= steps; k++) {
+                int dir = (side * k + DIRECTION_NUMBER) % DIRECTION_NUMBER;
+                obstacle_front_distance = MIN(obstacle_front_distance, scan_data.direction_free_distance[dir] / 1000.0);
+            }
+        }
         
         // prima c'era questo in obstacle_front_distance:
         // (MIN(MIN(scan_data.sector_distance[11], scan_data.sector_distance[1]), scan_data.sector_distance[0]) / 1000.0);

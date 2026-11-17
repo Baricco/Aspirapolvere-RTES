@@ -34,6 +34,7 @@ class _MapsScreenState extends ConsumerState<MapsScreen> with StateIntervalMixin
   int? _mapId; // la mappa mostrata
   LiveMap? _map; // le sue celle
   List<Zone> _zones = const []; // le sue zone, in metri
+  List<VirtualWall> _walls = const []; // i suoi muri virtuali, in metri
   int _revision = 0;
   ZoneEditor? _editor; // non null mentre si modificano le zone
   bool _busy = false;
@@ -48,6 +49,7 @@ class _MapsScreenState extends ConsumerState<MapsScreen> with StateIntervalMixin
       _mapId = mapId;
       _map = null;
       _zones = const [];
+      _walls = const [];
       _editor = null;
       _loadError = null;
     });
@@ -59,6 +61,9 @@ class _MapsScreenState extends ConsumerState<MapsScreen> with StateIntervalMixin
         _zones = [
           for (final zone in file.zones)
             Zone(cellToMeters(zone[0]), cellToMeters(zone[1]), zone[2] * fineMapCellSize, zone[3] * fineMapCellSize),
+        ];
+        _walls = [
+          for (final wall in file.walls) VirtualWall(cellToMeters(wall[0]), cellToMeters(wall[1]), cellToMeters(wall[2]), cellToMeters(wall[3])),
         ];
         _revision++;
       });
@@ -106,8 +111,8 @@ class _MapsScreenState extends ConsumerState<MapsScreen> with StateIntervalMixin
   }
 
   Future<void> _select(MapInfo map) async {
-    await _run((api) => api.send('PUT', '/api/robot/maps/selected', {'id': map.id}),
-        onDone: () => ref.read(restartProvider.notifier).start());
+    // il robot carica la mappa nuova senza riavviarsi: l'esito arriva a mappa già caricata
+    await _run((api) => api.send('PUT', '/api/robot/maps/selected', {'id': map.id}));
   }
 
   /// Cancellazione, sempre con conferma. Per la mappa selezionata prima "Nessuna mappa" sul robot e, solo se va a buon
@@ -123,23 +128,38 @@ class _MapsScreenState extends ConsumerState<MapsScreen> with StateIntervalMixin
     );
     if (!confirmed) return;
     await _run((api) async {
-      if (map.selected) {
-        await api.send('POST', '/api/robot/map/reset');
-        ref.read(restartProvider.notifier).start();
-      }
+      if (map.selected) await api.send('POST', '/api/robot/map/reset');
       await api.send('DELETE', '/api/robot/maps/${map.id}');
     }, onDone: () => setState(() => _mapId = null));
   }
 
-  /// Conferma manda la lista intera delle zone: per la selezionata le applica il robot, per le altre il server.
+  /// Conferma manda le liste intere delle zone e dei muri: per la selezionata le applica il robot, per le altre il server.
   Future<void> _confirmZones(MapInfo map) async {
     final zones = List<Zone>.of(_editor!.zones);
-    await _run((api) => api.send('PUT', '/api/robot/maps/${map.id}/zones', [for (final zone in zones) zone.toJson()]),
+    final walls = List<VirtualWall>.of(_editor!.walls);
+    await _run(
+        (api) => api.send('PUT', '/api/robot/maps/${map.id}/zones', {
+              'zones': [for (final zone in zones) zone.toJson()],
+              'walls': [for (final wall in walls) wall.toJson()],
+            }),
         onDone: () => setState(() {
               _zones = zones;
+              _walls = walls;
               _editor = null;
               _revision++;
             }));
+  }
+
+  /// Il testo sotto la mappa mentre si modifica: cosa fa il dito, o che si è arrivati al massimo.
+  String _editHelp(ZoneEditor editor) {
+    if (editor.target == EditTarget.walls) {
+      return editor.canAdd
+          ? 'Trascina per disegnare un muro virtuale: il robot non lo passa e il lidar lo vede come un muro (per esempio sopra uno specchio). Spostalo, trascina gli estremi, cancellalo con la x.'
+          : 'Hai già $maxVirtualWalls muri: è il massimo.';
+    }
+    return editor.canAdd
+        ? 'Trascina per disegnare una zona; spostala, ridimensionala dagli angoli, cancellala con la x. Due dita per spostare la mappa.'
+        : 'Hai già $maxUserZones zone: è il massimo.';
   }
 
   @override
@@ -188,6 +208,7 @@ class _MapsScreenState extends ConsumerState<MapsScreen> with StateIntervalMixin
                                     map: _map,
                                     mapRevision: _revision,
                                     zones: _zones,
+                                    walls: _walls,
                                     showBase: true,
                                     controller: _mapController,
                                     editor: _editor,
@@ -197,12 +218,16 @@ class _MapsScreenState extends ConsumerState<MapsScreen> with StateIntervalMixin
                       ),
                       const SizedBox(height: 12),
                       if (current != null && _editor != null) ...[
-                        Text(
-                          _editor!.canAdd
-                              ? 'Trascina per disegnare una zona; spostala, ridimensionala dagli angoli, cancellala con la x. Due dita per spostare la mappa.'
-                              : 'Hai già $maxUserZones zone: è il massimo.',
-                          style: TextStyle(color: palette.textSecondary, fontSize: 14),
+                        SegmentedButton<EditTarget>(
+                          segments: const [
+                            ButtonSegment(value: EditTarget.zones, label: Text('Zone'), icon: Icon(Icons.crop_free_rounded)),
+                            ButtonSegment(value: EditTarget.walls, label: Text('Muri'), icon: Icon(Icons.horizontal_rule_rounded)),
+                          ],
+                          selected: {_editor!.target},
+                          onSelectionChanged: (selection) => setState(() => _editor!.target = selection.first),
                         ),
+                        const SizedBox(height: 8),
+                        Text(_editHelp(_editor!), style: TextStyle(color: palette.textSecondary, fontSize: 14)),
                         const SizedBox(height: 10),
                         Row(children: [
                           Expanded(
@@ -223,10 +248,10 @@ class _MapsScreenState extends ConsumerState<MapsScreen> with StateIntervalMixin
                         Row(children: [
                           Expanded(
                             child: ActionButton(
-                              label: 'Modifica zone',
+                              label: 'Zone e muri',
                               icon: Icons.crop_free_rounded,
                               style: ActionButtonStyle.tinted,
-                              onPressed: _map == null || _busy ? null : () => setState(() => _editor = ZoneEditor(_zones)),
+                              onPressed: _map == null || _busy ? null : () => setState(() => _editor = ZoneEditor(_zones, _walls)),
                             ),
                           ),
                           const SizedBox(width: 10),

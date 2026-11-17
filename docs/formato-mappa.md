@@ -11,7 +11,12 @@ Aggiornato il 2026-11-10 con il progetto dell'app (`docs/app.md`, sezione 7).
   né il file con il numero della mappa attiva.
 - Tutte le mappe, compresa una copia di quella selezionata, stanno sul server dell'app nei file `map-<id>.rtm`, con lo
   stesso formato. Per cambiare mappa il robot scarica quella scelta in `map.rtm.download`, il task aperiodico la
-  rinomina sopra `map.rtm` e il programma si riavvia.
+  rinomina sopra `map.rtm` e la mappatura la ricarica senza riavviare il programma (dal 2026-11-16; prima il programma
+  si riavviava).
+- Il file `map.rtm.avvio`, accanto alla mappa, se c'è contiene la posizione del robot sulla base (testo: x y theta, in
+  metri e radianti): lo legge e lo cancella il caricamento all'avvio. Lo scriveva l'ancoraggio alla base quando si
+  riavviava il programma; dal 2026-11-16 non lo scrive più nessuno (la posizione passa con la ricarica), ma si legge
+  ancora.
 - Sul PC (simulatore) la cartella arriva dalla variabile d'ambiente `RTES_MAPS`, per non toccare i file del robot.
 - Scrittura: file temporaneo (`map.rtm.tmp`) nella stessa cartella, poi rinominato sopra il vecchio. Nessuna copia
   della mappa precedente. Le partizioni sono montate `sync`: finite scrittura e rinomina, i dati sono sulla flash.
@@ -48,6 +53,19 @@ Parte fissa: 17 byte, più 8 per zona.
   ricalcola dalla sua ultima ricerca: se l'esplorazione aggiunge zone nuove l'asse migliore può cambiare.
 - La versione del formato, il lato della griglia e il lato della cella non sono nel file: sono costanti del programma.
   Se cambiano, cambia la cifra del numero magico (`RTM2`, …) e i file vecchi si scartano.
+
+## RTM2: muri virtuali
+
+Aggiunto il 2026-11-16 (muri virtuali, 16 al massimo: segmenti che il robot non attraversa e che il lidar vede come un
+muro, per esempio sopra uno specchio). Il file è uguale a RTM1 con tre differenze:
+
+- numero magico `RTM2`;
+- dopo il numero di zone c'è il **numero di muri** (`uint8`, 0-16);
+- dopo le zone ci sono i **muri**: per ognuno x e y del primo estremo e x e y del secondo, in celle fini (4 × `uint16`,
+  8 byte). Come gli angoli delle zone sono spigoli di celle: in metri `(valore - 512) × 0,05`.
+
+Parte fissa: 18 byte, più 8 per zona e 8 per muro. **Senza muri si scrive ancora RTM1** (robot, server e app), così
+la mappa dal vivo e le mappe senza muri restano leggibili anche dalle versioni di prima. Chi legge accetta tutti e due.
 
 ## Categorie delle celle
 
@@ -91,22 +109,26 @@ fissi), cucina e camera 69 × 79 circa 460-500 byte (1.363), corridoio 79 × 119
 La mappa si scarta (e il robot riesplora, poi salva di nuovo `map.rtm`) se:
 
 - il file non c'è o è più corto della parte fissa;
-- il numero magico non è `RTM1`;
+- il numero magico non è `RTM1` né `RTM2`;
 - il rettangolo esce dalla griglia (x + larghezza > 1024 o y + altezza > 1024), oppure larghezza o altezza sono 0;
 - il numero di zone è oltre 15 (il primo posto della lista è della zona della base), oppure una zona esce dalla griglia;
+- (RTM2) il numero di muri è oltre 16, oppure un estremo di un muro esce dalla griglia;
 - una sequenza ha conteggio 0, o va oltre le celle che mancano;
 - finite le celle, nel file non restano esattamente 4 byte;
 - il CRC-32 non corrisponde.
 
-## Implementazione (2026-11-07, aggiornata il 2026-11-10)
+## Implementazione (2026-11-07, aggiornata il 2026-11-10 e il 2026-11-16)
 
 - Scrittura: `save_map` in `tasks/vacuum/aperiodic.c` (task aperiodico, richiesta `request_map_save` dalla navigazione a
   fine esplorazione e all'aggancio riuscito). La griglia si copia a categorie con `copy_map_categories`
   (`tasks/vacuum/mapping.c`, lettura fra un job e l'altro della mappatura), poi `encode_map_rectangle` scrive le
   sequenze dirette nel file temporaneo con il CRC calcolato man mano. La stessa `encode_map_rectangle` codifica i
   rettangoli della mappa dal vivo (`tasks/vacuum/cloud/live_map.c`).
-- Lettura: `load_map_if_on_base` e `read_map_file` in `tasks/vacuum/mapping.c`, chiamate da `init_mapping` prima che
-  partano i task, solo se il robot è sulla base. Punteggi di partenza: `LOAD_SCORE_FREE` (−100) e
+- Lettura: `load_map_into` e `read_map_file` in `tasks/vacuum/mapping.c`. All'avvio le chiama `load_map_if_on_base`
+  (da `init_mapping`, prima che partano i task, solo se il robot è sulla base) e carica direttamente nelle griglie in
+  uso. Dopo un cambio di mappa, una cancellazione o uno spostamento del file le chiama `prepare_map_reload` dal task
+  aperiodico, nella seconda serie di griglie; la mappatura le scambia con le sue nel job (`apply_map_reload`, scambio
+  di puntatori più la copia della griglia di navigazione da 64 KB). Punteggi di partenza: `LOAD_SCORE_FREE` (−100) e
   `LOAD_SCORE_OCCUPIED` (80); poi contatori e griglia di navigazione ricalcolati sul rettangolo.
 - Altri lettori dello stesso formato: `decode_map_data` in `tasks/vacuum/cloud/live_map.c` (copia privata della mappa
   dal vivo e controllo della mappa scaricata), `backend/maps.py` (server), `app/lib/map/rtm.dart` (app).

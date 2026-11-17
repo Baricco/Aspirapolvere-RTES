@@ -105,6 +105,9 @@ static struct {
 	interlock_t interlock;                      /* solo banco di prova */
 	contacts_t contacts;                  /* scatti di anti-caduta e bumper (contacts.h) */
 	docking_t dock_state;                       /* messa in carica in retromarcia (docking.h) */
+	uint32_t dock_base_number;                  /* misure della base pubblicate (drv_status_t.dock_base_*) */
+	double dock_base_x, dock_base_y, dock_base_theta;   /* l'ultima, nel sistema della mappa */
+	int64_t dock_base_t;                        /* fine del giro del lidar dell'ultima misura pubblicata */
 	int prev_on_base, prev_charging;
 	int button_max_ms[2];                  /* durata della pressione in corso (0 = tasto rilasciato): accensione, casa */
 	int pending_presses[2];               /* pressioni brevi viste dalla ricezione, da contare al prossimo tick */
@@ -501,6 +504,10 @@ static void publish_status(int64_t t)
 	s.docking = d.dock_state.result;
 	s.docking_phase = (int)d.dock_state.phase;
 	s.docking_attempt = d.dock_state.attempt;
+	s.dock_base_number = d.dock_base_number;
+	s.dock_base_x = d.dock_base_x;
+	s.dock_base_y = d.dock_base_y;
+	s.dock_base_theta = d.dock_base_theta;
 	s.led = d.led_sent;
 	s.lidar_on = d.lidar_sent > 0;
 	s.lidar_power = d.lidar_sent > 0 ? d.power_sent : 0;
@@ -964,12 +971,36 @@ static void on_gd32_frame(const gd32_frame_t *f, void *ctx)
 	}
 }
 
+/* Una misura nuova della base dall'aggancio (robot fermo e dritto davanti alla base): la si porta nel sistema della mappa
+ * con l'ultima posizione data dal moto (drv_pose), se è recente. Il robot è fermo, quindi la posizione di adesso vale anche
+ * per il giro del lidar appena finito. */
+static void publish_dock_base(int64_t t)
+{
+	const docking_t *a = &d.dock_state;
+	if (!a->base_number || a->base_t == d.dock_base_t)
+		return;
+	d.dock_base_t = a->base_t;
+	drv_pose_t pose;
+	if (!exchange_read(&pose_exchange, &pose) || t - pose.t_ns > 500 * 1000000LL) {
+		event("aggancio: base misurata ma senza una posizione recente dal moto, misura scartata");
+		return;
+	}
+	double c = cos(pose.theta), s = sin(pose.theta);
+	d.dock_base_x = pose.x + a->base_x * c - a->base_y * s;
+	d.dock_base_y = pose.y + a->base_x * s + a->base_y * c;
+	d.dock_base_theta = atan2(sin(pose.theta + a->base_theta), cos(pose.theta + a->base_theta));
+	d.dock_base_number++;
+	event("aggancio: base a (%.3f, %.3f) dal robot, sporge %.1f cm; nella mappa (%.3f, %.3f) guarda a %+.1f°", a->base_x, a->base_y,
+	      100 * a->base_protrusion, d.dock_base_x, d.dock_base_y, d.dock_base_theta * 180 / M_PI);
+}
+
 static void on_lidar_packet(const lidar_packet_t *p, void *ctx)
 {
 	int64_t t = *(const int64_t *)ctx;
 	if (lidar_assemble(&d.assembler, p, t, &d.scan)) {
 		exchange_write(&scan_exchange, &d.scan);
 		docking_scan(&d.dock_state, &d.scan, t);
+		publish_dock_base(t);
 	}
 }
 

@@ -57,6 +57,9 @@ static void init_lidar_scan_data(lidar_scan_data_t *scan_data) {
     scan_data->corridor_front_distance = NO_READ;
     scan_data->corridor_back_distance = NO_READ;
 
+    // inizializza la strada libera nelle direzioni a NO_READ
+    for (int i = 0; i < DIRECTION_NUMBER; i++) scan_data->direction_free_distance[i] = NO_READ;
+
 }
 
 // funzione di lettura dei dati del task
@@ -274,6 +277,15 @@ void job_lidar(void *arg) {
     // contatore dei punti validi (!= 0) letti nella scansione
     uint16_t valid_points_counter = 0;
 
+    // seno e coseno delle direzioni della strada libera, calcolati una volta sola
+    static double dir_cos[DIRECTION_NUMBER], dir_sin[DIRECTION_NUMBER];
+    if (dir_cos[0] == 0) {
+        for (int k = 0; k < DIRECTION_NUMBER; k++) {
+            dir_cos[k] = cos(k * 2 * M_PI / DIRECTION_NUMBER);
+            dir_sin[k] = sin(k * 2 * M_PI / DIRECTION_NUMBER);
+        }
+    }
+
     // scorri tutti i punti letti nella scansione
     for (uint16_t i = 0; i < cur_scan.n; i++) {
 
@@ -311,6 +323,16 @@ void job_lidar(void *arg) {
         // se il punto misurato è il pù vicino in quel settore, aggiorna cur_scan_data
         if (cur_scan_data.sector_distance[sector_number] > distance) cur_scan_data.sector_distance[sector_number] = distance;
     
+        // aggiorna la strada libera in ogni direzione: il punto nel sistema della direzione, avanti e di lato
+        for (int k = 0; distance > 0 && k < DIRECTION_NUMBER; k++) {
+            const double along = x * dir_cos[k] + y * dir_sin[k];
+            const double side = -x * dir_sin[k] + y * dir_cos[k];
+            if (along <= 0 || fabs(side) >= ROBOT_RADIUS) continue;
+            double free = along - sqrt(ROBOT_RADIUS * ROBOT_RADIUS - side * side);
+            if (free < 0) free = 0;
+            if (cur_scan_data.direction_free_distance[k] > free) cur_scan_data.direction_free_distance[k] = free;
+        }
+
         // se la distanza dal punto misurato è 0 o il punto non si trova nella direzione di 
         // movimento del robot, esci
         if (distance == 0 || fabs(y) >= ROBOT_RADIUS) continue;

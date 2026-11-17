@@ -767,7 +767,8 @@ I task dell'esame li scrive l'utente da solo, sopra un framework e un driver pre
       0,5 m (idea dell'utente) −2,20**; entro 1 m −2,10 ma solo il 6% delle scansioni scritte e mappa incompleta.
       Quindi l'allineamento regge su una mappa ferma: lo scivolamento nasce dal circolo mappa → posizione → mappa
       quando il robot ripassa tante volte vicino ai muri. **Scritta da Claude** (decisione dell'utente): in `mapping.c`
-      `NEAR_OBSTACLE_NO_WRITE_M` (0,5) e `is_near_obstacle` (le celle `LOW_OBSTACLE` del bumper non contano); vicino a un
+      `NEAR_OBSTACLE_NO_WRITE_M` (0,5; **portato a 0,17 il 2026-11-16**, scelta dell'utente: con 0,5 la mappatura saltava
+      il 68% delle scansioni) e `is_near_obstacle` (le celle `LOW_OBSTACLE` del bumper non contano); vicino a un
       ostacolo la scansione serve solo per allinearsi. Le 2 celle prima del colpo restano. Ripasso col codice vero: muro
       in basso fra −2,35 e −2,55 per tutta la missione (resta una deriva lenta di ~15 cm in 40 min), a destra fermo
       fra 2,85 e 3,4; scritto il 24% delle scansioni; a fine missione la stanza è vista come prima (6768 celle fini
@@ -912,6 +913,56 @@ I task dell'esame li scrive l'utente da solo, sopra un framework e un driver pre
     da decidere: ricerca globale dopo un sollevamento. Fase 5: tipo di server aperiodico e di app,
     comandi e telemetria. Fase 6: avvio automatico con ritorno all'originale, SSH solo con chiave, refactoring di
     driver, `rt/` e simulatore (stile da decidere insieme) con revisione dell'utente, relazione.
+  - **versione del 2026-11-16** (scritta da Claude su richiesta dell'utente nella copia `~/Aspirapolvere/Merge-Claude`,
+    installata sul robot il 16/11 alle 23:37, giudicata dall'utente "funziona molto bene" e portata nella repo il
+    2026-11-17). Parte dalla `ac084e8` più le soluzioni della copia di debug del 15/11 (senza le parti di debug) e il
+    modello a zone. In ordine:
+    - *pulizia a zone* (`navigation.c`): la casa divisa in quadrati di `ZONE_SIZE_CELLS` (15 celle, 3 m) allineati alla
+      griglia; bordi e strisce di una zona, poi la zona più vicina con ancora qualcosa da pulire (`GOAL_WORK`,
+      `GOAL_EDGE_ZONE`, `GOAL_DIRTY_ZONE`); fino a `ZONE_MERGE_MAX` (4) zone vicine con il confine aperto
+      (`ZONE_MERGE_OPEN_RATIO` 0,5 delle coppie di celle affacciate libere: una porta non basta) formano una regione
+      pulita insieme (`build_region`, `is_zone_border_open`); asse delle strisce per regione (`calc_region_axis`,
+      `zone_axis_x`), contando le strisce che partirebbero lungo x e lungo y; pulito segnato solo nella zona corrente;
+      primo percorso della zona dall'albero dell'ultima ricerca (`path_from_last_search`: una sola ricerca completa per job);
+    - *percorso pesato*: Dijkstra con coda a priorità (`heap_push`, `heap_pop`), passi da 10 (dritto) e 14 (diagonale),
+      celle libere a una e due celle da un ostacolo che costano 3 e 2 volte (`update_clearance`, `WEIGHT_*`);
+    - *inseguimento del percorso*: percorso rifatto a ogni job (`replan_path`), sterzo verso il punto di mira, velocità
+      dal punto lontano a `PURSUIT_FAR_DISTANCE` (1 m, la più alta da cui si frena alla velocità della svolta), rotazione
+      sola oltre `PURSUIT_SLOW_ANGLE` (90°); punto di mira da `LOOKAHEAD_MIN_CELLS` a `LOOKAHEAD_MAX_CELLS` (1-3) celle
+      secondo la strada libera davanti, meno gli sblocchi di fila (`calc_lookahead_idx`);
+    - *sterzata a punteggio* (`calc_steer_direction`): se verso il punto di mira non ci sono `STEER_CHECK_DISTANCE`
+      (30 cm) liberi, vince fra le direzioni vicine (3 per lato, passi di 30°) quella con strada libera (fino a
+      `STEER_FREE_CAP`, 1 m) meno `STEER_ANGLE_PENALTY` (0,30 m) per passo di scarto, con almeno `STEER_MIN_FREE` (10 cm);
+    - *retromarcia* solo con il punto di mira dietro (oltre 90° con isteresi `REVERSE_HYSTERESIS`) e solo verso celle in
+      cui il centro del robot è già passato in questa missione (`visited_cells`, 8 KB, `mark_visited_cell` a ogni job):
+      dietro non ci sono anti-caduta e il lidar sopra un vuoto vede libero (il robot c'era caduto nel simulatore);
+    - *frontiera non osservabile*: se per `FRONTIER_SEE_TIME` (1 s) il lidar vede un ostacolo prima della cella
+      sconosciuta a meno di `FRONTIER_SEE_DISTANCE` (0,5 m), la cella si chiude per tutta la missione
+      (`is_frontier_unobservable`, `close_cell_forever`, `CLOSED_FOREVER`); le altre celle chiuse si riaprono dopo
+      `CLOSED_CELL_REOPEN_TIME` (60 s, `reopen_old_cells`, `reopen_num` e `reopen_cells` verso la mappatura);
+      `CLOSED_CELLS_MAX` da 16 a 32;
+    - *stallo* (`is_stalled`) misurato con la velocità massima della sicurezza nella direzione di marcia, anche mentre
+      segue il percorso;
+    - *aggancio*: vicino alla base il robot va comunque sul punto di aggancio anche se la cella davanti non si raggiunge;
+      dopo `HOOK_MOVE_TIMEOUT` (10 s) l'aggancio a infrarossi parte da dove si trova. Nel driver: raddrizzamento sul muro
+      visto dal lidar (`DOCK_P_STRAIGHTEN`), misura della base, e indietro di 20 cm se arriva sulla base senza aver mai
+      visto il fascio centrale (`axis_seen`) (`docs/driver.md`);
+    - *ripresa dopo la ricarica* a `BATTERY_RESUME_PERCENT` 50 (era 90);
+    - *lidar*: strada libera in `DIRECTION_NUMBER` (12) direzioni, una ogni 30°, con la larghezza del robot
+      (`direction_free_distance`);
+    - *sicurezza*: velocità massima dalla strada fatta durante `SAFE_DELAY` (0,5 s) più la frenata a `SAFE_DECEL`
+      (1 m/s²), al posto di `MOVEMENT_SAFE_GAIN`; in rotazione (oltre `SAFE_TURN_MIN_OMEGA`) conta anche la strada libera
+      nelle direzioni verso cui il robot arriverà in `SAFE_DELAY` (al massimo `SAFE_TURN_MAX_STEPS`, 3). Il limite lo
+      applica il task di movimento a ogni job, avanti e indietro, per qualunque obiettivo; la navigazione dà sempre la
+      velocità di crociera;
+    - *mappatura*: una cella occupata perde punti solo se il raggio passa entro `PASS_MAX_OFFSET_CELLS` (0,25 celle) dal
+      suo centro (`is_ray_through_cell_center`: i raggi di striscio non consumano più le punte degli ostacoli sottili);
+      `NEAR_OBSTACLE_NO_WRITE_M` 0,17;
+    - *ricarica della mappa senza riavvio*, *muri virtuali*, *obiettivo dall'app*, *ancoraggio alla base e riallineamento
+      all'avvio*: `docs/app.md`, sezioni 7.1, 7.7, 5.5, 7.10. Il codice 3 di `rtes-run` (punto 3 della fase 6) resta solo
+      per una ricarica che non avviene in tempo.
+    Prove: nel simulatore (`build/prove-merge*`, `build/prove-muri`) e sul robot (installata il 16/11). Test della repo:
+    `test_live_map` 123 controlli, `test_app_commands` 140.
   - **memoria bloccata sul PC** (2026-10-30): il programma blocca in RAM 7,97 MB e il limite per i normali utenti è
     8 MB; con MCL_FUTURE i thread creati dopo non partivano più (il `main` esce senza messaggio). `rt_init` ora,
     se non è root e il limite c'è, blocca solo la memoria di adesso (sul robot, root, tutto come prima).
@@ -1063,7 +1114,7 @@ lidar → /dev/ttyS1 → AuxCtrl
         `CLOCK_MONOTONIC`). Il GD32 riavvia il robot se per ~190 s nessuno manda `0x0d`: oggi il nostro script
         partirebbe ~10 s dopo l'accensione.
      3. *`rtes-run`* (il ciclo che oggi è in `tools/driver-robot.sh avvia`): lancia `vacuum`; codice 3 → lo rilancia
-        subito (cambio di mappa, `docs/app.md` 7.5); altra uscita o chiusura per errore → lo rilancia dopo qualche
+        subito (cambio di mappa, `docs/app.md` 7.5; dal 2026-11-16 solo se la ricarica senza riavvio non riesce); altra uscita o chiusura per errore → lo rilancia dopo qualche
         secondo, ma al massimo N volte in M minuti (da decidere, es. 3 in 10); oltre, avvia il **custode** (`spia
         guida`: keepalive e heartbeat, motori a zero) e si ferma lì, con il LED di guasto, finché non si riavvia
         il robot o non si entra in SSH. Così un difetto che fa chiudere il programma non diventa un ciclo infinito

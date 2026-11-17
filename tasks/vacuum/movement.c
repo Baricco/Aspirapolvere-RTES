@@ -5,6 +5,7 @@
 #include "movement.h"
 #include "navigation.h"
 #include "mapping.h"
+#include "safety.h"
 
 // struttura dati interna che contiene lo stato interno del task
 typedef struct {
@@ -526,6 +527,11 @@ void job_movement(void *arg) {
             }
 
         }
+
+        // la sicurezza limita la velocità in avanti e all'indietro a ogni job, per qualunque obiettivo
+        safety_alarm_t cur_alarm = read_safety();
+        if (next_v > cur_alarm.max_v_forw) next_v = cur_alarm.max_v_forw;
+        if (next_v < -cur_alarm.max_v_backw) next_v = -cur_alarm.max_v_backw;
 
         if (cur_obj.obj_type != OBJ_STOP) {
 

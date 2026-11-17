@@ -155,10 +155,26 @@ e usa `v` e `w` calcolati qui, con i limiti di sicurezza ancora attivi.
 
 **Fasi** (`dock_phase_t`): `DOCK_P_SEARCH` (ruota finché trova il segnale e lo perde) → `DOCK_P_CENTER` (torna verso il
 centro dell'arco) → `DOCK_P_APPROACH` (avanti sul confine fra i fasci 1 e 2, che è l'asse della base) →
-`DOCK_P_FINE_TUNE` (a pochi cm, oscilla piano e si mette a metà) → `DOCK_P_TURN` (180° con l'IMU) → `DOCK_P_LAST_CM`
+`DOCK_P_FINE_TUNE` (a pochi cm, oscilla piano e si mette a metà) → `DOCK_P_STRAIGHTEN` (ruota sul posto finché è
+perpendicolare al muro visto dal lidar, poi misura la base) → `DOCK_P_TURN` (180° con l'IMU) → `DOCK_P_LAST_CM`
 (retromarcia) → `DOCK_P_PRESS` (ancora pochi mm finché la carica è stabile) → `DOCK_P_CONTACT` (fermo, aspetta). Fasi
 di recupero: `DOCK_P_DETACH` (indietro di 2 cm dopo un bumper), `DOCK_P_BACK_OFF` (arrivato lontano dall'asse: indietro
-di 20 cm e si riprova), `DOCK_P_RETREAT` (avanti, poi nuovo tentativo; al massimo `DOCK_ATTEMPTS`).
+di 20 cm e si riprova; anche quando tocca la base senza aver mai visto il fascio centrale in questo avvicinamento,
+`axis_seen`, al massimo `AXIS_RETRIES` volte), `DOCK_P_RETREAT` (avanti, poi nuovo tentativo; al massimo `DOCK_ATTEMPTS`).
+
+**Raddrizzamento e misura della base** (2026-11-16). Gli infrarossi centrano il robot sull'asse della base ma non lo
+raddrizzano: a fine rifinitura l'errore di direzione arrivava a 26° (prove visita del 15-16/11) e passava intero sui
+contatti dopo la rotazione. In rifinitura e raddrizzamento, a ogni giro del lidar, `measure_wall_and_base` cerca il
+**muro davanti**: retta adattata ai minimi quadrati sui punti fra `WALL_MIN` e `WALL_MAX` (0,05-1,2 m) entro
+`WALL_HALF_ANGLE` (60°), rifatta quattro volte tenendo solo i punti vicini alla retta di prima (fino a `WALL_FIT_TOL`,
+1 cm), con almeno `WALL_MIN_POINTS` punti. La **base** è la parte di quei punti che sporge dal muro fra `BASE_MIN` e
+`BASE_MAX` (3-15 cm) entro `BASE_HALF_WIDTH` lungo il muro (nelle prove sporge 6,1-6,9 cm ed è larga 12-13,5 cm).
+Se il muro è valido e l'angolo è sotto `STRAIGHTEN_MAX_ANGLE` (45°) la rifinitura passa a `DOCK_P_STRAIGHTEN`,
+altrimenti gira come prima. Raddrizzato, aspetta un giro del lidar fatto da fermo: se vede la base salva centro della
+faccia e direzione in cui guarda, nel sistema del robot (`base_x`, `base_y`, `base_theta`, `base_number` che cresce a
+ogni misura); poi gira. Oltre `STRAIGHTEN_MAX_NS` (10 s), o senza base, gira lo stesso: l'aggancio non dipende dalla
+misura. Il driver porta la misura nel sistema della mappa con l'ultima posizione del moto (`publish_dock_base`) e la
+pubblica in `drv_status_t.dock_base_*`; la usa la mappatura per l'ancoraggio della mappa alla base a fine missione.
 
 - Esito in `drv_status_t.docking`: `DOCK_IDLE`, `DOCK_RUNNING`, `DOCK_DONE`, `DOCK_FAILED`.
 - `DOCK_POINT_X_M` (0,30 m): il punto davanti alla base a cui la navigazione porta il robot prima di chiedere
@@ -167,10 +183,13 @@ di 20 cm e si riprova), `DOCK_P_RETREAT` (avanti, poi nuovo tentativo; al massim
   `distance` e `arc` della fase corrente (con `prev_yaw_raw`, `prev_enc_left`, `prev_enc_right`); dal lidar
   `front_dist`, `near_points`, `t_scan`; ricerca e direzione (`seen`, `starts_inside`, `turn_dir`, `yaw_first`,
   `yaw_center`, `direction`, `yaw_a`, `yaw_b` con `has_a`, `has_b`, `prev_side`, `axis_frames`, `axis_retries`,
-  `after_detach`); contatori e tempi (`frame`, `frame2`, `t_start`, `t_phase`, `t_signal`, `contact_frames`,
-  `total_frames`, `t_no_contact`).
+  `axis_seen`, `after_detach`); contatori e tempi (`frame`, `frame2`, `t_start`, `t_phase`, `t_signal`, `contact_frames`,
+  `total_frames`, `t_no_contact`); muro e base dall'ultimo giro (`wall_valid`, `wall_angle`, `wall_dist`, `base_seen`,
+  `base_along`, `base_protrusion`, `t_wall`, `t_straight`) e misura della base (`base_number`, `base_x`, `base_y`,
+  `base_theta`, `base_t`).
 - In `docking.c` tutte le velocità, distanze e tempi sono `#define` con il commento che dice da dove vengono
-  (`W_SEARCH`, `V_FAR`, `V_SHORT_BEAM`, `ARRIVAL_GAP`, `FINE_TUNE_*`, `PRESS_*`, `CHARGE_FRAMES`, `YAW_SCALE`...).
+  (`W_SEARCH`, `V_FAR`, `V_SHORT_BEAM`, `ARRIVAL_GAP`, `FINE_TUNE_*`, `PRESS_*`, `CHARGE_FRAMES`, `YAW_SCALE`,
+  `WALL_*`, `BASE_*`, `STRAIGHTEN_*`...).
 
 | Funzione | Cosa fa |
 |---|---|
@@ -180,7 +199,8 @@ di 20 cm e si riprova), `DOCK_P_RETREAT` (avanti, poi nuovo tentativo; al massim
 | `docking_abort(a, reason)` | si ferma con esito `DOCK_FAILED` (per esempio robot sollevato) |
 | `docking_active(a)` | 1 se in questo momento il comando alle ruote lo decide l'aggancio |
 | `docking_detach(a)` | 1 se serve il permesso di muoversi con i contatti chiusi (per premere sui contatti o staccarsi) |
-| `docking_scan(a, g, t)` | a ogni giro del lidar: distanza media davanti (settore 170°..190°, fra 0,3 e 1,5 m) e quanti punti sono a meno di 6 cm dal muso |
+| `docking_scan(a, g, t)` | a ogni giro del lidar: distanza media davanti (settore 170°..190°, fra 0,3 e 1,5 m) e quanti punti sono a meno di 6 cm dal muso; in rifinitura e raddrizzamento anche muro e base |
+| `measure_wall_and_base(a, g, t)` (static) | il muro davanti (retta ai minimi quadrati, quattro passate sempre più strette) e la base che ne sporge, da un giro del lidar |
 | `docking_frame(a, s, t)` | a ogni frame dei sensori: aggiorna angolo (IMU) e strada (encoder), legge gli infrarossi e fa un passo della fase corrente; aggiorna `v`, `w`. C'è anche un tempo massimo totale |
 | `normalize_angle(a)` (static) | angolo in (−π, π] |
 | `clamp_abs(x, m)` (static) | limita `x` fra −m e m |
@@ -258,7 +278,8 @@ Quello che avevi già capito: stampa gli eventi, suona e scrive la registrazione
   = bit "in carica" del GD32, che si accende a carica finita, `on_base`, `temperature_c`); `lifted`; tasti
   (`power_presses`, `home_presses`: pressioni brevi contate, un task confronta il numero con quello di prima); motori
   **dopo i limiti** (`v`, `w`, `limits`, `side_brush`, `main_brush`, `suction_rpm`, `suction_limits`, `led`);
-  aggancio (`docking`, `docking_phase`, `docking_attempt`); lidar (`lidar_on`, `lidar_power`, `lidar_ok`,
+  aggancio (`docking`, `docking_phase`, `docking_attempt`; base vista dal lidar nell'ultimo aggancio, nel sistema della
+  mappa: `dock_base_number`, che cresce a ogni misura, `dock_base_x`, `dock_base_y`, `dock_base_theta`); lidar (`lidar_on`, `lidar_power`, `lidar_ok`,
   `lidar_rev_s`, `lidar_revolutions`); salute del collegamento e tempi (`sensor_frames`, `bad_frames`,
   `discarded_bytes`, `other_gd32_frames`, `gd32_heartbeats`, `keepalives`, `heartbeats`, `write_errors`, `sensors_hz`,
   `sensors_age_ns`, `tick_delay_max_ns`, `sensors_interval_max_ns`, `sensors_interval_min_ns` (il T degli sporadici
@@ -279,7 +300,7 @@ Quello che avevi già capito: stampa gli eventi, suona e scrive la registrazione
 | `drv_suction(rpm)` | aspirazione (0..30000 giri/min) |
 | `drv_led(mode)` | modo del LED; guasto, batteria e carica li decide il driver e vincono |
 | `drv_lidar(on, rev_s)` | accende o spegne il lidar, con la velocità voluta |
-| `drv_pose(x, y, theta)` | il task del moto dà la posizione del robot: il driver la attacca agli eventi dei contatti |
+| `drv_pose(x, y, theta)` | il task del moto dà la posizione del robot: il driver la attacca agli eventi dei contatti e alla misura della base dell'aggancio |
 | `drv_leave_base(enable)` | permette di muoversi piano anche sulla base (per uscirne in avanti) |
 | `drv_stuck(enable)` | la navigazione segnala un incastro in avanti: diventa un evento `CONTACT_STUCK` |
 | `drv_dock(enable)` | 1 fa partire la messa in carica, 0 la annulla |
@@ -303,7 +324,7 @@ Quello che avevi già capito: stampa gli eventi, suona e scrive la registrazione
 - `event_queue` con `event_head` ed `event_tail`: gli eventi in testo, scritti dai thread real-time e stampati da quello
   di servizio.
 - **`d`**: lo stato interno (seriali e thread, riconoscitori e moduli logici `assembler`, `regulator`, `bat`,
-  `interlock`, `contacts`, `dock_state`, stato di riposo e sollevamento, tasti, ultimi valori mandati al GD32
+  `interlock`, `contacts`, `dock_state`, ultima misura della base pubblicata (`dock_base_*`, `dock_base_t`), stato di riposo e sollevamento, tasti, ultimi valori mandati al GD32
   `*_sent`, istanti dei prossimi eventi a tempo, misure dei tempi).
 - **`rec`**: la registrazione dei byte grezzi: un anello in RAM da 1 MB (`RING_SIZE`) che i thread real-time
   riempiono e quello di servizio svuota sul file. Canali `CHANNEL_GD32` e `CHANNEL_LIDAR`; i record persi si contano in
@@ -364,6 +385,7 @@ Quello che avevi già capito: stampa gli eventi, suona e scrive la registrazione
 | `buttons_and_base(t)` | al tick: una pressione breve o il ritorno sulla base azzerano il guasto, **poi** le pressioni si contano. Così un task che vede il numero crescere trova già il guasto azzerato |
 | `on_gd32_frame(f, ctx)` | per ogni frame del GD32. Sensori: intervalli fra i frame, sollevamento, tasti, batteria, banco, pubblicazione, contatti, sveglia dei task iscritti, aggancio e reazione immediata delle ruote. Altri: heartbeat, versione, risveglio, errori |
 | `on_lidar_packet(p, ctx)` | per ogni pacchetto del lidar: se completa un giro lo pubblica e lo passa all'aggancio |
+| `publish_dock_base(t)` | misura nuova della base dall'aggancio: la porta nel sistema della mappa con l'ultima posizione del moto (scartata se più vecchia di 0,5 s) e la pubblica in `dock_base_*` |
 
 **Ciclo da 20 ms e thread**
 

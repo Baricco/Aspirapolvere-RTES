@@ -31,9 +31,9 @@ static void scrivi_cella(uint8_t *griglia, int x, int y, uint8_t categoria)
 }
 
 bool copy_map_categories(uint8_t *categories, int rect_x, int rect_y, int rect_width, int rect_height,
-                         mapping_forbidden_zone_t *user_zones, int *num_user_zones)
+                         mapping_forbidden_zone_t *user_zones, int *num_user_zones, mapping_virtual_wall_t *user_walls, int *num_user_walls)
 {
-	(void)user_zones; (void)num_user_zones;
+	(void)user_zones; (void)num_user_zones; (void)user_walls; (void)num_user_walls;
 	ultima_finestra[0] = rect_x; ultima_finestra[1] = rect_y; ultima_finestra[2] = rect_width; ultima_finestra[3] = rect_height;
 	if (!copia_riesce) return false;
 	/* come quella vera: solo il rettangolo chiesto */
@@ -51,6 +51,19 @@ movement_position_data_t read_movement(void) { return posizione; }
 void write_user_zones(const mapping_user_zones_t *user_zones) { (void)user_zones; }
 uint32_t read_applied_user_zones_version(void) { return 0; }
 void run_position_search(uint32_t request_num) { (void)request_num; }
+
+/* ricarica della mappa finta: lo scambio è fatto subito */
+static uint32_t ricariche;
+bool prepare_map_reload(void) { return true; }
+uint32_t request_map_swap(bool has_start_pose, double start_x, double start_y, double start_theta, bool is_overwrite)
+{
+	(void)has_start_pose; (void)start_x; (void)start_y; (void)start_theta; (void)is_overwrite;
+	return ++ricariche;
+}
+uint32_t read_map_reload_num(void) { return ricariche; }
+bool read_map_reload_has_start_pose(void) { return false; }
+bool read_map_reload_overwrites(void) { return false; }
+void request_restart(void) {}
 
 bool append_bytes(void *context, const uint8_t *data, size_t size)
 {
@@ -139,7 +152,7 @@ static void codifica_rtm1(void)
 	riempi(griglia, 100, 200, 20, 10, MAP_CAT_FREE);
 
 	byte_buffer_t b = {0};
-	CONTROLLA(encode_map_rectangle(griglia, 100, 200, 20, 10, NULL, 0, append_bytes, &b));
+	CONTROLLA(encode_map_rectangle(griglia, 100, 200, 20, 10, NULL, 0, NULL, 0, append_bytes, &b));
 	CONTROLLA(b.size == 13 + 4 + 4);
 	CONTROLLA(memcmp(b.data, "RTM1", 4) == 0);
 	const uint8_t atteso[] = { 100, 0, 200, 0, 20, 0, 10, 0, 0, 0x7F, 0x7F, 0x7F, 0x40 | 11 };
@@ -150,11 +163,28 @@ static void codifica_rtm1(void)
 
 	/* con le zone, in celle fini: la zona della base di docs/app.md */
 	mapping_forbidden_zone_t zona = { .x = -0.365, .y = -0.22, .w = 0.26, .h = 0.44 };
-	CONTROLLA(encode_map_rectangle(griglia, 100, 200, 20, 10, &zona, 1, append_bytes, &b));
+	CONTROLLA(encode_map_rectangle(griglia, 100, 200, 20, 10, &zona, 1, NULL, 0, append_bytes, &b));
 	CONTROLLA(b.data[12] == 1);
 	const uint8_t zona_attesa[] = { 505 & 0xFF, 505 >> 8, 508 & 0xFF, 508 >> 8, 5, 0, 9, 0 };
 	CONTROLLA(memcmp(b.data + 13, zona_attesa, sizeof zona_attesa) == 0);
 	CONTROLLA(decode_map_data(b.data, b.size, NULL));
+	free_bytes(&b);
+
+	/* con un muro virtuale il formato è RTM2: numero di muri dopo quello delle zone, estremi in celle fini dopo le zone */
+	mapping_virtual_wall_t muro = { .x1 = 2.2, .y1 = 4.65, .x2 = 2.9, .y2 = 4.65 };
+	CONTROLLA(encode_map_rectangle(griglia, 100, 200, 20, 10, &zona, 1, &muro, 1, append_bytes, &b));
+	CONTROLLA(memcmp(b.data, "RTM2", 4) == 0 && b.data[12] == 1 && b.data[13] == 1);
+	CONTROLLA(b.size == 14 + 8 + 8 + 4 + 4);
+	const uint8_t muro_atteso[] = { 556 & 0xFF, 556 >> 8, 605 & 0xFF, 605 >> 8, 570 & 0xFF, 570 >> 8, 605 & 0xFF, 605 >> 8 };
+	CONTROLLA(memcmp(b.data + 22, muro_atteso, sizeof muro_atteso) == 0);
+	static uint8_t letta[MAP_CATEGORIES_BYTES];
+	memset(letta, 0, sizeof letta);
+	CONTROLLA(decode_map_data(b.data, b.size, letta) && memcmp(letta, griglia, sizeof letta) == 0);
+	/* un muro con un estremo fuori dalla griglia non passa */
+	b.data[22] = 0xFF; b.data[23] = 0xFF;
+	uint32_t crc2 = map_crc32(0, b.data, b.size - 4);
+	for (int i = 0; i < 4; i++) b.data[b.size - 4 + i] = (uint8_t)(crc2 >> (8 * i));
+	CONTROLLA(!decode_map_data(b.data, b.size, NULL));
 	free_bytes(&b);
 }
 
@@ -178,7 +208,7 @@ static void codifica_e_decodifica(void)
 	CONTROLLA(x == 0 && y == 0 && larghezza == 1024 && altezza == 1024);
 
 	byte_buffer_t b = {0};
-	CONTROLLA(encode_map_rectangle(griglia, x, y, larghezza, altezza, NULL, 0, append_bytes, &b));
+	CONTROLLA(encode_map_rectangle(griglia, x, y, larghezza, altezza, NULL, 0, NULL, 0, append_bytes, &b));
 	CONTROLLA(decode_map_data(b.data, b.size, letta));
 	CONTROLLA(memcmp(griglia, letta, sizeof griglia) == 0);
 
@@ -189,7 +219,7 @@ static void codifica_e_decodifica(void)
 	b.data[b.size / 2] ^= 0x40;
 	CONTROLLA(!decode_map_data(b.data, b.size - 1, letta));
 	CONTROLLA(!decode_map_data(b.data, 10, letta));
-	b.data[3] = '2';
+	b.data[3] = '9';
 	CONTROLLA(!decode_map_data(b.data, b.size, letta));
 	static const uint8_t zeri[MAP_CATEGORIES_BYTES];
 	CONTROLLA(memcmp(letta, zeri, sizeof letta) == 0);
@@ -389,7 +419,7 @@ static void mappa_salvata(void)
 	byte_buffer_t b = {0};
 	int x, y, larghezza, altezza;
 	find_map_rectangle(mappa_robot, &x, &y, &larghezza, &altezza);
-	encode_map_rectangle(mappa_robot, x, y, larghezza, altezza, NULL, 0, append_bytes, &b);
+	encode_map_rectangle(mappa_robot, x, y, larghezza, altezza, NULL, 0, NULL, 0, append_bytes, &b);
 	FILE *f;
 
 	CONTROLLA(send_live_map(NULL));
@@ -423,7 +453,7 @@ static void mappa_salvata(void)
 	CONTROLLA(get_map_category(mappa_server, 510, 510) == MAP_CAT_UNKNOWN);
 	free_bytes(&b);
 
-	/* sostituzione del file con quello scaricato, poi cancellazione: da lì il task aperiodico non salva più */
+	/* sostituzione del file con quello scaricato, poi cancellazione: la mappa si ricarica subito, e da lì si salva di nuovo */
 	char scaricato[256];
 	map_file_path(scaricato, sizeof scaricato, MAP_DOWNLOAD_EXT);
 	f = fopen(scaricato, "wb");
@@ -443,7 +473,7 @@ static void mappa_salvata(void)
 	salvataggi = read_map_save_count();
 	request_map_save();
 	job_aperiodic(NULL);
-	CONTROLLA(read_map_save_count() == salvataggi);     /* niente salvataggio sopra il file nuovo */
+	CONTROLLA(read_map_save_count() == salvataggi + 1 && ricariche == 1);    /* ricaricata: il salvataggio torna permesso */
 
 	richiesta = request_map_delete();
 	job_aperiodic(NULL);
