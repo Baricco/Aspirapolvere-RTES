@@ -13,8 +13,6 @@
  * gira (180° con l'IMU) -> ultimi centimetri -> contatto: fermo, aspetta la carica. Se non riesce avanza, e riprova.
  * Il raddrizzamento serve perché gli infrarossi centrano il robot sull'asse ma non lo raddrizzano: un errore di direzione
  * a fine rifinitura (fino a 26° nelle prove visita del 15-16/11) passava intero sui contatti dopo la rotazione.
- * La misura della base (la sua faccia vista dal lidar, nel sistema del robot) la usa la mappatura per tenere la base
- * sempre nello stesso punto della mappa (drv_status_t.dock_base_*).
  * Lasciato fuori dall'originale perché non è servito finora: lo spostamento laterale ad archi (fatto quando è vicino alla
  * base lontano dall'asse) e la seconda manovra col lidar (CActionTransferMotionCharge).
  *

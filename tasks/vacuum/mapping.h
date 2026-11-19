@@ -288,7 +288,7 @@ uint32_t read_nav_map_version_number(void);
 uint32_t read_nav_map(uint8_t *navigation_map);
 void job_mapping(void *arg);
 
-// Ricarica della mappa senza riavvio (dopo un cambio di mappa dall'app, Riposiziona base o l'ancoraggio alla base), solo
+// Ricarica della mappa senza riavvio (dopo un cambio di mappa dall'app, "Nessuna mappa" o Riposiziona base), solo
 // con il robot a riposo sulla base. La mappatura ha due serie di griglie (griglia fine e contatori) e una griglia di
 // navigazione di scorta: il task aperiodico prepara la mappa nuova in quelle libere, poi la mappatura le scambia in un
 // suo job (si scambiano i puntatori: tempo costante) e riparte dalla posizione data.
@@ -297,11 +297,14 @@ void job_mapping(void *arg);
 // la mappa nuova è vuota). Ritorna false se il file c'è ma non supera i controlli
 bool prepare_map_reload(void);
 
+// chiamata dal task aperiodico dopo ogni salvataggio, con la griglia a categorie appena salvata: diventa il riferimento
+// dell'allineamento (la mappatura lo prende al job dopo). Ritorna false se non è riuscita a pubblicarlo
+bool publish_align_reference(const uint8_t *categories);
+
 // chiamata dal task aperiodico dopo prepare_map_reload: chiede lo scambio. has_start_pose: il robot riparte da
 // (start_x, start_y, start_theta) sulla mappa nuova, altrimenti da (0; 0; 0) con il riallineamento alla base come all'avvio.
-// is_overwrite: il server sovrascrive la mappa selezionata con il file (ancoraggio), altrimenti lo tratta come all'avvio.
 // Ritorna il numero della ricarica: quando read_map_reload_num() lo raggiunge, lo scambio è fatto
-uint32_t request_map_swap(bool has_start_pose, double start_x, double start_y, double start_theta, bool is_overwrite);
+uint32_t request_map_swap(bool has_start_pose, double start_x, double start_y, double start_theta);
 
 // numero di ricariche fatte (0 all'avvio): quando cambia, navigazione e mappa dal vivo ripartono come all'avvio
 uint32_t read_map_reload_num(void);
@@ -309,8 +312,6 @@ uint32_t read_map_reload_num(void);
 // dell'ultima ricarica fatta: true se il robot è ripartito da una posizione data (niente riallineamento alla base)
 bool read_map_reload_has_start_pose(void);
 
-// dell'ultima ricarica fatta: true se il server deve sovrascrivere la mappa selezionata con il file
-bool read_map_reload_overwrites(void);
 
 
 #endif

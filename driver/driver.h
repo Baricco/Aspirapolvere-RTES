@@ -146,10 +146,6 @@ typedef struct {
 	int suction_limits;      /* perché l'aspirazione chiesta non va (SIC_LIM_* | DRV_LIM_*; 0 = va, o non chiesta) */
 	int docking;                /* DOCK_IDLE, DOCK_RUNNING, DOCK_DONE, DOCK_FAILED (docking.h, drv_dock) */
 	int docking_phase, docking_attempt;
-	/* la base vista dal lidar nell'ultimo aggancio, a fine raddrizzamento (docking.h), nel sistema della mappa: centro della
-	   faccia e direzione in cui guarda (verso la stanza). dock_base_number cresce a ogni misura (0 = nessuna ancora) */
-	uint32_t dock_base_number;
-	double dock_base_x, dock_base_y, dock_base_theta;
 
 	/* lidar */
 	int lidar_on, lidar_power, lidar_ok;

@@ -96,8 +96,6 @@
 #define CONFIRM_MAX_OMEGA           0.5         // durante la conferma le scansioni fatte ruotando più veloce di così non si controllano (sono deformate), espressa in rad/s
 #define REPOSITION_MIN_SCORE_PCT    75          // Riposiziona base: punteggio minimo della ricerca, in percentuale del massimo. Più alto di SEARCH_MIN_SCORE_PCT (nel simulatore la posizione giusta fa 78-88%): meglio dire "non trovata" che spostare la mappa nel posto sbagliato
 #define REPOSITION_MAX_ANGLE_ERROR  (20 * M_PI / 180)   // Riposiziona base: scarto massimo dell'angolo trovato da un multiplo di 90 gradi (la base sta contro un muro); il resto lo corregge l'allineamento all'avvio, espresso in radianti
-#define BASE_FACE_DIST_M            0.196       // ancoraggio alla base: distanza fra il centro del robot agganciato dritto e la faccia della base, lungo l'asse della base (mediana di 9 agganci veri, visita2-12 del 15-16/11: 19,0-21,3 cm), espressa in m
-#define BASE_ANCHOR_MAX_ANGLE       (10 * M_PI / 180)   // ancoraggio alla base: oltre questo angolo fra la base vista e l'asse x la misura non si usa (la mappa non si gira), espresso in radianti
 #define REANCHOR_MIN_SCORE_PCT      65          // riallineamento automatico: punteggio minimo della ricerca, solo dentro la finestra attorno all'origine (sui dati veri la posizione giusta fa 71-84%)
 #define REANCHOR_WINDOW_M           1.0         // riallineamento automatico: il robot si cerca entro questa distanza dall'origine, lungo x e lungo y, espressa in m
 #define REANCHOR_WINDOW_ANGLE       (45 * M_PI / 180)   // riallineamento automatico: e entro questo angolo da 0, espresso in radianti
@@ -297,10 +295,8 @@ typedef struct {
         uint32_t last_reanchor_num;                 // ultimo reanchor_num della navigazione già visto
         bool is_reanchor;                           // la ricerca in corso è il riallineamento automatico, non Riposiziona base dell'app
         bool is_window;                             // la ricerca guarda solo la finestra del riallineamento attorno all'origine, con la sua soglia
-        double start_x, start_y, start_theta;       // posizione iniziale dopo un ancoraggio alla base con riavvio (dal file MAP_START_POSE_EXT), 0 se non c'è
-        bool has_start_pose;                        // la posizione iniziale viene dal file: la ricerca all'avvio non serve
-        uint32_t last_base_anchor_num;              // ultimo base_anchor_num della navigazione già visto
-        uint32_t last_dock_base_number;             // ultima misura della base dal driver già usata
+        double start_x, start_y, start_theta;       // posizione iniziale data con la ricarica (Riposiziona base), 0 se non c'è
+        bool has_start_pose;                        // la ricarica ha dato la posizione iniziale
         bool is_repositioning;                      // Riposiziona base in corso: la mappatura non scrive, cerca la posizione del robot sulla base
         bool grid_ready;                            // indica se la griglia corrisponde alla mappa
         int x0, y0;                                 // cella fine corrispondente alla cella (0, 0) della griglia della ricerca
@@ -339,12 +335,10 @@ static struct {
     int num_walls;
     bool has_start_pose;
     double start_x, start_y, start_theta;
-    bool is_overwrite;
 } reload_data;
 static _Atomic uint32_t reload_request_num;     // numero dell'ultima ricarica chiesta
 static _Atomic uint32_t reload_done_num;        // numero dell'ultima ricarica fatta
 static _Atomic bool reload_has_start_pose;      // dell'ultima ricarica fatta
-static _Atomic bool reload_is_overwrite;        // dell'ultima ricarica fatta
 
 // indica se il robot è partito dalla base di ricarica, è atomico perché lo legge il task di navigazione
 static _Atomic bool started_on_base;
@@ -403,6 +397,70 @@ static uint8_t calc_nav_cell_bitmask(uint16_t index) {
 
 // funzione che legge la mappa interpolando con interpolazione bilineare. prende la posizione nella mappa x, y espressa in metri
 // e restituisce il punteggio interpolato da 0 a 100 e quanto cambia il punteggio per ogni metro lungo x e lungo y
+// funzione helper che restituisce la categoria di una cella fine per il file della mappa (docs/formato-mappa.md)
+static inline uint8_t fine_cell_category(int8_t score) {
+    if (score == 0) return MAP_CAT_UNKNOWN;
+    if (score == VOID_OBSTACLE) return MAP_CAT_VOID;
+    if (score == LOW_OBSTACLE) return MAP_CAT_FREE;     // il lidar lì vede libero: alla sessione dopo lo ritrova il paraurti
+    if (score > FINE_CELL_OCCUPATION_THRESHOLD) return MAP_CAT_OCCUPIED;
+    return MAP_CAT_FREE;
+}
+
+// Riferimento dell'allineamento: la mappa com'era all'ultimo salvataggio o caricamento, ferma durante la pulizia, 2 bit per
+// cella con le stesse categorie del file (MAP_CAT_*, 4 celle per byte come copy_map_categories). L'allineamento delle scansioni legge lei dove sa qualcosa e la mappa dal vivo solo dove era sconosciuta:
+// così un errore di pochi centimetri non può far cancellare i muri veri e farsi inseguire dalle copie spostate (prova del
+// 18/11, build/robot/scivolamento-18-11: deriva sulla base 44 cm con la mappa dal vivo, 3 cm con la mappa ferma).
+// Due copie: la mappatura legge align_ref[align_ref_in_use], il task aperiodico scrive l'altra e la pubblica con
+// align_ref_state; la mappatura la prende in un job (scambio dell'indice), quella della ricarica solo insieme alle griglie
+enum { REF_IDLE, REF_WRITING, REF_READY, REF_RELOAD_READY, REF_TAKING };
+static uint8_t align_ref[2][FINE_MAP_CELL_NUMBER * FINE_MAP_CELL_NUMBER / 4];
+static _Atomic int align_ref_in_use;
+static _Atomic int align_ref_state = REF_IDLE;
+
+static inline uint8_t align_ref_cell(uint32_t index) {
+    return (align_ref[atomic_load_explicit(&align_ref_in_use, memory_order_relaxed)][index >> 2] >> ((index & 3) * 2)) & 3;
+}
+
+// riempie il riferimento libero da una griglia di punteggi o lo copia da una griglia a categorie (una delle due è NULL)
+static void fill_align_ref(uint8_t *ref, const int8_t *grid, const uint8_t *categories) {
+    if (categories) {
+        memcpy(ref, categories, sizeof align_ref[0]);
+        return;
+    }
+    for (uint32_t i = 0; i < sizeof align_ref[0]; i++) {
+        const int8_t *cell = &grid[i * 4];
+        ref[i] = (uint8_t)(fine_cell_category(cell[0]) | fine_cell_category(cell[1]) << 2 |
+                           fine_cell_category(cell[2]) << 4 | fine_cell_category(cell[3]) << 6);
+    }
+}
+
+// chiamata dal task aperiodico: scrive il riferimento libero e lo pubblica. Se la mappatura lo sta prendendo proprio adesso
+// (dura un job) riprova. Ritorna false se non ci riesce
+static bool publish_align_ref(const int8_t *grid, const uint8_t *categories, int ready_state) {
+    for (int attempt = 0; attempt < MAP_COPY_MAX_ATTEMPTS; attempt++) {
+        int expected = atomic_load(&align_ref_state);
+        if (expected != REF_TAKING && atomic_compare_exchange_strong(&align_ref_state, &expected, REF_WRITING)) {
+            fill_align_ref(align_ref[1 - atomic_load(&align_ref_in_use)], grid, categories);
+            atomic_store_explicit(&align_ref_state, ready_state, memory_order_release);
+            return true;
+        }
+        rt_sleep_until(rt_now() + MAP_COPY_RETRY_WAIT);
+    }
+    return false;
+}
+
+bool publish_align_reference(const uint8_t *categories) {
+    return publish_align_ref(NULL, categories, REF_READY);
+}
+
+// chiamata nel job: prende il riferimento pubblicato, se c'è (only_reload: solo quello della ricarica)
+static void take_align_ref(bool only_reload) {
+    int expected = only_reload ? REF_RELOAD_READY : REF_READY;
+    if (!atomic_compare_exchange_strong_explicit(&align_ref_state, &expected, REF_TAKING, memory_order_acquire, memory_order_relaxed)) return;
+    atomic_store(&align_ref_in_use, 1 - atomic_load(&align_ref_in_use));
+    atomic_store(&align_ref_state, REF_IDLE);
+}
+
 static void read_fine_grid_bilinear(const double x, const double y, double *interpolated_score, double *grad_x, double *grad_y) {
 
     // passa da metri a celle nella mappa fine, non usiamo coord_to_fine_index perchè c'è bisogno di ottenere i quattro centri attorno ad ogni cella
@@ -430,10 +488,13 @@ static void read_fine_grid_bilinear(const double x, const double y, double *inte
     // Leggi i punteggi delle quattro celle individuate (li mettiamo in un array per semplificare le operazioni successive)
     int8_t score[4];
 
-    score[0] = map_state.fine_grid[prev_cell_y << 10 | prev_cell_x];
-    score[1] = map_state.fine_grid[prev_cell_y << 10 | (prev_cell_x + 1)];
-    score[2] = map_state.fine_grid[(prev_cell_y + 1) << 10 | prev_cell_x];
-    score[3] = map_state.fine_grid[(prev_cell_y + 1) << 10 | (prev_cell_x + 1)];
+    // dove il riferimento sa qualcosa vale lui (muro = punteggio di un muro caricato, libero = niente), altrimenti la mappa dal vivo
+    const uint32_t index[4] = { prev_cell_y << 10 | prev_cell_x, prev_cell_y << 10 | (prev_cell_x + 1),
+                                (prev_cell_y + 1) << 10 | prev_cell_x, (prev_cell_y + 1) << 10 | (prev_cell_x + 1) };
+    for (int i = 0; i < 4; i++) {
+        const uint8_t ref = align_ref_cell(index[i]);
+        score[i] = ref == MAP_CAT_OCCUPIED ? LOAD_SCORE_OCCUPIED : ref == MAP_CAT_UNKNOWN ? map_state.fine_grid[index[i]] : 0;
+    }
 
     // verifichiamo che ogni score sia compreso tra FINE_GRID_MIN_SCORE e FINE_GRID_MAX_SCORE, altrimenti lo mettiamo a 0
     // questo serve a rimuovere i valori speciali come VOID_OBSTACLE e LOW_OBSTACLE
@@ -1958,52 +2019,6 @@ void run_position_search(uint32_t request_num) {
 // Riposiziona base (docs/app.md, sezione 7.9): con il robot fermo sulla base, cerca la sua posizione nella mappa con la
 // stessa ricerca del sollevamento, poi chiede al task aperiodico di spostare il file della mappa in modo che quella posizione
 // diventi l'origine. Finché è in corso la mappatura non scrive niente (durante la ricerca la mappa è prestata)
-// Ancoraggio alla base, all'aggancio di fine missione. La base è l'unico punto della casa che si sa fermo: in una mappa
-// ancorata la sua faccia sta in (-BASE_FACE_DIST_M; 0) e guarda verso +x (il robot agganciato dritto in (0; 0) a 0 gradi).
-// Durante l'aggancio il driver l'ha vista con il lidar, dritto davanti a lei a pochi centimetri, e l'ha portata nella mappa
-// con la posizione del robot di quel momento (drv_status_t.dock_base_*). Lo scarto fra dove la base è e dove dovrebbe essere
-// è lo spostamento della mappa accumulato nella sessione: la mappa (file e zone) si sposta di quello, in celle fini intere,
-// e il programma riparte con il robot nella posizione giusta della mappa spostata. Sotto mezza cella non si sposta niente.
-// Non c'è ricerca: la misura viene dal driver, e qui si fanno solo pochi conti
-static void anchor_to_base(void) {
-
-    drv_status_t drv_state = {0};
-    drv_status(&drv_state);
-
-    // nessuna misura nuova della base in questo aggancio (il raddrizzamento non ha visto la base): la mappa resta com'è
-    if (drv_state.dock_base_number == 0 || drv_state.dock_base_number == map_state.search.last_dock_base_number || map_state.state != MAP_NORMAL) {
-        fprintf(stderr, "mappatura: ancoraggio alla base: nessuna misura della base in questo aggancio, la mappa non si sposta\n");
-        set_reposition_status(REPOSITION_IDLE);
-        return;
-    }
-    map_state.search.last_dock_base_number = drv_state.dock_base_number;
-
-    // la base deve guardare verso +x: se no la mappa è girata rispetto alla base, e uno spostamento non basta
-    if (fabs(wrap_angle(drv_state.dock_base_theta)) > BASE_ANCHOR_MAX_ANGLE) {
-        fprintf(stderr, "mappatura: ancoraggio alla base: la base guarda a %.1f gradi invece che a 0, la mappa non si sposta\n",
-                drv_state.dock_base_theta * 180 / M_PI);
-        set_reposition_status(REPOSITION_IDLE);
-        return;
-    }
-
-    // scarto fra dove la base dovrebbe essere e dove è, e spostamento in celle fini intere
-    const double err_x = -BASE_FACE_DIST_M - drv_state.dock_base_x;
-    const double err_y = -drv_state.dock_base_y;
-    const int dx = (int)lround(err_x / FINE_MAP_CELL_SIZE);
-    const int dy = (int)lround(err_y / FINE_MAP_CELL_SIZE);
-    fprintf(stderr, "mappatura: ancoraggio alla base: faccia in (%.3f, %.3f) a %.1f gradi, scarto (%.3f, %.3f), spostamento (%d, %d) celle\n",
-            drv_state.dock_base_x, drv_state.dock_base_y, drv_state.dock_base_theta * 180 / M_PI, err_x, err_y, dx, dy);
-
-    if (dx == 0 && dy == 0) {
-        set_reposition_status(REPOSITION_IDLE);
-        return;
-    }
-
-    // il robot è fermo sui contatti: la sua posizione nella mappa spostata è quella di adesso più lo spostamento
-    request_map_reposition(dx, dy, 0, true, map_state.aligned_x + dx * FINE_MAP_CELL_SIZE, map_state.aligned_y + dy * FINE_MAP_CELL_SIZE,
-                           map_state.aligned_theta);
-}
-
 // funzione helper che chiude Riposiziona base o il riallineamento automatico senza spostare la mappa: Riposiziona base
 // dà all'app l'esito, il riallineamento torna a riposo (non è stato chiesto da nessuno)
 static void end_reposition(const reposition_status_t status) {
@@ -2082,7 +2097,7 @@ static void reposition_base(const movement_position_data_t *cur_pos, bool is_sam
                     map_state.search.is_reanchor ? "riallineamento" : "riposizionamento",
                     result.x, result.y, result.theta * 180 / M_PI, result.score_pct);
 
-            // ricerca all'avvio: la mappa non si sposta mai (la sposta solo l'ancoraggio alla base, con la base vista dal lidar):
+            // riallineamento all'avvio e a fine missione: la mappa non si sposta mai (la sposta solo Riposiziona base dall'app):
             // il robot si mette nella posizione trovata, che vale qualunque sia il modo in cui si è agganciato. Un quarto di
             // giro vorrebbe dire una ricerca sbagliata: allora non si cambia niente
             if (map_state.search.is_reanchor) {
@@ -2101,7 +2116,7 @@ static void reposition_base(const movement_position_data_t *cur_pos, bool is_sam
             if (quarter_turns == 1) { start_u = -moved_v; start_v = moved_u; }
             else if (quarter_turns == 2) { start_u = -moved_u; start_v = -moved_v; }
             else if (quarter_turns == 3) { start_u = moved_v; start_v = -moved_u; }
-            request_map_reposition(dx, dy, quarter_turns, false, start_u * FINE_MAP_CELL_SIZE, start_v * FINE_MAP_CELL_SIZE,
+            request_map_reposition(dx, dy, quarter_turns, start_u * FINE_MAP_CELL_SIZE, start_v * FINE_MAP_CELL_SIZE,
                                    wrap_angle(result.theta + quarter_turns * (M_PI / 2)));
             return;
         }
@@ -2514,15 +2529,6 @@ static void check_start_on_base(void) {
     }
 }
 
-// funzione helper che restituisce la categoria di una cella fine per il file della mappa (docs/formato-mappa.md)
-static inline uint8_t fine_cell_category(int8_t score) {
-    if (score == 0) return MAP_CAT_UNKNOWN;
-    if (score == VOID_OBSTACLE) return MAP_CAT_VOID;
-    if (score == LOW_OBSTACLE) return MAP_CAT_FREE;     // il lidar lì vede libero: alla sessione dopo lo ritrova il paraurti
-    if (score > FINE_CELL_OCCUPATION_THRESHOLD) return MAP_CAT_OCCUPIED;
-    return MAP_CAT_FREE;
-}
-
 // funzione chiamata dal task aperiodico che copia la griglia fine a categorie mentre la
 // mappatura non sta lavorando. Il contatore dei job è dispari durante un job: se è dispari si aspetta, se cambia durante
 // la copia la copia mescola due versioni e si rifà. La mappatura non aspetta mai
@@ -2753,33 +2759,13 @@ static void load_map_if_on_base(void) {
         return;
     }
 
-    char path[256];
-
-    // posizione iniziale lasciata dall'ancoraggio alla base (vale una volta sola: il file si cancella). Il robot è sulla
-    // base, quindi la posizione è vicina all'origine: un valore fuori dalla finestra della ricerca vuol dire un file rovinato
-    if (map_file_path(path, sizeof path, MAP_START_POSE_EXT) == 0) {
-        FILE *pose_file = fopen(path, "r");
-        if (pose_file) {
-            double x = 0, y = 0, theta = 0;
-            if (fscanf(pose_file, "%lf %lf %lf", &x, &y, &theta) == 3 && fabs(x) <= REANCHOR_WINDOW_M && fabs(y) <= REANCHOR_WINDOW_M &&
-                fabs(theta) <= REANCHOR_WINDOW_ANGLE) {
-                map_state.search.start_x = x;
-                map_state.search.start_y = y;
-                map_state.search.start_theta = theta;
-                map_state.search.has_start_pose = true;
-                fprintf(stderr, "mappatura: posizione iniziale dall'ancoraggio alla base: (%.3f, %.3f) a %.1f gradi\n", x, y, theta * 180 / M_PI);
-            }
-            fclose(pose_file);
-        }
-        remove(path);
-    }
-
     // prima che partano i task: si carica direttamente nelle griglie in uso
     pthread_mutex_lock(&navigation_map_data.mutex);
     load_map_into(&map_grids[map_state.grids_in_use], navigation_map_data.navigation_grid, map_state.user_zones, &map_state.num_user_zones,
                   map_state.user_walls, &map_state.num_user_walls);
     navigation_map_data.version_number++;
     pthread_mutex_unlock(&navigation_map_data.mutex);
+    fill_align_ref(align_ref[atomic_load(&align_ref_in_use)], map_state.fine_grid, NULL);
 }
 
 bool prepare_map_reload(void) {
@@ -2795,15 +2781,19 @@ bool prepare_map_reload(void) {
         reload_nav_grid[(i << 8) | (NAV_MAP_CELL_NUMBER - 1)] = NAV_CELL_BLOCKED | NAV_CELL_QUAD_MASK;
     }
 
-    return load_map_into(grids, reload_nav_grid, reload_data.zones, &reload_data.num_zones, reload_data.walls, &reload_data.num_walls) >= 0;
+    bool ok = load_map_into(grids, reload_nav_grid, reload_data.zones, &reload_data.num_zones, reload_data.walls, &reload_data.num_walls) >= 0;
+
+    // il riferimento della mappa nuova: la mappatura lo prende insieme alle griglie
+    if (!publish_align_ref(grids->fine_grid, NULL, REF_RELOAD_READY))
+        fprintf(stderr, "mappatura: riferimento dell'allineamento della mappa ricaricata non pubblicato\n");
+    return ok;
 }
 
-uint32_t request_map_swap(bool has_start_pose, double start_x, double start_y, double start_theta, bool is_overwrite) {
+uint32_t request_map_swap(bool has_start_pose, double start_x, double start_y, double start_theta) {
     reload_data.has_start_pose = has_start_pose;
     reload_data.start_x = has_start_pose ? start_x : 0;
     reload_data.start_y = has_start_pose ? start_y : 0;
     reload_data.start_theta = has_start_pose ? start_theta : 0;
-    reload_data.is_overwrite = is_overwrite;
     return atomic_fetch_add_explicit(&reload_request_num, 1, memory_order_release) + 1;
 }
 
@@ -2813,10 +2803,6 @@ uint32_t read_map_reload_num(void) {
 
 bool read_map_reload_has_start_pose(void) {
     return atomic_load(&reload_has_start_pose);
-}
-
-bool read_map_reload_overwrites(void) {
-    return atomic_load(&reload_is_overwrite);
 }
 
 // funzione helper chiamata nel job quando il task aperiodico ha preparato una ricarica: scambia le griglie (puntatori),
@@ -2868,7 +2854,6 @@ static void apply_map_reload(const movement_position_data_t *cur_pos) {
 
     // pubblica: prima i dati, poi il numero
     atomic_store(&reload_has_start_pose, reload_data.has_start_pose);
-    atomic_store(&reload_is_overwrite, reload_data.is_overwrite);
     atomic_store(&reload_done_num, map_state.last_reload_request);
 }
 
@@ -2897,9 +2882,13 @@ static void job_mapping_body(void *arg) {
     uint32_t reload_request = atomic_load_explicit(&reload_request_num, memory_order_acquire);
     if (reload_request != map_state.last_reload_request) {
         map_state.last_reload_request = reload_request;
+        take_align_ref(true);
         apply_map_reload(&cur_pos);
         return;
     }
+
+    // un riferimento nuovo dell'allineamento dopo un salvataggio
+    take_align_ref(false);
 
     // se il robot è sollevato la sua posizione è persa: pubblicalo una volta sola ed esci,
     // da sollevato non si scrive niente sulla mappa
@@ -2959,20 +2948,6 @@ static void job_mapping_body(void *arg) {
         // il riallineamento automatico (reanchor_num) usa la stessa ricerca: cambia solo l'esito quando non c'è niente da fare
         bool is_reposition_request = closed_cells.reposition_num != map_state.search.last_reposition_num;
         bool is_reanchor_request = closed_cells.reanchor_num != map_state.search.last_reanchor_num;
-
-        // aggancio di fine missione: ancoraggio alla base vista dal lidar (senza ricerca, finisce in questo job)
-        if (closed_cells.base_anchor_num != map_state.search.last_base_anchor_num) {
-            map_state.search.last_base_anchor_num = closed_cells.base_anchor_num;
-            anchor_to_base();
-        }
-
-        // all'avvio dopo un ancoraggio con riavvio la posizione è già quella giusta: la ricerca non serve
-        if (is_reanchor_request && !is_reposition_request && map_state.search.has_start_pose) {
-            map_state.search.last_reanchor_num = closed_cells.reanchor_num;
-            is_reanchor_request = false;
-            fprintf(stderr, "mappatura: riallineamento all'avvio non necessario, la posizione viene dall'ancoraggio alla base\n");
-            set_reposition_status(REPOSITION_IDLE);
-        }
 
         if (is_reposition_request || is_reanchor_request) {
             map_state.search.last_reposition_num = closed_cells.reposition_num;

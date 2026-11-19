@@ -264,7 +264,7 @@ Costanti nella navigazione, con gli stessi valori di crociera dei task ma defini
 - Il formato è RTM1, o RTM2 se la mappa ha muri virtuali (`docs/formato-mappa.md`).
 - **Ricarica senza riavvio** (dal 2026-11-16; prima il programma si riavviava a ogni cambio di mappa). La mappatura ha
   **due serie di griglie** (griglia fine e contatori, circa 1,3 MB in più): una in uso, una libera. Quando il file
-  cambia (cambio di mappa, "Nessuna mappa", Riposiziona base, ancoraggio alla base) il task aperiodico prepara la mappa
+  cambia (cambio di mappa, "Nessuna mappa", Riposiziona base) il task aperiodico prepara la mappa
   nuova nella serie libera (`prepare_map_reload`), poi chiede lo scambio (`request_map_swap`). Nel suo job la mappatura
   **scambia i puntatori** (tempo costante) e copia la griglia di navigazione preparata (64 KB): niente copia da 1 MB nel
   job, quindi il WCET della mappatura cresce solo di quella copia. Poi tutto quello che dipende dalla mappa riparte come
@@ -283,8 +283,8 @@ Costanti nella navigazione, con gli stessi valori di crociera dei task ma defini
 - **All'avvio** il robot manda la sua mappa salvata. Se il CRC non coincide con la selezionata (file cambiato a mano,
   primo avvio dopo la modifica) il server la salva come **mappa nuova** invece di sovrascrivere: nessuna mappa si perde.
 - **Dopo una ricarica** (sezione 7.1) il robot rimanda il file come all'avvio: dopo Riposiziona base diventa una mappa
-  nuova, dopo l'**ancoraggio alla base** (sezione 7.10) invece **sovrascrive la selezionata** (`read_map_reload_overwrites`):
-  è la stessa mappa, solo rimessa al suo posto.
+  nuova. Fino al 2026-11-18 l'ancoraggio alla base sovrascriveva invece la selezionata; dal 2026-11-19 l'ancoraggio non
+  c'è più (sezione 7.10).
 
 ### 7.3 Mappa dal vivo
 
@@ -413,26 +413,71 @@ Prove nel simulatore (stanza ricavata dalla mappa con la base nuova, robot con l
 10 cm, ritrovata con punteggio 86-88% e file identico a quello spostato a mano; base contro un altro muro (stanza ruotata
 di 90 gradi), ritrovata a -90,5 gradi con punteggio 75-78%, celle e zone identiche a quelle attese.
 
-### 7.10 Ancoraggio alla base e riallineamento all'avvio
+### 7.10 Riferimento fisso dell'allineamento e riallineamento sulla base
 
-Decisi con l'utente il 2026-11-16, dopo la base vista nell'app in mezzo al corridoio (mappa spostata di 20-30 cm). Causa:
-la mappa si salvava a ogni aggancio con dentro la deriva della sessione, e al riavvio il robot ripartiva da (0; 0) su
-una mappa spostata. La mappa resta "morbida" (gli ostacoli possono cambiare) e nessun ostacolo fa da riferimento fisso:
-**l'unico punto che si sa fermo è la base**. Niente esiti per l'app: avvengono da soli.
-- **Ancoraggio a fine missione** (non dopo un rientro per batteria: la missione interrotta si perderebbe). Durante
-  l'aggancio il driver misura la faccia della base con il lidar (`docs/driver.md`, raddrizzamento) e la pubblica nel
-  sistema della mappa (`drv_status_t.dock_base_*`). Agganciato, la navigazione lo chiede alla mappatura
-  (`base_anchor_num`); `anchor_to_base` confronta dove la base è con dove dovrebbe essere, cioè la faccia in
-  (−`BASE_FACE_DIST_M`; 0) = (−0,196; 0) che guarda verso +x. Lo scarto, in celle fini intere (sotto mezza cella niente),
-  è la deriva della sessione: il task aperiodico sposta il file (mappa, zone e muri) e lo ricarica con il robot nella
-  posizione giusta, e la mappa sul server si sovrascrive. Se la base vista è girata di più di `BASE_ANCHOR_MAX_ANGLE`
-  (10°) la misura non si usa. Fino all'esito il robot non accetta una pulizia nuova.
-- **Riallineamento all'avvio** sulla base (e dopo una ricarica senza posizione data). La navigazione lo chiede
-  (`reanchor_num`) appena la mappatura ha una prima scansione allineata. La mappatura usa la ricerca di Riposiziona
-  base solo dentro una finestra attorno all'origine, ±`REANCHOR_WINDOW_M` (1 m) e ±`REANCHOR_WINDOW_ANGLE` (45°), con
-  soglia `REANCHOR_MIN_SCORE_PCT` (65%; Riposiziona base dall'app resta al 75%). Trovata, **sposta solo il robot** nella
-  posizione trovata (`restart_from_pose`), mai la mappa: così vale qualunque sia il modo in cui il robot si è agganciato.
-  Un risultato a un quarto di giro vorrebbe dire una ricerca sbagliata, e non cambia niente.
+**Storia.** Il 2026-11-16, dopo la base vista nell'app in mezzo al corridoio (mappa spostata di 20-30 cm), si era
+deciso di ancorare la mappa alla base a fine missione: il driver misurava la faccia della base con il lidar durante
+l'aggancio e il task aperiodico spostava il file della stessa quantità. Il 2026-11-18 la mappa scivolava ancora di
+30-60 cm verso +y **dentro ogni pulizia**, in modo graduale e senza salti. La causa era il trascinamento della mappa
+morbida: le scansioni si allineavano sulla mappa che loro stesse riscrivevano, quindi un errore di pochi centimetri
+spostava i muri e l'allineamento seguiva le copie spostate invece di correggersi. L'ancoraggio rimetteva a posto solo
+i muri recenti, mentre quelli vecchi e i muri virtuali finivano fuori posto. Verifica con la registrazione `deriva1`
+(18/11, 19:11-20:49) ripassata al PC: allineandosi sulla mappa dal vivo il robot rientra in (−0,05; 0,37), come quello
+vero (−0,05; 0,47). Allineandosi sulla mappa del caricamento tenuta ferma rientra invece in (−0,03; 0,05), entro 5 cm
+dalla posizione che l'ancoraggio dava al robot vero. Dal 2026-11-19 l'**ancoraggio alla base non c'è più** e
+l'allineamento usa un riferimento fisso. Niente esiti per l'app: avviene tutto da solo.
+
+- **Riferimento dell'allineamento** (`align_ref` in `mapping.c`): la mappa com'era all'ultimo caricamento o
+  salvataggio, ferma per tutta la pulizia. Usa 2 bit per cella con le categorie del file (sconosciuta, libera,
+  occupata, vuoto: `MAP_CAT_*`, `docs/formato-mappa.md`), quindi occupa 256 KB. L'allineamento delle scansioni
+  (`read_fine_grid_bilinear`) legge il riferimento dove sa qualcosa: una cella occupata vale `LOAD_SCORE_OCCUPIED`
+  (80, come un muro caricato dal file), una cella libera o di vuoto vale 0. Solo dove il riferimento è sconosciuto si
+  legge la mappa dal vivo. La mappa dal vivo resta morbida e si aggiorna come prima (navigazione, app, salvataggio):
+  cambia solo la mappa su cui ci si allinea. Così un errore di qualche centimetro non cancella più i muri veri.
+- **Due copie** (512 KB in tutto): la mappatura legge una copia, il task aperiodico scrive l'altra e la pubblica
+  (`align_ref_state`). La mappatura la prende all'inizio di un job scambiando l'indice (`take_align_ref`): tempo
+  costante, nessuna copia nel job. Se la mappatura la sta prendendo proprio in quel momento, il task aperiodico
+  riprova (`MAP_COPY_MAX_ATTEMPTS` volte, ogni `MAP_COPY_RETRY_WAIT`).
+- **Quando si rinnova:**
+  - all'avvio, dalla griglia appena caricata (`load_map_if_on_base`, prima che partano i task);
+  - a ogni ricarica: `prepare_map_reload` lo prepara dalla griglia nuova, e la mappatura lo prende solo insieme alle
+    griglie;
+  - dopo ogni salvataggio riuscito, con la griglia a categorie appena salvata (`publish_align_reference`, chiamata da
+    `save_map_and_publish`); la mappatura lo prende al job dopo. Se la pubblicazione non riesce resta quello di prima.
+
+  Senza mappa (prima pulizia, "Nessuna mappa", robot partito fuori dalla base) il riferimento è tutto sconosciuto,
+  quindi fino al primo salvataggio ci si allinea sulla mappa dal vivo come prima.
+- **Riallineamento sulla base** all'avvio, dopo una ricarica senza posizione data e, dal 2026-11-19, anche **a fine
+  missione**. Non si fa dopo un rientro per batteria, perché la missione interrotta riparte da dov'era. La navigazione
+  lo chiede (`reanchor_num`) appena la mappatura ha una prima scansione allineata. La mappatura usa la ricerca di
+  Riposiziona base solo dentro una finestra attorno all'origine, ±`REANCHOR_WINDOW_M` (1 m) e
+  ±`REANCHOR_WINDOW_ANGLE` (45°), con soglia `REANCHOR_MIN_SCORE_PCT` (65%; Riposiziona base dall'app resta al 75%).
+  Trovata la posizione, **sposta solo il robot** (`restart_from_pose`), mai la mappa: così vale qualunque sia il modo
+  in cui il robot si è agganciato. Un risultato a un quarto di giro vorrebbe dire una ricerca sbagliata, e non cambia
+  niente.
+- **Tolti con l'ancoraggio:**
+  - nella mappatura: `anchor_to_base`, `BASE_FACE_DIST_M`, `BASE_ANCHOR_MAX_ANGLE`;
+  - nella navigazione: `base_anchor_num`;
+  - nel driver: `drv_status_t.dock_base_*` e `publish_dock_base`. L'aggancio calcola ancora la misura della base
+    (`base_*` in `docking_t`), ma nessuno la legge (`docs/driver.md`);
+  - il file `map.rtm.avvio`;
+  - la sovrascrittura della mappa selezionata dopo una ricarica (`is_anchor`, `is_overwrite`,
+    `read_map_reload_overwrites`).
+- **Prove:**
+  - ripasso di `deriva1` con la versione nuova: rientro in (−0,06; 0,04), come con la mappa ferma; test unitari
+    passati;
+  - sul robot, notte del 19/11: esplorazione da mappa vuota con 2 muri virtuali e 11 minuti di pulizia vicino alla
+    base. Deriva 1,2 cm, riallineamento di fine missione riuscito (punteggio 95-97%), 0 scadenze mancate;
+  - pulizie dell'utente del 19/11: la mappa non scivola più.
+- **Da verificare:** con il riferimento fisso i muri diventano più spessi di circa una cella verso +y (pulizia di
+  10 minuti: +17% di celle occupate). È uno scarto fisso di 2-3 cm, raggiunto nei primi 2 minuti e poi costante; con
+  la versione di prima cresceva. Va controllato che non si sommi da una pulizia all'altra, perché il riferimento si
+  rinnova a ogni salvataggio: basta confrontare lo spessore dei muri dopo due o tre pulizie complete. La causa non è
+  certa. Dai ripassi risulta che l'angolo dell'IMU gira in senso antiorario di circa 0,6-0,8° al minuto mentre il
+  robot si muove, e che il lidar allunga la strada delle ruote di circa 2,7 cm per metro.
+- **Tempi:** l'allineamento fa 4 letture in più del riferimento per ogni lettura bilineare, e prendere il riferimento
+  nel job costa un tempo costante. La conversione (ricarica) e la copia da 256 KB (salvataggio) le fa il task
+  aperiodico. Da includere nelle misure del WCET della mappatura.
 
 ### 7.8 Mappe di oggi
 
@@ -719,6 +764,19 @@ rilanciano il programma con codice di uscita 3.
   che riparte dopo la ricarica; spariti il riavvio dopo i comandi della mappa e `is_reposition_done_sent`.
 - `main.c`: senza l'attesa del riavvio dopo Riposiziona base (`REPOSITION_RESTART_DELAY` non c'è più); il codice 3
   resta solo se la ricarica non avviene in tempo.
+
+**Modifiche del 2026-11-19** (riferimento fisso dell'allineamento, ancoraggio tolto; sezione 7.10):
+- `mapping.c/.h`: `align_ref[2]`, `align_ref_in_use`, `align_ref_state`, `fill_align_ref`, `publish_align_ref`,
+  `take_align_ref`, `publish_align_reference`; `read_fine_grid_bilinear` legge il riferimento; `fine_cell_category`
+  spostata più in alto; tolti `anchor_to_base`, `BASE_FACE_DIST_M`, `BASE_ANCHOR_MAX_ANGLE`, la lettura di
+  `map.rtm.avvio`, `read_map_reload_overwrites` e l'argomento `is_overwrite` di `request_map_swap`.
+- `aperiodic.c/.h`: `publish_align_reference` dopo ogni salvataggio riuscito; tolti `is_anchor` da
+  `request_map_reposition`, `is_overwrite` da `reload_map` e `MAP_START_POSE_EXT`.
+- `navigation.c/.h`: a fine missione `is_reanchor_pending` (riallineamento come all'avvio) al posto di
+  `base_anchor_num`, che sparisce da `navigation_closed_cells_t`.
+- `cloud/live_map.c`: dopo una ricarica il file va al server sempre come all'avvio.
+- `driver/`: tolti `drv_status_t.dock_base_*` e `publish_dock_base`.
+- `test/test_live_map.c`: finte di `request_map_swap` e `publish_align_reference`.
 
 ### 9.6 Compilazione
 

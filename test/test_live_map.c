@@ -55,14 +55,14 @@ void run_position_search(uint32_t request_num) { (void)request_num; }
 /* ricarica della mappa finta: lo scambio è fatto subito */
 static uint32_t ricariche;
 bool prepare_map_reload(void) { return true; }
-uint32_t request_map_swap(bool has_start_pose, double start_x, double start_y, double start_theta, bool is_overwrite)
+uint32_t request_map_swap(bool has_start_pose, double start_x, double start_y, double start_theta)
 {
-	(void)has_start_pose; (void)start_x; (void)start_y; (void)start_theta; (void)is_overwrite;
+	(void)has_start_pose; (void)start_x; (void)start_y; (void)start_theta;
 	return ++ricariche;
 }
 uint32_t read_map_reload_num(void) { return ricariche; }
 bool read_map_reload_has_start_pose(void) { return false; }
-bool read_map_reload_overwrites(void) { return false; }
+bool publish_align_reference(const uint8_t *categories) { (void)categories; return true; }
 void request_restart(void) {}
 
 bool append_bytes(void *context, const uint8_t *data, size_t size)

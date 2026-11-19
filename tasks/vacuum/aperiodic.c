@@ -80,7 +80,6 @@ typedef struct {
     uint32_t num;           // numero progressivo della richiesta, 0 = nessuna richiesta
     int dx, dy;             // spostamento in celle fini, fatto per primo
     int quarter_turns;      // poi la rotazione attorno all'origine, in quarti di giro antiorari (0-3)
-    bool is_anchor;         // ancoraggio alla base: il server sovrascrive la mappa selezionata
     double start_x, start_y, start_theta;   // posizione del robot sulla mappa spostata, da cui riparte dopo la ricarica
 } aperiodic_reposition_request_t;
 
@@ -138,9 +137,9 @@ reposition_status_t read_reposition_status(void) {
     return (reposition_status_t)atomic_load(&reposition_status);
 }
 
-uint32_t request_map_reposition(int dx, int dy, int quarter_turns, bool is_anchor, double start_x, double start_y, double start_theta) {
+uint32_t request_map_reposition(int dx, int dy, int quarter_turns, double start_x, double start_y, double start_theta) {
     aperiodic_reposition_request_t request = { .num = ++reposition_request_num, .dx = dx, .dy = dy, .quarter_turns = quarter_turns,
-                                               .is_anchor = is_anchor, .start_x = start_x, .start_y = start_y, .start_theta = start_theta };
+                                               .start_x = start_x, .start_y = start_y, .start_theta = start_theta };
     exchange_write(&reposition_request_buffer, &request);
     rt_aperiodic_wake(&aperiodic_task);
     return request.num;
@@ -380,12 +379,12 @@ static bool save_map(void) {
 // funzione helper che ricarica la mappa dal file senza riavviare il programma: la prepara nelle griglie libere della
 // mappatura, chiede lo scambio e lo aspetta. Se la mappatura non lo fa in tempo il programma si riavvia come prima
 // (il file è già quello nuovo) e da qui non si salva più. Ritorna true se la mappa è stata ricaricata
-static bool reload_map(bool has_start_pose, double start_x, double start_y, double start_theta, bool is_overwrite) {
+static bool reload_map(bool has_start_pose, double start_x, double start_y, double start_theta) {
 
     // un file che non supera i controlli si carica come mappa vuota, come all'avvio
     prepare_map_reload();
 
-    uint32_t reload_num = request_map_swap(has_start_pose, start_x, start_y, start_theta, is_overwrite);
+    uint32_t reload_num = request_map_swap(has_start_pose, start_x, start_y, start_theta);
     int64_t limit = rt_now() + MAP_RELOAD_TIMEOUT;
     while (read_map_reload_num() != reload_num) {
         if (rt_now() > limit) {
@@ -407,6 +406,10 @@ static void save_map_and_publish(void) {
 
     bool ok = save_map();
     atomic_store(&save_failed, !ok);
+
+    // la mappa salvata diventa il riferimento dell'allineamento della prossima pulizia
+    if (ok && !publish_align_reference(aper_state.categories))
+        fprintf(stderr, "aperiodico: riferimento dell'allineamento non pubblicato, resta quello di prima\n");
     if (ok) atomic_fetch_add(&save_count, 1);
 }
 
@@ -427,7 +430,7 @@ static void apply_map_file_request(const aperiodic_file_request_t *request) {
     fprintf(stderr, "aperiodico: mappa %s%s\n", request->is_delete ? "cancellata" : "sostituita", ok ? "" : ": NON RIUSCITO");
 
     // la mappa nuova (o vuota) si carica subito: l'esito arriva all'app quando il robot la sta già usando
-    if (ok) ok = reload_map(false, 0, 0, 0, false);
+    if (ok) ok = reload_map(false, 0, 0, 0);
 
     atomic_store(&file_request_ok, ok);
     atomic_store(&file_request_done_num, request->num);
@@ -572,7 +575,7 @@ static bool reposition_map_file(const aperiodic_reposition_request_t *request) {
             request->dx, request->dy, request->quarter_turns);
 
     // la mappa spostata si carica subito, con il robot nella sua posizione sulla mappa nuova
-    return reload_map(true, request->start_x, request->start_y, request->start_theta, request->is_anchor);
+    return reload_map(true, request->start_x, request->start_y, request->start_theta);
 }
 
 // funzione helper che controlla le zone volute, le passa alla mappatura e, appena applicate, salva la mappa (se un file

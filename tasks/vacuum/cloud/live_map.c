@@ -345,13 +345,10 @@ static bool send_map_changes(http_connection_t *connection) {
 
 bool send_live_map(http_connection_t *connection) {
 
-    // mappa ricaricata senza riavvio (cambio di mappa, Riposiziona base, ancoraggio): si riparte come all'avvio, con la
-    // copia privata dal file nuovo e la mappa intera da mandare. Il file va al server come all'avvio (se il CRC non è quello
-    // della selezionata diventa una mappa nuova), dopo l'ancoraggio invece sovrascrive la selezionata
-    if (read_map_reload_num() != live_state.last_reload_num) {
-        init_live_map();
-        if (read_map_reload_overwrites()) live_state.saved_map_pending = SAVED_REASON_SAVE;
-    }
+    // mappa ricaricata senza riavvio (cambio di mappa, Riposiziona base): si riparte come all'avvio, con la copia privata
+    // dal file nuovo e la mappa intera da mandare. Il file va al server come all'avvio (se il CRC non è quello della
+    // selezionata diventa una mappa nuova)
+    if (read_map_reload_num() != live_state.last_reload_num) init_live_map();
 
     // un salvataggio nuovo: il file va mandato al server (se quello dell'avvio non è ancora partito resta lui: è
     // il server a decidere se il file è una mappa nuova)

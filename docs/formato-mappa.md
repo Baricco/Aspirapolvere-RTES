@@ -13,10 +13,12 @@ Aggiornato il 2026-11-10 con il progetto dell'app (`docs/app.md`, sezione 7).
   stesso formato. Per cambiare mappa il robot scarica quella scelta in `map.rtm.download`, il task aperiodico la
   rinomina sopra `map.rtm` e la mappatura la ricarica senza riavviare il programma (dal 2026-11-16; prima il programma
   si riavviava).
-- Il file `map.rtm.avvio`, accanto alla mappa, se c'è contiene la posizione del robot sulla base (testo: x y theta, in
-  metri e radianti): lo legge e lo cancella il caricamento all'avvio. Lo scriveva l'ancoraggio alla base quando si
-  riavviava il programma; dal 2026-11-16 non lo scrive più nessuno (la posizione passa con la ricarica), ma si legge
-  ancora.
+- Il file `map.rtm.avvio` (posizione del robot sulla base dopo l'ancoraggio alla base) non esiste più: dal 2026-11-16
+  non lo scriveva più nessuno, e dal 2026-11-19 nemmeno il caricamento lo legge (l'ancoraggio è stato tolto,
+  `docs/app.md`, sezione 7.10).
+- Le stesse categorie del file (2 bit per cella) servono anche al **riferimento dell'allineamento**: la mappa
+  dell'ultimo caricamento o salvataggio, ferma durante la pulizia, su cui la mappatura allinea le scansioni
+  (`docs/app.md`, sezione 7.10).
 - Sul PC (simulatore) la cartella arriva dalla variabile d'ambiente `RTES_MAPS`, per non toccare i file del robot.
 - Scrittura: file temporaneo (`map.rtm.tmp`) nella stessa cartella, poi rinominato sopra il vecchio. Nessuna copia
   della mappa precedente. Le partizioni sono montate `sync`: finite scrittura e rinomina, i dati sono sulla flash.

@@ -17,8 +17,7 @@ typedef struct {
     uint32_t reposition_num;                        // cresce a ogni Riposiziona base accettato: la mappatura cerca la posizione del robot sulla base nella mappa
     uint32_t reopen_num;                            // numero di celle chiuse da riaprire
     uint16_t reopen_cells[CLOSED_CELLS_MAX];        // lista circolare con gli indici delle celle chiuse da riaprire
-    uint32_t reanchor_num;                          // cresce all'avvio sulla base: la mappatura cerca la posizione del robot nella mappa (solo la posizione del robot, la mappa non si sposta)
-    uint32_t base_anchor_num;                       // cresce a ogni aggancio di fine missione: la mappatura tiene la base vista dal lidar (drv_status_t.dock_base_*) nello stesso punto della mappa
+    uint32_t reanchor_num;                          // cresce all'avvio e a fine missione sulla base: la mappatura cerca la posizione del robot nella mappa (solo la posizione del robot, la mappa non si sposta)
 } navigation_closed_cells_t;
 
 

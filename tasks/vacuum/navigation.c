@@ -330,7 +330,7 @@ typedef struct {
     double progress_x, progress_y;          // posizione da cui si misura se il robot avanza
     int64_t progress_start;                 // istante in cui il robot era in progress_x, progress_y
 
-    bool is_reanchor_pending;               // riallineamento automatico della mappa alla base da fare appena il robot è a riposo sulla base (all'avvio e dopo l'aggancio di fine missione)
+    bool is_reanchor_pending;               // riallineamento automatico del robot sulla base da fare appena il robot è a riposo sulla base (all'avvio e dopo l'aggancio di fine missione)
     uint32_t last_map_reload_num;           // ultima ricarica della mappa già vista (read_map_reload_num)
     nav_target_state_t target_state;        // obiettivo dell'app: esito dell'ultimo (pubblicato nello stato)
     uint16_t target_cell;                   // cella dell'obiettivo
@@ -4136,15 +4136,9 @@ static void job_navigation_body(void *arg) {
                     drv_sound("docked");
                     request_map_save_if_allowed();
 
-                    // a fine missione la mappa si ancora alla base vista dal lidar durante l'aggancio: la deriva della sessione
-                    // non passa alla successiva. Non dopo un rientro per la batteria: se la mappa va spostata si ricarica, e la
-                    // missione interrotta si perderebbe. Fino all'esito il robot non accetta una pulizia nuova
-                    if (nav_state.interrupted_mission == 0) {
-                        set_reposition_status(REPOSITION_RUNNING);
-                        nav_state.is_repositioning = true;
-                        nav_state.closed_cells.base_anchor_num++;
-                        exchange_write(&double_buffer_2, &nav_state.closed_cells);
-                    }
+                    // a fine missione il robot si riallinea sulla base come all'avvio: la ricerca sposta solo il robot, mai
+                    // la mappa. Non dopo un rientro per la batteria: la missione interrotta riparte da dov'era
+                    if (nav_state.interrupted_mission == 0) nav_state.is_reanchor_pending = true;
                 }
                 else if (cur_drv_state.docking == DOCK_FAILED) stop_and_fail(DRV_FAULT_DOCKING_FAILED);
 
@@ -4248,10 +4242,10 @@ static void job_navigation_body(void *arg) {
 
             drv_status(&cur_state);
 
-            // riallineamento automatico della mappa alla base: come Riposiziona base (la mappatura cerca la posizione del
-            // robot sulla base nella mappa, il task aperiodico sposta il file in modo che la base torni nell'origine e il
-            // programma si riavvia), ma solo se la mappa è spostata di almeno una cella fine e senza esiti per l'app
-            // quando non c'è niente da fare. Solo con la mappa caricata dalla base (il programma è partito dalla base)
+            // riallineamento automatico sulla base, all'avvio e dopo l'aggancio di fine missione: la mappatura cerca la
+            // posizione del robot sulla base nella mappa, con la ricerca di Riposiziona base ma solo vicino all'origine, e
+            // sposta solo il robot nella posizione trovata (la mappa e il file non cambiano). Senza esiti per l'app.
+            // Solo con la mappa caricata dalla base (il programma è partito dalla base)
             // (read_started_on_base diventa vera solo dopo i primi job della mappatura, e la ricerca ha bisogno di una posizione
             // già allineata almeno una volta, cioè della prima scansione buona: fino ad allora il riallineamento aspetta)
             if (nav_state.is_reanchor_pending && !nav_state.is_repositioning && cur_state.on_base && read_started_on_base() &&

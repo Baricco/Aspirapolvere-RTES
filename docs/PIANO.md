@@ -959,10 +959,27 @@ I task dell'esame li scrive l'utente da solo, sopra un framework e un driver pre
       suo centro (`is_ray_through_cell_center`: i raggi di striscio non consumano più le punte degli ostacoli sottili);
       `NEAR_OBSTACLE_NO_WRITE_M` 0,17;
     - *ricarica della mappa senza riavvio*, *muri virtuali*, *obiettivo dall'app*, *ancoraggio alla base e riallineamento
-      all'avvio*: `docs/app.md`, sezioni 7.1, 7.7, 5.5, 7.10. Il codice 3 di `rtes-run` (punto 3 della fase 6) resta solo
+      all'avvio* (l'ancoraggio è stato tolto il 2026-11-19, vedi sotto): `docs/app.md`, sezioni 7.1, 7.7, 5.5, 7.10. Il codice 3 di `rtes-run` (punto 3 della fase 6) resta solo
       per una ricarica che non avviene in tempo.
     Prove: nel simulatore (`build/prove-merge*`, `build/prove-muri`) e sul robot (installata il 16/11). Test della repo:
     `test_live_map` 123 controlli, `test_app_commands` 140.
+  - **mappa che scivola dentro la pulizia: riferimento fisso dell'allineamento** (2026-11-18/19, scritto da Claude su
+    richiesta dell'utente; dettagli in `docs/app.md`, sezione 7.10). Il 18/11 la mappa `map-11` scivolava di 30-60 cm
+    verso +y in ogni pulizia, con muri doppi e muri virtuali fuori posto. Dati e script in
+    `build/robot/scivolamento-18-11/`. Non era l'ancoraggio: la causa era il trascinamento della mappa morbida, perché
+    le scansioni si allineavano sulla mappa che loro stesse riscrivevano. Lo ha dimostrato il ripasso al PC della
+    registrazione `deriva1`: la mappa del caricamento tenuta ferma riduce la deriva sulla base da 37-47 cm a 5 cm.
+    - *soluzione*: la mappatura si allinea su un riferimento a 2 bit per cella (la mappa dell'ultimo caricamento o
+      salvataggio, due copie da 256 KB preparate dal task aperiodico) e legge la mappa dal vivo solo dove il
+      riferimento è sconosciuto;
+    - *a fine missione*: il riallineamento sulla base fatto come all'avvio (sposta solo il robot) al posto
+      dell'ancoraggio, che è stato tolto insieme a `drv_status_t.dock_base_*` e a `map.rtm.avvio`.
+    - *prove*: ripasso di `deriva1`, rientro in (−0,06; 0,04); sul robot, nella notte del 19/11, esplorazione da mappa
+      vuota e 11 minuti di pulizia: deriva 1,2 cm, riallineamento a fine missione al 95-97%, 0 scadenze mancate.
+      Nelle pulizie dell'utente del 19/11 la mappa non scivola più.
+    - *aperto*: i muri si ispessiscono di circa una cella verso +y (scarto fisso di 2-3 cm). Va controllato su due o
+      tre pulizie complete che non si sommi da un salvataggio all'altro. La causa non è certa (l'IMU gira in senso
+      antiorario di circa 0,6-0,8° al minuto, il lidar allunga la strada delle ruote di circa 2,7 cm/m).
   - **memoria bloccata sul PC** (2026-10-30): il programma blocca in RAM 7,97 MB e il limite per i normali utenti è
     8 MB; con MCL_FUTURE i thread creati dopo non partivano più (il `main` esce senza messaggio). `rt_init` ora,
     se non è root e il limite c'è, blocca solo la memoria di adesso (sul robot, root, tutto come prima).

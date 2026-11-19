@@ -49,14 +49,11 @@ typedef enum {
 void set_reposition_status(reposition_status_t status);
 reposition_status_t read_reposition_status(void);
 
-// richiesta di spostare il file della mappa (la chiama la mappatura, dopo la ricerca o l'ancoraggio): ogni cella, zona e
+// richiesta di spostare il file della mappa (la chiama la mappatura, dopo la ricerca di Riposiziona base): ogni cella, zona e
 // muro si sposta di (dx, dy) celle fini e poi ruota di quarter_turns quarti di giro in senso antiorario attorno all'origine.
 // Il task aperiodico riscrive map.rtm, ricarica la mappa (senza riavvio) e scrive REPOSITION_DONE (o REPOSITION_FAILED).
-// is_anchor: ancoraggio alla base (il server sovrascrive la mappa selezionata), altrimenti Riposiziona base dell'app (il
-// server la salva come mappa nuova). start_x, start_y, start_theta: la posizione del robot sulla base nella mappa spostata
-uint32_t request_map_reposition(int dx, int dy, int quarter_turns, bool is_anchor, double start_x, double start_y, double start_theta);
+uint32_t request_map_reposition(int dx, int dy, int quarter_turns, double start_x, double start_y, double start_theta);
 
-#define MAP_START_POSE_EXT ".avvio"     // file accanto alla mappa con la posizione iniziale del robot dopo l'ancoraggio alla base (testo: x y theta, metri e radianti): lo legge e lo cancella il caricamento della mappa
 
 // richieste sul file della mappa (le chiama l'interprete dei comandi dell'app, con il robot a riposo sulla base):
 // sostituire map.rtm con il file scaricato dal server (map.rtm + MAP_DOWNLOAD_EXT) oppure cancellarlo. Il task aperiodico

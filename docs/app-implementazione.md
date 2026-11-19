@@ -9,6 +9,10 @@ niente copie di file, niente deploy, niente commit.
 alla base. Le parti di questo resoconto che parlano del riavvio con il codice 3 descrivono la prima versione; il
 comportamento di oggi è in `docs/app.md`, sezioni 5.5, 7.1, 7.5, 7.7, 7.9, 7.10 e 9.5.
 
+**Aggiornamento del 2026-11-19:** l'ancoraggio alla base è stato tolto. Al suo posto la mappatura allinea le scansioni
+su un riferimento fisso (la mappa dell'ultimo caricamento o salvataggio), e a fine missione il robot si riallinea sulla
+base come all'avvio (`docs/app.md`, sezione 7.10).
+
 Dove questo documento dice "simulatore" vuol dire `build/host/sim` con il programma vero del robot
 (`build/host/vacuum` o la sua copia di prova `build/prove-nav/vacdbg`) collegato al backend sul PC in HTTPS, con un
 certificato autofirmato per `localhost`.

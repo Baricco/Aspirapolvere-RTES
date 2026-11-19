@@ -173,8 +173,8 @@ Se il muro è valido e l'angolo è sotto `STRAIGHTEN_MAX_ANGLE` (45°) la rifini
 altrimenti gira come prima. Raddrizzato, aspetta un giro del lidar fatto da fermo: se vede la base salva centro della
 faccia e direzione in cui guarda, nel sistema del robot (`base_x`, `base_y`, `base_theta`, `base_number` che cresce a
 ogni misura); poi gira. Oltre `STRAIGHTEN_MAX_NS` (10 s), o senza base, gira lo stesso: l'aggancio non dipende dalla
-misura. Il driver porta la misura nel sistema della mappa con l'ultima posizione del moto (`publish_dock_base`) e la
-pubblica in `drv_status_t.dock_base_*`; la usa la mappatura per l'ancoraggio della mappa alla base a fine missione.
+misura. Dal 2026-11-19 la misura si calcola ancora (`base_*` in `docking_t`) ma non la legge nessuno: il driver non la
+pubblica più e la mappatura non la usa, perché l'ancoraggio della mappa alla base è stato tolto (`app.md`, sezione 7.10).
 
 - Esito in `drv_status_t.docking`: `DOCK_IDLE`, `DOCK_RUNNING`, `DOCK_DONE`, `DOCK_FAILED`.
 - `DOCK_POINT_X_M` (0,30 m): il punto davanti alla base a cui la navigazione porta il robot prima di chiedere
@@ -278,8 +278,7 @@ Quello che avevi già capito: stampa gli eventi, suona e scrive la registrazione
   = bit "in carica" del GD32, che si accende a carica finita, `on_base`, `temperature_c`); `lifted`; tasti
   (`power_presses`, `home_presses`: pressioni brevi contate, un task confronta il numero con quello di prima); motori
   **dopo i limiti** (`v`, `w`, `limits`, `side_brush`, `main_brush`, `suction_rpm`, `suction_limits`, `led`);
-  aggancio (`docking`, `docking_phase`, `docking_attempt`; base vista dal lidar nell'ultimo aggancio, nel sistema della
-  mappa: `dock_base_number`, che cresce a ogni misura, `dock_base_x`, `dock_base_y`, `dock_base_theta`); lidar (`lidar_on`, `lidar_power`, `lidar_ok`,
+  aggancio (`docking`, `docking_phase`, `docking_attempt`); lidar (`lidar_on`, `lidar_power`, `lidar_ok`,
   `lidar_rev_s`, `lidar_revolutions`); salute del collegamento e tempi (`sensor_frames`, `bad_frames`,
   `discarded_bytes`, `other_gd32_frames`, `gd32_heartbeats`, `keepalives`, `heartbeats`, `write_errors`, `sensors_hz`,
   `sensors_age_ns`, `tick_delay_max_ns`, `sensors_interval_max_ns`, `sensors_interval_min_ns` (il T degli sporadici
@@ -324,7 +323,7 @@ Quello che avevi già capito: stampa gli eventi, suona e scrive la registrazione
 - `event_queue` con `event_head` ed `event_tail`: gli eventi in testo, scritti dai thread real-time e stampati da quello
   di servizio.
 - **`d`**: lo stato interno (seriali e thread, riconoscitori e moduli logici `assembler`, `regulator`, `bat`,
-  `interlock`, `contacts`, `dock_state`, ultima misura della base pubblicata (`dock_base_*`, `dock_base_t`), stato di riposo e sollevamento, tasti, ultimi valori mandati al GD32
+  `interlock`, `contacts`, `dock_state`, stato di riposo e sollevamento, tasti, ultimi valori mandati al GD32
   `*_sent`, istanti dei prossimi eventi a tempo, misure dei tempi).
 - **`rec`**: la registrazione dei byte grezzi: un anello in RAM da 1 MB (`RING_SIZE`) che i thread real-time
   riempiono e quello di servizio svuota sul file. Canali `CHANNEL_GD32` e `CHANNEL_LIDAR`; i record persi si contano in
@@ -385,7 +384,6 @@ Quello che avevi già capito: stampa gli eventi, suona e scrive la registrazione
 | `buttons_and_base(t)` | al tick: una pressione breve o il ritorno sulla base azzerano il guasto, **poi** le pressioni si contano. Così un task che vede il numero crescere trova già il guasto azzerato |
 | `on_gd32_frame(f, ctx)` | per ogni frame del GD32. Sensori: intervalli fra i frame, sollevamento, tasti, batteria, banco, pubblicazione, contatti, sveglia dei task iscritti, aggancio e reazione immediata delle ruote. Altri: heartbeat, versione, risveglio, errori |
 | `on_lidar_packet(p, ctx)` | per ogni pacchetto del lidar: se completa un giro lo pubblica e lo passa all'aggancio |
-| `publish_dock_base(t)` | misura nuova della base dall'aggancio: la porta nel sistema della mappa con l'ultima posizione del moto (scartata se più vecchia di 0,5 s) e la pubblica in `dock_base_*` |
 
 **Ciclo da 20 ms e thread**
 
