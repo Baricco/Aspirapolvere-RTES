@@ -50,12 +50,6 @@ static void init_lidar_scan_data(lidar_scan_data_t *scan_data) {
 
     // Inizializza la struttura dati da ritornare a 0
     *scan_data = (lidar_scan_data_t){0};
-    // Inizializza i settori a NO_READ
-    for (int i = 0; i < SECTOR_NUMBER; i++) scan_data->sector_distance[i] = NO_READ;
-
-    // inizializza le distanze davanti e dietro a NO_READ
-    scan_data->corridor_front_distance = NO_READ;
-    scan_data->corridor_back_distance = NO_READ;
 
     // inizializza la strada libera nelle direzioni a NO_READ
     for (int i = 0; i < DIRECTION_NUMBER; i++) scan_data->direction_free_distance[i] = NO_READ;
@@ -299,16 +293,6 @@ void job_lidar(void *arg) {
         // rispetto al centro del robot
         double x, y;
         drv_point_xy(&cur_scan.p[i], &x, &y);
-        
-        // calcola l'angolo da (x, y)
-        double angle = atan2(y, x);
-
-        // shifta l'angolo di mezzo settore a sinistra
-        angle += M_PI / SECTOR_NUMBER;
-
-        // ottieni il numero di settore dall'angolo
-        // dividendo l'angolo per la larghezza dei settori
-        int sector_number = ((int)floor(angle / (M_PI * 2 / SECTOR_NUMBER)) + SECTOR_NUMBER) % SECTOR_NUMBER;
     
         // calcola la distanza del punto misurato dal bordo del robot
         int distance = (hypot(x, y) * 1000) - ROBOT_RADIUS;
@@ -320,9 +304,6 @@ void job_lidar(void *arg) {
         x *= 1000.0;
         y *= 1000.0;
 
-        // se il punto misurato è il pù vicino in quel settore, aggiorna cur_scan_data
-        if (cur_scan_data.sector_distance[sector_number] > distance) cur_scan_data.sector_distance[sector_number] = distance;
-    
         // aggiorna la strada libera in ogni direzione: il punto nel sistema della direzione, avanti e di lato
         for (int k = 0; distance > 0 && k < DIRECTION_NUMBER; k++) {
             const double along = x * dir_cos[k] + y * dir_sin[k];
@@ -332,23 +313,6 @@ void job_lidar(void *arg) {
             if (free < 0) free = 0;
             if (cur_scan_data.direction_free_distance[k] > free) cur_scan_data.direction_free_distance[k] = free;
         }
-
-        // se la distanza dal punto misurato è 0 o il punto non si trova nella direzione di 
-        // movimento del robot, esci
-        if (distance == 0 || fabs(y) >= ROBOT_RADIUS) continue;
-
-        // calcola la distanza del punto rispetto al bordo del robot
-        double dist = fabs(x) - sqrt(ROBOT_RADIUS*ROBOT_RADIUS - y*y);
-
-        // se la distanza è < 0 (errore dovuto al rumore del lidar), normalizza a 0
-        if (dist < 0) dist = 0;
-
-        // aggiorna la distanza degli ostacoli davanti o dietro al robot (in base alla direzione)
-        if (x > 0) {
-            if (cur_scan_data.corridor_front_distance > dist) cur_scan_data.corridor_front_distance = dist;
-        } else if (cur_scan_data.corridor_back_distance > dist) cur_scan_data.corridor_back_distance = dist; 
-
-        
     }
 
     // calcola i dati per seguire i bordi

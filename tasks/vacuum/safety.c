@@ -230,28 +230,26 @@ void job_safety(void *arg) {
     // Controlla che i dati dello scan del lidar siano validi
     if (scan_data.valid && scan_data.num != 0 && (cur_frame.t_ns - scan_data.scan_end_t) < LIDAR_SCAN_MAX_AGE) {
 
-        // calcola la distanza minima davanti al robot (prendi i tre settori anteriori), convertiti in metri
-        obstacle_front_distance = scan_data.corridor_front_distance / 1000.0;
+        // strada libera davanti al robot, convertita in metri
+        obstacle_front_distance = scan_data.direction_free_distance[DIRECTION_FRONT] / 1000.0;
 
-        // se il robot sta girando conta anche la strada libera nelle direzioni verso cui arriverà nel tempo SAFE_DELAY
+        // se il robot sta girando conta anche la strada libera nelle direzioni verso cui arriverà nel tempo SAFE_DELAY,
+        // fino a SAFE_TURN_MAX_ANGLE
         movement_position_data_t turn_position = read_movement();
         if (fabs(turn_position.omega) > SAFE_TURN_MIN_OMEGA) {
-            int steps = (int)ceil(fabs(turn_position.omega) * SAFE_DELAY / (2 * M_PI / DIRECTION_NUMBER));
-            if (steps > SAFE_TURN_MAX_STEPS) steps = SAFE_TURN_MAX_STEPS;
+            const double step_angle = 2 * M_PI / DIRECTION_NUMBER;
+            const int max_steps = (int)lround(SAFE_TURN_MAX_ANGLE / step_angle);
+            int steps = (int)ceil(fabs(turn_position.omega) * SAFE_DELAY / step_angle);
+            if (steps > max_steps) steps = max_steps;
             int side = turn_position.omega > 0 ? 1 : -1;
             for (int k = 1; k <= steps; k++) {
                 int dir = (side * k + DIRECTION_NUMBER) % DIRECTION_NUMBER;
                 obstacle_front_distance = MIN(obstacle_front_distance, scan_data.direction_free_distance[dir] / 1000.0);
             }
         }
-        
-        // prima c'era questo in obstacle_front_distance:
-        // (MIN(MIN(scan_data.sector_distance[11], scan_data.sector_distance[1]), scan_data.sector_distance[0]) / 1000.0);
 
-        // calcola la distanza minima dietro al robot (prendi i tre settori posteriori), convertiti in metri
-        obstacle_back_distance = scan_data.corridor_back_distance / 1000.0;
-        // prim c'era questo in obstacle_back_distance
-        // (MIN(MIN(scan_data.sector_distance[5], scan_data.sector_distance[6]), scan_data.sector_distance[7])/ 1000.0);
+        // strada libera dietro al robot, convertita in metri
+        obstacle_back_distance = scan_data.direction_free_distance[DIRECTION_BACK] / 1000.0;
 
     }
 

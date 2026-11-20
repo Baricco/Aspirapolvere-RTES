@@ -277,12 +277,13 @@ I task dell'esame li scrive l'utente da solo, sopra un framework e un driver pre
     mappa) e la compressione della mappa. Le zone proibite servono (la credenza) ma si possono leggere da un file
     all'avvio, senza app.
 - **Lidar a 6 giri/s** (come AuxCtrl, ~340 punti per giro), deciso il 2026-10-06 all'inizio della fase 4: il task
-  del lidar elabora un giro ogni 200 ms.
+  del lidar gira ogni 100 ms, meno di un giro (~167 ms), quindi elabora ogni giro; un job che non trova un giro nuovo
+  esce subito.
 - **Navigazione ogni 100 ms** (2026-10-11): accorcia la catena sicurezza → navigazione → moto (circa 0,3 s nel caso
   peggiore, compresa la frenata, invece di 0,4).
 - **Sicurezza del moto** (2026-10-11): sporadica sul frame, come il moto. Riconosce incastro (velocità mandata contro
   misurata), slittamento (ω degli encoder contro IMU), sforzo dei motori (correnti delle ruote), ostacolo vicino
-  (settori del lidar) e bordo delle zone proibite. **Non comanda i motori e non parla con il moto**: pubblica
+  (strada libera del lidar) e bordo delle zone proibite. **Non comanda i motori e non parla con il moto**: pubblica
   l'allarme, la navigazione lo legge e cambia l'obiettivo; il moto non vede la sicurezza. Per ostacoli e zone: sotto
   una soglia di "vicino" la velocità massima scende in proporzione alla distanza, e così si ottiene anche lo stop;
   il bumper del driver resta la protezione in caso di errori. L'inclinazione da sola non è un allarme (salire su un
@@ -865,8 +866,8 @@ I task dell'esame li scrive l'utente da solo, sopra un framework e un driver pre
       stato scritto: la correzione si applica subito, e finora non è servito.
     - **rilevatore di incastro** (scritto 2026-11-02, necessario): `safety.c` confronta le velocità delle ruote con quelle
       comandate, ma da incastrato le ruote slittano a piena velocità e l'allarme non scatta. Con la posizione giusta il robot
-      non "arriva" più per finta e resta a spingere per sempre (visto: oltre 8 minuti). Ora la mappatura confronta, sugli ultimi
-      7 giri (~1,4 s), lo spostamento dell'odometria e quello della stima: oltre 5 cm contro meno di 2 cm vuol dire incastrato
+      non "arriva" più per finta e resta a spingere per sempre (visto: oltre 8 minuti). Ora la mappatura confronta, fra la scansione
+      attuale e l'ultima fatta almeno 1,4 s prima (`STUCK_WINDOW_TIME`), lo spostamento dell'odometria e quello della stima: oltre 5 cm contro meno di 2 cm vuol dire incastrato
       (`is_stuck` in `mapping_correction_t`), e la sicurezza attiva `SAFETY_ERROR_STUCK`, da cui partono l'evento e lo
       sblocco che esistevano già. Sotto ~0,12 m/s non arriva ai 5 cm. Soglie da ricontrollare sul robot: **risolto** (detto
       dall'utente il 2026-11-07).
@@ -931,8 +932,9 @@ I task dell'esame li scrive l'utente da solo, sopra un framework e un driver pre
       sola oltre `PURSUIT_SLOW_ANGLE` (90°); punto di mira da `LOOKAHEAD_MIN_CELLS` a `LOOKAHEAD_MAX_CELLS` (1-3) celle
       secondo la strada libera davanti, meno gli sblocchi di fila (`calc_lookahead_idx`);
     - *sterzata a punteggio* (`calc_steer_direction`): se verso il punto di mira non ci sono `STEER_CHECK_DISTANCE`
-      (30 cm) liberi, vince fra le direzioni vicine (3 per lato, passi di 30°) quella con strada libera (fino a
-      `STEER_FREE_CAP`, 1 m) meno `STEER_ANGLE_PENALTY` (0,30 m) per passo di scarto, con almeno `STEER_MIN_FREE` (10 cm);
+      (30 cm) liberi, vince fra le direzioni vicine (fino a `STEER_MAX_ANGLE`, 90°, per lato) quella con strada libera
+      (fino a `STEER_FREE_CAP`, 1 m) meno `STEER_ANGLE_PENALTY` (1 cm) per grado di scarto, con almeno
+      `STEER_MIN_FREE` (10 cm);
     - *retromarcia* solo con il punto di mira dietro (oltre 90° con isteresi `REVERSE_HYSTERESIS`) e solo verso celle in
       cui il centro del robot è già passato in questa missione (`visited_cells`, 8 KB, `mark_visited_cell` a ogni job):
       dietro non ci sono anti-caduta e il lidar sopra un vuoto vede libero (il robot c'era caduto nel simulatore);
@@ -948,11 +950,13 @@ I task dell'esame li scrive l'utente da solo, sopra un framework e un driver pre
       visto dal lidar (`DOCK_P_STRAIGHTEN`), misura della base, e indietro di 20 cm se arriva sulla base senza aver mai
       visto il fascio centrale (`axis_seen`) (`docs/driver.md`);
     - *ripresa dopo la ricarica* a `BATTERY_RESUME_PERCENT` 50 (era 90);
-    - *lidar*: strada libera in `DIRECTION_NUMBER` (12) direzioni, una ogni 30°, con la larghezza del robot
-      (`direction_free_distance`);
+    - *lidar*: strada libera in `DIRECTION_NUMBER` (72) direzioni, una ogni 5°, con la larghezza del robot
+      (`direction_free_distance`); davanti e dietro sono le direzioni `DIRECTION_FRONT` e `DIRECTION_BACK`, che la
+      sicurezza, la fine delle strisce e lo stato dell'app (`corridor_front_mm`, `corridor_back_mm`) usano per la strada
+      libera davanti e dietro;
     - *sicurezza*: velocità massima dalla strada fatta durante `SAFE_DELAY` (0,5 s) più la frenata a `SAFE_DECEL`
       (1 m/s²), al posto di `MOVEMENT_SAFE_GAIN`; in rotazione (oltre `SAFE_TURN_MIN_OMEGA`) conta anche la strada libera
-      nelle direzioni verso cui il robot arriverà in `SAFE_DELAY` (al massimo `SAFE_TURN_MAX_STEPS`, 3). Il limite lo
+      nelle direzioni verso cui il robot arriverà in `SAFE_DELAY` (al massimo `SAFE_TURN_MAX_ANGLE`, 90°). Il limite lo
       applica il task di movimento a ogni job, avanti e indietro, per qualunque obiettivo; la navigazione dà sempre la
       velocità di crociera;
     - *mappatura*: una cella occupata perde punti solo se il raggio passa entro `PASS_MAX_OFFSET_CELLS` (0,25 celle) dal
@@ -1182,7 +1186,7 @@ batteria, watchdog dei task + stato di guasto (~50 ms).
 |---|---|---|---|
 | Controllo del moto | frame del GD32 | 20 ms | odometria (encoder + imbardata dell'IMU) e v/ω verso l'obiettivo della navigazione, in anello chiuso sulle misure |
 | Sicurezza del moto | frame del GD32 | 20 ms | incastrato/slittamento (comandato vs encoder, correnti, IMU), bordo delle zone proibite: ferma il robot |
-| Lidar | timer | 200 ms | elaborazione del giro: ostacoli, distanze, dati per mappa e navigazione |
+| Lidar | timer | 100 ms | elaborazione del giro: ostacoli, distanze, dati per mappa e navigazione |
 | Navigazione | timer | 100 ms | dove andare: esplorazione, copertura con BA*, evitare ostacoli e zone proibite |
 | Mappatura | timer | 200 ms (500 se il WCET non ci sta) | griglia di occupazione + allineamento delle scansioni |
 | Salvataggio della mappa, ricerca della posizione, comandi dell'app | task aperiodico sul core 3 | evento (nessun budget: core tutto suo) | richieste dei task e dell'app |

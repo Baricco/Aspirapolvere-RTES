@@ -67,13 +67,14 @@
 #define MAP_COPY_MAX_ATTEMPTS   100         // tentativi della copia fra un job e l'altro prima di rinunciare
 #define MAP_COPY_RETRY_WAIT     RT_MS(2)    // attesa fra due tentativi della copia, se la mappatura sta lavorando
 
-#define STUCK_WINDOW_SCANS     7        // numero di scansioni ferme prima che scatti l'allarme "robot incastrato"
+#define STUCK_WINDOW_TIME      RT_MS(1400)  // tempo in cui il robot deve risultare fermo sulla mappa mentre l'odometria si muove, prima che scatti l'allarme "robot incastrato"
+#define STUCK_HISTORY_SIZE     16       // scansioni tenute nello storico dell'incastro: più di quelle che il lidar fa in STUCK_WINDOW_TIME (6 giri/s, circa 9)
 #define STUCK_MIN_ODOM_MOVE_M  0.05     // distanza minima che il robot deve percorrere prima che si consideri in movimento
 #define STUCK_MAX_MAP_MOVE_M   0.02     // distanza massima da percorrere perchè si consideri fermo
 
 #define QUAD_CROSSED_FLAG 128           // se questo flag è attivo dentro al contatore num_occupied_fine_cells, significa che quella cella fine è attraversabile dal robot
 #define QUAD_CROSSED_SAMPLE 0.02        // passo con cui si campiona il tratto fatto dal robot fra due job: ogni quadrante che contiene un punto del tratto (il centro del robot ci è stato) si segna come attraversato, espresso in m
-#define BASE_CHECK_JOBS 5               // numero di job in cui si controlla se il robot è sulla base all'avvio, corrispondono a circa 1 s
+#define BASE_CHECK_TIME RT_S(1)         // per quanto tempo si controlla se il robot è sulla base all'avvio, dal primo job con il driver pronto
 #define QUAD_CROSSED_MAX_STEP 0.15      // se il robot si sposta di una distanza superiore a questa tra due job, non si considerano le celle in mezzo come attraversate
 
 // Costanti riguardanti la routine di ricerca della posizione attuale del robot dopo il sollevamento
@@ -152,6 +153,7 @@ typedef struct {
 
 // Elemento della lista degli ultimi valori dell'allineamento
 typedef struct { 
+    int64_t t;                          // istante della scansione (fine del giro del lidar)
     double odom_x, odom_y, map_x, map_y;
 } stuck_history_entry_t;
 
@@ -265,7 +267,7 @@ typedef struct {
     uint32_t correction_version;
 
     // Scansioni passate, usate per verificare se il robot è incastrato    
-    stuck_history_entry_t stuck_history[STUCK_WINDOW_SCANS];
+    stuck_history_entry_t stuck_history[STUCK_HISTORY_SIZE];
 
     uint32_t stuck_history_count;     // numero delle scansioni registrate finora
 
@@ -275,7 +277,8 @@ typedef struct {
         bool is_valid;              // indica se esiste un ultima posizione
     } last_mark;
 
-    uint32_t base_check_jobs;       // numero di job in cui è stato controllato se il robot è sulla base
+    int64_t base_check_start;       // istante del primo controllo se il robot è sulla base, 0 se il controllo non è ancora iniziato
+    bool is_base_check_done;        // indica se il controllo della base è finito
     bool base_seen;                 // indica se durante il controllo il robot è risultato sulla base
 
     uint32_t last_mission_num;      // numero dell'ultima pulizia vista dalla mappatura
@@ -1432,19 +1435,32 @@ static void update_aligned_pose(double ref_x, double ref_y, double ref_theta) {
     map_state.last_odom_y = ref_y;
     map_state.last_odom_theta = ref_theta;
 
-    uint8_t idx = map_state.stuck_history_count % STUCK_WINDOW_SCANS;
-    stuck_history_entry_t last_stuck_entry = map_state.stuck_history[idx];      // la scansione di STUCK_WINDOW_SCANS giri fa
+    // istante della scansione: la fine del giro del lidar, lo stesso della posizione di riferimento
+    const int64_t scan_t = map_state.last_scan.t_end_ns;
+
+    // scansioni presenti nello storico, al massimo STUCK_HISTORY_SIZE
+    const uint32_t num_entries = map_state.stuck_history_count < STUCK_HISTORY_SIZE ? map_state.stuck_history_count : STUCK_HISTORY_SIZE;
 
     bool is_stuck = false;
 
-    if(map_state.stuck_history_count >= STUCK_WINDOW_SCANS) {
-        double odom_moved = hypot(ref_x - last_stuck_entry.odom_x, ref_y - last_stuck_entry.odom_y);
-        double map_moved  = hypot(map_state.aligned_x - last_stuck_entry.map_x, map_state.aligned_y - last_stuck_entry.map_y);
+    // dalla più recente alla più vecchia, cerca la prima scansione fatta almeno STUCK_WINDOW_TIME fa e confronta con lei
+    // gli spostamenti: se non c'è (lo storico copre meno di STUCK_WINDOW_TIME), il robot non risulta incastrato
+    for (uint32_t i = 1; i <= num_entries; i++) {
+
+        const stuck_history_entry_t *old_entry = &map_state.stuck_history[(map_state.stuck_history_count - i) % STUCK_HISTORY_SIZE];
+
+        if (scan_t - old_entry->t < STUCK_WINDOW_TIME) continue;
+
+        double odom_moved = hypot(ref_x - old_entry->odom_x, ref_y - old_entry->odom_y);
+        double map_moved  = hypot(map_state.aligned_x - old_entry->map_x, map_state.aligned_y - old_entry->map_y);
         is_stuck = odom_moved > STUCK_MIN_ODOM_MOVE_M && map_moved < STUCK_MAX_MAP_MOVE_M;
+
+        break;
     }
     
     // salva la scansione attuale nello storico, sovrascrivendo la più vecchia
-    map_state.stuck_history[idx] = (stuck_history_entry_t){
+    map_state.stuck_history[map_state.stuck_history_count % STUCK_HISTORY_SIZE] = (stuck_history_entry_t){
+        .t = scan_t,
         .odom_x = ref_x,
         .odom_y = ref_y,
         .map_x = map_state.aligned_x,
@@ -2505,11 +2521,11 @@ static void apply_user_zones(void) {
     atomic_store(&applied_zones_version, wanted.version);
 }
 
-// Funzione helper che nei primi job controlla se il robot è partito dalla base di ricarica.
+// Funzione helper che per BASE_CHECK_TIME dall'avvio controlla se il robot è partito dalla base di ricarica.
 static void check_start_on_base(void) {
 
     // se il controllo è già finito esci
-    if (map_state.base_check_jobs >= BASE_CHECK_JOBS) return;
+    if (map_state.is_base_check_done) return;
 
     drv_status_t cur_drv_state = {0};
     drv_status(&cur_drv_state);
@@ -2517,13 +2533,19 @@ static void check_start_on_base(void) {
     // finché il driver non è pronto on_base non vale ancora niente
     if (cur_drv_state.phase != DRV_READY) return;
 
+    // il controllo parte dal primo job con il driver pronto
+    if (map_state.base_check_start == 0) map_state.base_check_start = rt_now();
+
     if (cur_drv_state.on_base) map_state.base_seen = true;
 
-    map_state.base_check_jobs++;
+    // finché non è passato BASE_CHECK_TIME il controllo continua
+    if (rt_now() - map_state.base_check_start < BASE_CHECK_TIME) return;
 
-    // se il controllo è finito e il robot è partito dalla base inserisci la zona proibita
+    map_state.is_base_check_done = true;
+
+    // se il robot è partito dalla base inserisci la zona proibita
     // il risultato va pubblicato dopo, così chi legge true trova la zona già pronta
-    if (map_state.base_check_jobs == BASE_CHECK_JOBS && map_state.base_seen) {
+    if (map_state.base_seen) {
         publish_base_zone();
         atomic_store(&started_on_base, true);
     }
@@ -2826,7 +2848,7 @@ static void apply_map_reload(const movement_position_data_t *cur_pos) {
     for (int i = 0; i < reload_data.num_zones; i++) map_state.user_zones[i] = reload_data.zones[i];
     map_state.num_user_walls = reload_data.num_walls;
     for (int i = 0; i < reload_data.num_walls; i++) map_state.user_walls[i] = reload_data.walls[i];
-    map_state.base_check_jobs = BASE_CHECK_JOBS;
+    map_state.is_base_check_done = true;
     publish_base_zone();
     atomic_store(&started_on_base, true);
 

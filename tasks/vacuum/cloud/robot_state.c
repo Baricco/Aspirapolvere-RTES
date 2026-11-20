@@ -346,13 +346,11 @@ static char *build_json(const state_readings_t *readings) {
     cJSON_AddNumberToObject(safety, "max_v_forward", round_to(readings->alarm.max_v_forw, 3));
     cJSON_AddNumberToObject(safety, "max_v_backward", round_to(readings->alarm.max_v_backw, 3));
 
-    // lidar: solo i settori e la strada libera, non il giro intero
+    // lidar: solo la strada libera davanti e dietro, non il giro intero
     cJSON *lidar = cJSON_AddObjectToObject(root, "lidar");
     cJSON_AddBoolToObject(lidar, "valid", readings->scan.valid);
-    cJSON *sectors = cJSON_AddArrayToObject(lidar, "sector_distances_mm");
-    for (int i = 0; i < SECTOR_NUMBER; i++) cJSON_AddItemToArray(sectors, cJSON_CreateNumber(readings->scan.sector_distance[i]));
-    cJSON_AddNumberToObject(lidar, "corridor_front_mm", readings->scan.corridor_front_distance);
-    cJSON_AddNumberToObject(lidar, "corridor_back_mm", readings->scan.corridor_back_distance);
+    cJSON_AddNumberToObject(lidar, "corridor_front_mm", readings->scan.direction_free_distance[DIRECTION_FRONT]);
+    cJSON_AddNumberToObject(lidar, "corridor_back_mm", readings->scan.direction_free_distance[DIRECTION_BACK]);
 
     // batteria
     cJSON *battery = cJSON_AddObjectToObject(root, "battery");

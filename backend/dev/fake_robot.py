@@ -406,7 +406,7 @@ class FakeRobot:
                          "v": round(self.v, 3), "omega": round(self.omega, 3), "valid": not self.is_position_lost},
             "map": map_state,
             "safety": {"errors": [], "max_v_forward": 0.5, "max_v_backward": 0.5},
-            "lidar": {"valid": True, "sector_distances_mm": [1500] * 12, "corridor_front_mm": front,
+            "lidar": {"valid": True, "corridor_front_mm": front,
                       "corridor_back_mm": 1200},
             "battery": {"voltage": round(13.8 + 2.8 * self.battery_percent / 100, 2),
                         "percent": int(self.battery_percent),

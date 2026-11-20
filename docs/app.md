@@ -85,7 +85,7 @@ JSON di circa 1,6 KB (circa 750 byte con gzip). Contiene solo dati che i task e 
  "map":{"state":"normal","save_failed":false,"started_on_base":true,"file_crc":"9c41e2a0",
         "forbidden_zones":[{"x":-0.365,"y":-0.22,"w":0.26,"h":0.44}],"virtual_walls":[{"x1":2.2,"y1":4.65,"x2":2.9,"y2":4.65}]},
  "safety":{"errors":["obstacle"],"max_v_forward":0.30,"max_v_backward":0.50},
- "lidar":{"valid":true,"sector_distances_mm":[0,0,0,0,0,0,0,0,0,0,0,0],"corridor_front_mm":640,"corridor_back_mm":1200},
+ "lidar":{"valid":true,"corridor_front_mm":640,"corridor_back_mm":1200},
  "battery":{"voltage":15.1,"percent":78,"level":"ok","charging":false,"charge_complete":false,"temperature_c":31},
  "motors":{"side_brush":60,"main_brush":60,"suction_rpm":12000},
  "driver":{"phase":"ready","fault":null,"limits":[],"on_base":false,"lifted":false,

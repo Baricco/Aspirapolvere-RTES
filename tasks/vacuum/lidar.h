@@ -6,8 +6,9 @@
 #include "driver/driver.h"
 
 
-#define SECTOR_NUMBER 12            // numero di settori in cui si divide la scansione del robot
-#define DIRECTION_NUMBER 12         // direzioni in cui si calcola la strada libera, una ogni 360/DIRECTION_NUMBER gradi
+#define DIRECTION_NUMBER 72         // direzioni in cui si calcola la strada libera, una ogni 360/DIRECTION_NUMBER gradi (5°)
+#define DIRECTION_FRONT 0           // indice della direzione davanti al robot
+#define DIRECTION_BACK (DIRECTION_NUMBER / 2)   // indice della direzione dietro al robot
 #define RELIABILITY_FACTOR 0.25     // percentuale minima di punti validi affinchè la scansione sia valida
 #define ROBOT_RADIUS 174.5          // raggio del robot in mm
 
@@ -30,17 +31,10 @@ typedef struct {
     uint32_t num;                   // numero della scansione
     int64_t scan_end_t;             // timestamp di fine scansione
     bool valid;                     // indica se la scansione ha abbastanza punti letti correttamente
-    
-    // si prende la circonferenza tracciata dal lidar e la si scompone in 12 distanze
-    uint16_t sector_distance[SECTOR_NUMBER];    // distanze in mm divisa per settori
-    
-    // la strada che il robot può fare dritto in avanti e all'indietro 
-    // prima di toccare un ostacolo, espressa in mm
-    uint16_t corridor_front_distance;
-    uint16_t corridor_back_distance;
 
     // la strada che il robot può fare dritto in ogni direzione prima di toccare un ostacolo, espressa in mm:
-    // la direzione 0 è davanti, le altre in senso antiorario ogni 360/DIRECTION_NUMBER gradi
+    // la direzione DIRECTION_FRONT è davanti, le altre in senso antiorario ogni 360/DIRECTION_NUMBER gradi,
+    // DIRECTION_BACK è dietro
     uint16_t direction_free_distance[DIRECTION_NUMBER];
 
     // Campi Specifici per la pulizia dei bordi

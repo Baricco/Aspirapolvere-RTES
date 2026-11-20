@@ -118,7 +118,7 @@ int main(void) {
               .name = "task_lidar",              // nome del task
               .cpu = 1,                          // su quale core gira
               .sporadic = 0,                    // task periodico
-              .period_ns = RT_MS(200),          // periodo in ms
+              .period_ns = RT_MS(100),          // periodo in ms: più corto di un giro del lidar (circa 167 ms), così ogni giro viene elaborato
               .job = job_lidar,                  // job da eseguire
        };
 

@@ -47,9 +47,9 @@
 #define PURSUIT_FAR_DISTANCE 1.0        // distanza dal robot, lungo il percorso, del punto lontano che decide la velocità, espressa in m
 #define STEER_CHECK_DISTANCE 0.30       // strada libera che serve verso il punto vicino per sterzare dritto lì, espressa in m
 #define STEER_MIN_FREE 0.10             // strada libera che serve in un'altra direzione per sterzare lì, espressa in m
-#define STEER_MAX_STEPS 3               // direzioni provate per lato, ognuna di 360/DIRECTION_NUMBER gradi in più
+#define STEER_MAX_ANGLE (M_PI / 2)      // scarto massimo dalla direzione del punto di mira, per lato, delle direzioni provate per sterzare, espresso in radianti (90°)
 #define STEER_FREE_CAP 1.0              // strada libera contata al massimo nel punteggio di una direzione: oltre, una direzione più lunga non vale di più, espressa in m
-#define STEER_ANGLE_PENALTY 0.30        // punteggio tolto a una direzione per ogni passo (360/DIRECTION_NUMBER gradi) di scarto da quella del punto di mira, espresso in m di strada libera
+#define STEER_ANGLE_PENALTY 0.01        // punteggio tolto a una direzione per ogni grado di scarto da quella del punto di mira, espresso in m di strada libera
 #define REVERSE_HYSTERESIS 0.17         // margine attorno ai 90 gradi prima di cambiare fra marcia avanti e retromarcia, espresso in rad
 #define LOOKAHEAD_MIN_CELLS 1           // celle del percorso fra il punto attuale e il punto di mira, con poca strada libera davanti
 #define LOOKAHEAD_MAX_CELLS 3           // celle del percorso fra il punto attuale e il punto di mira, con tanta strada libera davanti
@@ -2652,7 +2652,7 @@ static double calc_turn_since_scan(const int64_t scan_end_t, const movement_posi
 static uint32_t calc_lookahead_idx(const lidar_scan_data_t scan) {
 
     int max_cells = LOOKAHEAD_MAX_CELLS - nav_state.unlock_attempt;
-    int lookahead = scan.valid ? (int)(scan.direction_free_distance[0] / 1000.0 / NAV_MAP_CELL_SIZE) : LOOKAHEAD_MIN_CELLS;
+    int lookahead = scan.valid ? (int)(scan.direction_free_distance[DIRECTION_FRONT] / 1000.0 / NAV_MAP_CELL_SIZE) : LOOKAHEAD_MIN_CELLS;
     if (lookahead > max_cells) lookahead = max_cells;
     if (lookahead < LOOKAHEAD_MIN_CELLS) lookahead = LOOKAHEAD_MIN_CELLS;
 
@@ -2713,7 +2713,7 @@ static bool is_frontier_unobservable(const lidar_scan_data_t scan, const movemen
 }
 
 // funzione helper che restituisce la direzione in cui sterzare, rispetto al robot: rel se il lidar vede almeno need di
-// strada libera in quella direzione, altrimenti la direzione entro STEER_MAX_STEPS per lato con il punteggio migliore
+// strada libera in quella direzione, altrimenti la direzione entro STEER_MAX_ANGLE per lato con il punteggio migliore
 // (strada libera meno la penalità dello scarto da rel), rel se nessuna ha almeno STEER_MIN_FREE di strada
 static double calc_steer_direction(const lidar_scan_data_t scan, const movement_position_data_t cur_pos, const double rel, const double need) {
 
@@ -2727,15 +2727,16 @@ static double calc_steer_direction(const lidar_scan_data_t scan, const movement_
 
     // la strada verso il punto di mira non basta: fra le direzioni vicine (anche quella del punto, con la strada che ha)
     // vince quella con il punteggio migliore, cioè la strada libera (fino a STEER_FREE_CAP) meno STEER_ANGLE_PENALTY per
-    // ogni passo di scarto dal punto di mira. Serve almeno STEER_MIN_FREE di strada; a parità vince la più vicina al punto
+    // ogni grado di scarto dal punto di mira. Serve almeno STEER_MIN_FREE di strada; a parità vince la più vicina al punto
+    const int max_steps = (int)lround(STEER_MAX_ANGLE / step_angle);
     int best = -1;
     double best_score = 0;
-    for (int k = 0; k <= STEER_MAX_STEPS; k++) {
+    for (int k = 0; k <= max_steps; k++) {
         for (int side = 0; side < (k == 0 ? 1 : 2); side++) {
             int cur = side == 0 ? (dir + k) % DIRECTION_NUMBER : (dir - k + DIRECTION_NUMBER) % DIRECTION_NUMBER;
             double free = scan.direction_free_distance[cur] / 1000.0;
             if (free < STEER_MIN_FREE) continue;
-            double score = fmin(free, STEER_FREE_CAP) - STEER_ANGLE_PENALTY * k;
+            double score = fmin(free, STEER_FREE_CAP) - STEER_ANGLE_PENALTY * k * 360.0 / DIRECTION_NUMBER;
             if (best < 0 || score > best_score) {
                 best = cur;
                 best_score = score;
@@ -2796,7 +2797,7 @@ static bool is_strip_end_reached(const safety_alarm_t cur_alarm, const movement_
     // il robot si ferma se davanti c'è un ostacolo o se la sicurezza lo sta trattenendo
     lidar_scan_data_t scan = read_lidar();
 
-    return (scan.valid && scan.corridor_front_distance <= STRIP_END_FRONT_DISTANCE) || is_stalled(cur_alarm, cur_pos);
+    return (scan.valid && scan.direction_free_distance[DIRECTION_FRONT] <= STRIP_END_FRONT_DISTANCE) || is_stalled(cur_alarm, cur_pos);
 }
 
 

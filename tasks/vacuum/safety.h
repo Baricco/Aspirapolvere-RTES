@@ -40,7 +40,7 @@
 #define STOP_DISTANCE       0.01              // distanza dal bordo del robot alla quale la sicurezza porta la velocità in avanti a zero, espressa in metri
 #define SAFE_DECEL          1.0               // decelerazione con cui il robot frena davanti a un ostacolo, la rampa MAX_DECEL_V del movimento, espressa in m/s^2
 #define SAFE_TURN_MIN_OMEGA 0.05        // sotto questa velocità di rotazione il robot va dritto e conta solo la direzione davanti, espressa in rad/s
-#define SAFE_TURN_MAX_STEPS 3             // direzioni del lidar al massimo verso cui il robot sta girando, oltre quella davanti
+#define SAFE_TURN_MAX_ANGLE (M_PI / 2)    // angolo massimo, oltre la direzione davanti, verso cui si controlla la strada libera mentre il robot gira, espresso in radianti (90°)
 #define SAFE_DELAY          0.5               // ritardo fra la misura dell'ostacolo e l'inizio della frenata, espresso in s
 #define LIDAR_SCAN_MAX_AGE  RT_MS(500)        // età massima che può avere una scan del lidar prima di essere considerata invalida, espressa in nanosecondi
 
