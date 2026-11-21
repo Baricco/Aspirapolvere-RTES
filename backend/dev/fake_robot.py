@@ -141,8 +141,8 @@ class FakeRobot:
         self.paused_state = "follow_path"   # stato da riprendere dopo una pausa
         self.restart_pending = False        # un cambio di mappa chiede il "riavvio"
         self.important_change = True        # c'è qualcosa da mandare subito
-        self.wifi = {"mode": "station", "ssid": "Casa", "signal_dbm": -48, "ip": "192.168.1.40",
-                     "change": {"number": 0, "state": "none", "result": "none"}}
+        self.wifi = {"mode": "station", "ssid": "Casa", "signal_dbm": -48, "ip": "192.168.1.40", "saved_ssid": "Casa",
+                     "ap": {"on": False, "clients": 0}, "change": {"number": 0, "state": "none", "result": "none"}}
 
         # mappa
         side = config.FINE_MAP_CELL_NUMBER
@@ -600,7 +600,7 @@ class FakeRobot:
         with self.lock:
             if is_kept:
                 signal = next(network[3] for network in WIFI_NETWORKS if network[0] == ssid)
-                self.wifi.update(ssid=ssid, signal_dbm=signal)
+                self.wifi.update(ssid=ssid, signal_dbm=signal, saved_ssid=ssid)
             self.wifi["change"] = dict(self.wifi["change"], state="done", result=result, time=int(time.time()))
             self.important_change = True
 

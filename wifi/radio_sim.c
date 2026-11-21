@@ -10,7 +10,8 @@
 #include "radio.h"
 
 // Wi-Fi finto per le prove sul PC (rtes-wifi --simulate, docs/wifi.md sezione 12). Reti fisse con password e
-// comportamento noto; SIGUSR1 spegne e riaccende il router (prova del blackout e dell'alternanza). Variabili d'ambiente:
+// comportamento noto; SIGUSR1 spegne e riaccende il router, SIGUSR2 collega e scollega un telefono alla rete del robot.
+// Variabili d'ambiente:
 //   RTES_WIFI_SIM_SAVED  rete salvata all'avvio (default "Casa"; vuota = nessuna)
 //   RTES_SERVER_URL      se c'è, la prova del backend sulla rete "Casa" è vera (backend di sviluppo), altrimenti finta
 
@@ -47,10 +48,11 @@ static const sim_network_t NETWORKS[] = {
 #define NETWORKS_NUM ((int)(sizeof NETWORKS / sizeof NETWORKS[0]))
 
 static atomic_bool is_router_on = true;     // SIGUSR1 lo cambia
+static atomic_bool is_phone_on;             // SIGUSR2 lo cambia
 static char saved_ssid[WIFI_SSID_MAX + 1];  // rete salvata ("" = nessuna)
 static char trying_ssid[WIFI_SSID_MAX + 1]; // rete di un cambio in corso
 static char trying_password[WIFI_PASSWORD_MAX + 1];
-static bool is_station, is_connecting, is_ap;
+static bool is_station, is_ap;
 static const sim_network_t *current;        // rete a cui la stazione è collegata
 static int64_t connect_at_ms;               // la stazione si collega da questo istante
 static bool use_real_backend;
@@ -63,6 +65,11 @@ static void pause_ms(int ms) {
 static void toggle_router(int signal_number) {
     (void)signal_number;
     atomic_store(&is_router_on, !atomic_load(&is_router_on));
+}
+
+static void toggle_phone(int signal_number) {
+    (void)signal_number;
+    atomic_store(&is_phone_on, !atomic_load(&is_phone_on));
 }
 
 // la rete più forte con questo nome, se il router è acceso
@@ -79,17 +86,18 @@ static bool sim_init(void) {
     const char *saved = getenv(SIM_SAVED_ENV);
     snprintf(saved_ssid, sizeof saved_ssid, "%s", saved != NULL ? saved : SIM_SAVED_DEFAULT);
     signal(SIGUSR1, toggle_router);
+    signal(SIGUSR2, toggle_phone);
 
     use_real_backend = getenv(SERVER_URL_ENV) != NULL;
     if (use_real_backend && !init_backend_check()) LOG("manca il token: la prova del backend vera fallirà");
 
-    LOG("rete salvata «%s»; kill -USR1 %d spegne e riaccende il router", saved_ssid, (int)getpid());
+    LOG("rete salvata «%s»; kill -USR1 %d spegne e riaccende il router, kill -USR2 %d collega e scollega un telefono",
+        saved_ssid, (int)getpid(), (int)getpid());
     return true;
 }
 
-static bool sim_start_station(bool connecting) {
+static bool sim_start_station(void) {
     is_station = true;
-    is_connecting = connecting;
     current = NULL;
     connect_at_ms = now_ms() + scaled_ms(SIM_ASSOC_S + SIM_DHCP_S);
     return true;
@@ -113,7 +121,7 @@ static void sim_stop_ap(void) {
 
 static void sim_poll(void) {
 
-    if (!is_station || !is_connecting || trying_ssid[0] != '\0') return;
+    if (!is_station || trying_ssid[0] != '\0') return;
 
     // la stazione segue la rete salvata: si collega dopo un po', cade se il router si spegne
     const sim_network_t *network = find_network(saved_ssid);
@@ -130,11 +138,6 @@ static bool sim_get_link(wifi_link_t *link) {
 
     memset(link, 0, sizeof *link);
 
-    if (is_ap) {
-        snprintf(link->ssid, sizeof link->ssid, "%s", WIFI_AP_SSID);
-        snprintf(link->ip, sizeof link->ip, "%s", WIFI_AP_ADDRESS);
-        return false;
-    }
     if (!is_station || current == NULL) return false;
 
     // durante un cambio la rete nuova dà l'indirizzo solo se ha DHCP
@@ -149,7 +152,12 @@ static bool sim_get_link(wifi_link_t *link) {
     return true;
 }
 
-static bool sim_has_saved_network(void) {
+static int sim_get_ap_clients(void) {
+    return is_ap && atomic_load(&is_phone_on) ? 1 : 0;
+}
+
+static bool sim_get_saved_ssid(char *ssid, size_t size) {
+    snprintf(ssid, size, "%s", saved_ssid);
     return saved_ssid[0] != '\0';
 }
 
@@ -231,7 +239,8 @@ const radio_t radio_sim = {
     .stop_ap = sim_stop_ap,
     .poll = sim_poll,
     .get_link = sim_get_link,
-    .has_saved_network = sim_has_saved_network,
+    .get_ap_clients = sim_get_ap_clients,
+    .get_saved_ssid = sim_get_saved_ssid,
     .scan = sim_scan,
     .try_network_begin = sim_try_network_begin,
     .try_network_wait = sim_try_network_wait,

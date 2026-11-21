@@ -62,9 +62,10 @@
 #define WIFI_AP_NETMASK             "255.255.255.0"
 #define WIFI_AP_DHCP_FIRST          "192.168.5.10"                  // indirizzi dati ai telefoni
 #define WIFI_AP_DHCP_LAST           "192.168.5.50"
-#define WIFI_AP_CHANNEL             6
+#define WIFI_AP_CHANNEL             6                               // canale della rete del robot senza un collegamento precedente
 #define WIFI_HTTP_PORT              80                              // server HTTP locale, solo con la rete del robot accesa
-#define WIFI_INTERFACE              "wlan0"
+#define WIFI_INTERFACE              "wlan0"                         // collegamento alla rete salvata o nuova
+#define WIFI_AP_INTERFACE           "wlan1"                         // rete del robot
 #define WIFI_SUPPLICANT_CONF        "/etc/wifi/wpa_supplicant.conf" // la rete salvata
 #define WIFI_SUPPLICANT_CTRL_DIR    "/etc/wifi/sockets"             // socket di controllo di wpa_supplicant
 #define WIFI_RUN_DIR                "/tmp/rtes-wifi"                // file di lavoro di rtes-wifi (configurazioni generate, socket)
@@ -76,12 +77,12 @@
 #define WIFI_DNSMASQ_BIN            "/usr/sbin/dnsmasq"
 #define WIFI_IFCONFIG_BIN           "/sbin/ifconfig"
 
-// tempi dei modi (docs/wifi.md, sezione 4)
-#define WIFI_CONNECT_TIMEOUT_S      30      // all'avvio (e dopo un cambio fallito) senza indirizzo per tanto: rete del robot
-#define WIFI_LOST_TIMEOUT_S         30      // rete persa durante il funzionamento per tanto: rete del robot
-#define WIFI_AP_DURATION_S          300     // rete del robot accesa per tanto, poi si riprova la rete salvata
-#define WIFI_AP_RETRY_S             60      // tentativo sulla rete salvata fra due periodi della rete del robot
-#define WIFI_AP_SCAN_S              5       // con la rete del robot accesa, "Aggiorna" la spegne al massimo per tanto per cercare le reti
+// tempi della rete del robot (docs/wifi.md, sezione 4)
+#define WIFI_LOST_TIMEOUT_S         30      // wlan0 senza indirizzo per tanto (all'avvio o dopo): rete del robot accesa
+#define WIFI_RETRY_SCAN_S           10      // wlan0 senza rete: una ricerca della rete salvata ogni tanto
+#define WIFI_AP_IDLE_S              30      // nessun telefono collegato per tanto: si può spegnere la rete del robot
+#define WIFI_BACKEND_RECHECK_S      30      // rete del robot senza telefoni: prova del backend ogni tanto
+#define WIFI_AP_INACTIVITY_S        60      // telefono senza risposta per tanto: hostapd lo considera uscito
 
 // tempi del cambio di rete e delle scansioni (docs/wifi.md, sezioni 5 e 6)
 #define WIFI_SCAN_TIMEOUT_S         8       // attesa massima dei risultati di una scansione

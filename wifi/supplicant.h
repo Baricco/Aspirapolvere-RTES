@@ -1,10 +1,11 @@
 #ifndef WIFI_SUPPLICANT_H
 #define WIFI_SUPPLICANT_H
 
-// Socket di controllo di wpa_supplicant (lo stesso protocollo di wpa_cli): comandi di testo come "STATUS" o
-// "ADD_NETWORK" su un socket Unix a datagrammi in WIFI_SUPPLICANT_CTRL_DIR/<interfaccia>. Due collegamenti:
+// Socket di controllo di wpa_supplicant e di hostapd (lo stesso protocollo di wpa_cli e hostapd_cli): comandi di testo
+// come "STATUS" o "ADD_NETWORK" su un socket Unix a datagrammi in <cartella di controllo>/<interfaccia>. Due
+// collegamenti:
 //   - comandi: richiesta e risposta;
-//   - eventi:  dopo "ATTACH" wpa_supplicant ci manda gli eventi ("<3>CTRL-EVENT-CONNECTED ...").
+//   - eventi:  dopo "ATTACH" il programma ci manda gli eventi ("<3>CTRL-EVENT-CONNECTED ...", "<3>AP-STA-CONNECTED ...").
 
 #include <stdbool.h>
 #include <stddef.h>
@@ -17,8 +18,8 @@ typedef struct {
 
 #define SUPPLICANT_LINK_CLOSED { .fd = -1 }
 
-// apre il collegamento (is_events: anche ATTACH). Ritorna false se wpa_supplicant non c'è ancora
-bool supplicant_open(supplicant_link_t *link, bool is_events);
+// apre il collegamento al socket ctrl_path (is_events: anche ATTACH). Ritorna false se il programma non c'è ancora
+bool supplicant_open(supplicant_link_t *link, const char *ctrl_path, bool is_events);
 void supplicant_close(supplicant_link_t *link);
 
 // manda un comando e scrive la risposta in reply (terminata da '\0'). Ritorna false se non risponde

@@ -75,8 +75,11 @@ const String robotLocalUrl = 'http://192.168.5.1';
 /// Attesa massima della risposta del robot sulla sua rete quando si controlla se il telefono ci è collegato.
 const Duration robotLocalProbeTimeout = Duration(seconds: 2);
 
-/// Attesa massima di una scansione: dal backend fino a 10 s, sulla rete del robot con "Aggiorna" anche di più.
-const Duration wifiScanTimeout = Duration(seconds: 40);
+/// Attesa massima di una scansione sulla rete del robot (il robot la fa durare al massimo 8 s).
+const Duration wifiScanTimeout = Duration(seconds: 20);
+
+/// Sulla rete del robot, controlli senza risposta di fila prima di dire che Maurice non risponde.
+const int wifiLocalMisses = 3;
 
 /// Dopo un cambio di rete, se il robot non torna online entro questo tempo l'app lo dice (docs/wifi.md, sezione 13).
 const Duration wifiChangeWait = Duration(minutes: 3);

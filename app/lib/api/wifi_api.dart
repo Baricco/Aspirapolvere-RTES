@@ -12,8 +12,8 @@ import '../models/wifi.dart';
 import 'api_client.dart';
 
 abstract class WifiApi {
-  /// Reti vicine. refresh: con la rete del robot accesa la spegne per poco e cerca di nuovo.
-  Future<WifiScan> scan({bool refresh = false});
+  /// Reti vicine.
+  Future<WifiScan> scan();
 
   /// Cambio di rete: ritorna il numero del cambio; l'esito arriva poi nello stato del Wi-Fi.
   Future<int> connect(String ssid, bool isProtected, String password);
@@ -29,8 +29,8 @@ class BackendWifiApi implements WifiApi {
   final ApiClient api;
 
   @override
-  Future<WifiScan> scan({bool refresh = false}) async => WifiScan.fromJson(
-      await api.getJson('/api/robot/wifi/networks', query: {if (refresh) 'refresh': '1'}) as Map<String, dynamic>);
+  Future<WifiScan> scan() async =>
+      WifiScan.fromJson(await api.getJson('/api/robot/wifi/networks') as Map<String, dynamic>);
 
   @override
   Future<int> connect(String ssid, bool isProtected, String password) async {
@@ -110,8 +110,8 @@ class LocalWifiApi implements WifiApi {
   }
 
   @override
-  Future<WifiScan> scan({bool refresh = false}) async =>
-      WifiScan.fromJson(await _request('GET', '/api/wifi/networks${refresh ? '?refresh=1' : ''}') as Map<String, dynamic>);
+  Future<WifiScan> scan() async =>
+      WifiScan.fromJson(await _request('GET', '/api/wifi/networks') as Map<String, dynamic>);
 
   @override
   Future<int> connect(String ssid, bool isProtected, String password) async {

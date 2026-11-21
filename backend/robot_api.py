@@ -297,9 +297,8 @@ def wifi_password_problem(security, password):
 @robot_blueprint.get("/wifi/networks")
 @require_session
 def wifi_networks():
-    """Reti Wi-Fi vicine viste dal robot (docs/wifi.md, sezione 6). Con refresh=1 e la rete del robot accesa la spegne
-    per poco per cercare di nuovo (ma allora il robot è offline e l'app parla con lui direttamente)."""
-    return command_response("wifi_scan", {"refresh": request.args.get("refresh") == "1"})
+    """Reti Wi-Fi vicine viste dal robot (docs/wifi.md, sezione 6)."""
+    return command_response("wifi_scan")
 
 
 @robot_blueprint.post("/wifi/connect")

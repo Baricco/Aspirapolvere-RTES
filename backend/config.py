@@ -29,8 +29,9 @@ SESSION_TOUCH_INTERVAL_S = 60        # last_used_at della sessione si riscrive a
 
 # --- comandi (sezione 5) ---
 COMMAND_TIMEOUT_S = 3                # attesa massima dell'esito di un comando: poi 503 o 504
-# comandi che aspettano di più (docs/wifi.md, sezione 7.3): la scansione delle reti dura fino a 8 s sul robot
-COMMAND_TIMEOUTS_S = {"wifi_scan": 10}
+# comandi che aspettano di più (docs/wifi.md, sezione 7.3): la scansione delle reti dura fino a 8 s sul robot, la
+# risposta a un cambio di rete fino a 6 s
+COMMAND_TIMEOUTS_S = {"wifi_scan": 10, "wifi_connect": 6}
 DEVICE_LONG_POLL_S = 25              # attesa massima di GET /api/device/commands
 
 # --- telecomando (sezione 6) ---

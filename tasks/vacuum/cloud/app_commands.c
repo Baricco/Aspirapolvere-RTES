@@ -279,10 +279,7 @@ static void run_wifi_command(const cJSON *command, bool is_scan, app_command_res
     cJSON *request = cJSON_CreateObject();
 
     if (is_scan) {
-        bool is_refresh = false;
-        read_bool(command, "refresh", &is_refresh);
         cJSON_AddStringToObject(request, "type", "scan");
-        cJSON_AddBoolToObject(request, "refresh", is_refresh);
     } else {
         const cJSON *ssid = cJSON_GetObjectItemCaseSensitive(command, "ssid");
         const cJSON *security = cJSON_GetObjectItemCaseSensitive(command, "security");

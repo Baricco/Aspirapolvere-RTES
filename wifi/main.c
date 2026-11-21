@@ -9,7 +9,7 @@
 // rtes-wifi: il Wi-Fi del robot (docs/wifi.md). Sul robot lo avvia /etc/init.d/rtes-wifi attraverso rtes-wifi-run.
 //   rtes-wifi              Wi-Fi vero (wpa_supplicant, udhcpc, hostapd, dnsmasq), serve root
 //   rtes-wifi --simulate   reti finte sul PC (radio_sim.c); variabili d'ambiente:
-//       RTES_WIFI_SIM_SCALE  scala dei tempi (per esempio 0.05: i 5 minuti della rete del robot diventano 15 s)
+//       RTES_WIFI_SIM_SCALE  scala dei tempi (per esempio 0.1: i 30 s senza indirizzo diventano 3 s)
 //       RTES_WIFI_HTTP_PORT  porta del server HTTP locale su 127.0.0.1 (default SIM_HTTP_PORT)
 //       RTES_WIFI_SOCKET     socket per il programma dei task (vale anche sul robot)
 

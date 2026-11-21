@@ -25,7 +25,7 @@
 #define RAD_TO_DEG              (180.0 / M_PI)
 #define FAULT_TEXT_MAX          96          // lunghezza massima del testo del guasto del driver
 #define WIFI_TEXT_MAX           768         // stato del Wi-Fi di rtes-wifi, in JSON
-#define WIFI_KEY_MAX            96          // le parti dello stato del Wi-Fi che, se cambiano, fanno partire lo stato subito
+#define WIFI_KEY_MAX            128         // le parti dello stato del Wi-Fi che, se cambiano, fanno partire lo stato subito
 
 // nomi degli stati della navigazione, nello stesso ordine di nav_state_t
 static const char *const NAV_STATE_NAMES[] = {
@@ -104,7 +104,7 @@ typedef struct {
     bool is_moving;                 // quando il robot si ferma parte ancora uno stato, con le velocità a zero
     bool is_brushes_on, is_suction_on;  // spazzole e aspirazione accese o spente
     int reposition_status;          // Riposiziona base (reposition_status_t): l'app ne aspetta l'esito
-    char wifi_key[WIFI_KEY_MAX];    // Wi-Fi: modo, rete, numero e fase dell'ultimo cambio (non il segnale, che cambia sempre)
+    char wifi_key[WIFI_KEY_MAX];    // Wi-Fi: modo, rete, rete del robot, telefoni, numero e fase dell'ultimo cambio (non il segnale, che cambia sempre)
 } important_state_t;
 
 // tutto quello che serve a costruire lo stato, letto una volta per ciclo
@@ -176,8 +176,12 @@ static void update_wifi(const state_readings_t *readings) {
         const cJSON *change = cJSON_GetObjectItemCaseSensitive(data, "change");
         const cJSON *number = cJSON_GetObjectItemCaseSensitive(change, "number");
         const cJSON *state = cJSON_GetObjectItemCaseSensitive(change, "state");
-        snprintf(robot_state.wifi_key, sizeof robot_state.wifi_key, "%s|%s|%d|%s",
+        const cJSON *ap = cJSON_GetObjectItemCaseSensitive(data, "ap");
+        const cJSON *clients = cJSON_GetObjectItemCaseSensitive(ap, "clients");
+        snprintf(robot_state.wifi_key, sizeof robot_state.wifi_key, "%s|%s|%d|%d|%d|%s",
                  cJSON_IsString(mode) ? mode->valuestring : "", cJSON_IsString(ssid) ? ssid->valuestring : "",
+                 cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(ap, "on")),
+                 cJSON_IsNumber(clients) ? (int)clients->valuedouble : 0,
                  cJSON_IsNumber(number) ? (int)number->valuedouble : 0, cJSON_IsString(state) ? state->valuestring : "");
     } else {
         robot_state.wifi_text[0] = '\0';

@@ -15,7 +15,8 @@
 #include "radio.h"
 #include "supplicant.h"
 
-// Wi-Fi vero del robot (docs/wifi.md, sezioni 4-6). Le funzioni le chiama solo il thread del gestore.
+// Wi-Fi vero del robot (docs/wifi.md, sezioni 2-6): wlan0 collegato alla rete salvata, wlan1 rete del robot. Le
+// funzioni le chiama solo il thread del gestore.
 
 #define STOP_TIMEOUT_MS         2000    // attesa della chiusura di un processo figlio dopo SIGTERM
 #define COMMAND_TIMEOUT_MS      3000    // attesa massima di ifconfig
@@ -26,19 +27,29 @@
 #define EVENT_WAIT_MS           200     // attesa massima di un evento mentre si aspetta un collegamento o una scansione
 #define REPLY_MAX               16384   // risposta più lunga di wpa_supplicant (SCAN_RESULTS)
 #define DHCP_LEASE              "1h"    // durata degli indirizzi dati dalla rete del robot
+#define AP_CLIENTS_MAX          16      // telefoni contati sulla rete del robot
+#define MAC_TEXT_MAX            18      // "aa:bb:cc:dd:ee:ff" più il terminatore
+#define SUPPLICANT_CTRL_PATH    WIFI_SUPPLICANT_CTRL_DIR "/" WIFI_INTERFACE
+#define HOSTAPD_CTRL_DIR        WIFI_RUN_DIR "/hostapd"
+#define HOSTAPD_CTRL_PATH       HOSTAPD_CTRL_DIR "/" WIFI_AP_INTERFACE
 
 #define LOG(...) do { fprintf(stderr, "rtes-wifi: " __VA_ARGS__); fputc('\n', stderr); } while (0)
 
 static pid_t supplicant_pid = NO_CHILD, dhcp_pid = NO_CHILD, hostapd_pid = NO_CHILD, dnsmasq_pid = NO_CHILD;
 static supplicant_link_t commands = SUPPLICANT_LINK_CLOSED, events = SUPPLICANT_LINK_CLOSED;
+static supplicant_link_t ap_events = SUPPLICANT_LINK_CLOSED;
 
 static bool is_station;             // wpa_supplicant deve girare
-static bool is_station_connecting;  // false: rete salvata disabilitata (solo scansioni)
 static bool is_ap;                  // la rete del robot deve essere accesa
 static bool is_completed;           // wpa_supplicant collegato a una rete
-static bool is_scan_ready;          // arrivato CTRL-EVENT-SCAN-RESULTS
+static bool is_scan_ready;          // arrivato CTRL-EVENT-SCAN-RESULTS (per la scansione chiesta)
+static bool has_new_results;        // arrivato CTRL-EVENT-SCAN-RESULTS (per il canale della rete del robot)
 static bool is_wrong_key;           // password sbagliata per la rete nuova
 static int new_network_id = -1;     // rete nuova di un cambio in corso
+static int ap_channel;              // canale della rete del robot accesa
+static int wanted_channel;          // canale della rete che wlan0 usa o cerca, 0 se non si sa
+static char clients[AP_CLIENTS_MAX][MAC_TEXT_MAX];  // telefoni collegati alla rete del robot
+static int client_count;
 static int64_t child_retry_ms;      // un figlio chiuso da solo non riparte prima di questo istante
 
 static char reply[REPLY_MAX];
@@ -51,9 +62,16 @@ static void pause_ms(int ms) {
 }
 
 // toglie l'indirizzo IPv4 dall'interfaccia
-static void clear_address(void) {
-    char *argv[] = { WIFI_IFCONFIG_BIN, WIFI_INTERFACE, "0.0.0.0", NULL };
+static void clear_address(char *interface) {
+    char *argv[] = { WIFI_IFCONFIG_BIN, interface, "0.0.0.0", NULL };
     run_command(argv, COMMAND_TIMEOUT_MS);
+}
+
+// canale di una frequenza a 2,4 GHz, 0 se non lo è
+static int channel_of(int frequency_mhz) {
+    if (frequency_mhz == 2484) return 14;
+    if (frequency_mhz >= 2412 && frequency_mhz <= 2472) return (frequency_mhz - 2407) / 5;
+    return 0;
 }
 
 // indirizzo IPv4 dell'interfaccia in ip (vuoto se non c'è). Ritorna true se c'è
@@ -115,7 +133,7 @@ static void start_dhcp(void) {
 // toglie il collegamento in corso: udhcpc fermo, nessun indirizzo
 static void drop_connection(void) {
     stop_child(&dhcp_pid, STOP_TIMEOUT_MS);
-    clear_address();
+    clear_address(WIFI_INTERFACE);
     is_completed = false;
 }
 
@@ -134,6 +152,7 @@ static void handle_event(const char *event) {
         is_completed = false;
     } else if (strncmp(text, "CTRL-EVENT-SCAN-RESULTS", 23) == 0) {
         is_scan_ready = true;
+        has_new_results = true;
     } else if (strncmp(text, "CTRL-EVENT-SSID-TEMP-DISABLED", 29) == 0 && strstr(text, "reason=WRONG_KEY") != NULL) {
         char id[16];
         snprintf(id, sizeof id, "id=%d ", new_network_id);
@@ -152,18 +171,17 @@ static void read_events(int64_t timeout_ms) {
 
 // --- Stazione ---
 
-static bool real_start_station(bool is_connecting) {
+static bool real_start_station(void) {
 
     char *argv[] = { WIFI_SUPPLICANT_BIN, "-i", WIFI_INTERFACE, "-D", "nl80211", "-c", WIFI_SUPPLICANT_CONF, NULL };
     supplicant_pid = start_child(argv);
     is_station = true;
-    is_station_connecting = is_connecting;
     is_completed = false;
 
     int64_t end = now_ms() + SUPPLICANT_START_MS;
     while (now_ms() < end) {
-        if (supplicant_open(&commands, false)) {
-            if (supplicant_open(&events, true)) break;
+        if (supplicant_open(&commands, SUPPLICANT_CTRL_PATH, false)) {
+            if (supplicant_open(&events, SUPPLICANT_CTRL_PATH, true)) break;
             supplicant_close(&commands);
         }
         pause_ms(START_STEP_MS);
@@ -173,8 +191,10 @@ static bool real_start_station(bool is_connecting) {
         return false;
     }
 
-    // solo scansioni: la rete salvata non si collega (non si salva mai in questo stato)
-    if (!is_connecting) supplicant_ok(&commands, "DISABLE_NETWORK all");
+    // senza rete, una ricerca della rete salvata ogni WIFI_RETRY_SCAN_S
+    char command[32];
+    snprintf(command, sizeof command, "SCAN_INTERVAL %d", WIFI_RETRY_SCAN_S);
+    if (!supplicant_ok(&commands, command)) LOG("%s non accettato", command);
     return true;
 }
 
@@ -183,7 +203,7 @@ static void real_stop_station(void) {
     supplicant_close(&events);
     stop_child(&dhcp_pid, STOP_TIMEOUT_MS);
     stop_child(&supplicant_pid, STOP_TIMEOUT_MS);
-    clear_address();
+    clear_address(WIFI_INTERFACE);
     is_station = false;
     is_completed = false;
 }
@@ -204,10 +224,14 @@ static bool real_start_ap(void) {
 
     char text[1024];
 
+    ap_channel = wanted_channel != 0 ? wanted_channel : WIFI_AP_CHANNEL;
+    client_count = 0;
+
     snprintf(text, sizeof text,
-             "interface=%s\ndriver=nl80211\nssid=%s\nhw_mode=g\nchannel=%d\nignore_broadcast_ssid=0\nauth_algs=1\n"
+             "interface=%s\ndriver=nl80211\nctrl_interface=%s\nssid=%s\nhw_mode=g\nchannel=%d\n"
+             "ignore_broadcast_ssid=0\nauth_algs=1\nap_max_inactivity=%d\n"
              "wpa=2\nwpa_passphrase=%s\nwpa_key_mgmt=WPA-PSK\nrsn_pairwise=CCMP\n",
-             WIFI_INTERFACE, WIFI_AP_SSID, WIFI_AP_CHANNEL, WIFI_AP_PASSWORD);
+             WIFI_AP_INTERFACE, HOSTAPD_CTRL_DIR, WIFI_AP_SSID, ap_channel, WIFI_AP_INACTIVITY_S, WIFI_AP_PASSWORD);
     bool ok = write_private_file(WIFI_RUN_DIR "/hostapd.conf", text);
 
     // solo DHCP: niente DNS (port=0), niente gateway e niente DNS dati ai telefoni (option 3 e 6 vuote), così il
@@ -215,7 +239,7 @@ static bool real_start_ap(void) {
     snprintf(text, sizeof text,
              "interface=%s\nbind-interfaces\nport=0\nuser=root\ndhcp-authoritative\n"
              "dhcp-range=%s,%s,%s,%s\ndhcp-option=3\ndhcp-option=6\ndhcp-leasefile=%s/dnsmasq.leases\n",
-             WIFI_INTERFACE, WIFI_AP_DHCP_FIRST, WIFI_AP_DHCP_LAST, WIFI_AP_NETMASK, DHCP_LEASE, WIFI_RUN_DIR);
+             WIFI_AP_INTERFACE, WIFI_AP_DHCP_FIRST, WIFI_AP_DHCP_LAST, WIFI_AP_NETMASK, DHCP_LEASE, WIFI_RUN_DIR);
     ok = write_private_file(WIFI_RUN_DIR "/dnsmasq.conf", text) && ok;
 
     if (!ok) {
@@ -227,21 +251,110 @@ static bool real_start_ap(void) {
     hostapd_pid = start_child(hostapd_argv);
     pause_ms(HOSTAPD_SETTLE_MS);
 
-    char *ifconfig_argv[] = { WIFI_IFCONFIG_BIN, WIFI_INTERFACE, WIFI_AP_ADDRESS, "netmask", WIFI_AP_NETMASK, "up", NULL };
+    char *ifconfig_argv[] = { WIFI_IFCONFIG_BIN, WIFI_AP_INTERFACE, WIFI_AP_ADDRESS, "netmask", WIFI_AP_NETMASK, "up", NULL };
     run_command(ifconfig_argv, COMMAND_TIMEOUT_MS);
 
     char *dnsmasq_argv[] = { WIFI_DNSMASQ_BIN, "-k", "-C", WIFI_RUN_DIR "/dnsmasq.conf", NULL };
     dnsmasq_pid = start_child(dnsmasq_argv);
 
     is_ap = true;
+    LOG("rete del robot sul canale %d", ap_channel);
     return hostapd_pid != NO_CHILD && dnsmasq_pid != NO_CHILD;
 }
 
 static void real_stop_ap(void) {
+    supplicant_close(&ap_events);
     stop_child(&dnsmasq_pid, STOP_TIMEOUT_MS);
     stop_child(&hostapd_pid, STOP_TIMEOUT_MS);
-    clear_address();
+    clear_address(WIFI_AP_INTERFACE);
+    char *argv[] = { WIFI_IFCONFIG_BIN, WIFI_AP_INTERFACE, "down", NULL };
+    run_command(argv, COMMAND_TIMEOUT_MS);
     is_ap = false;
+    client_count = 0;
+}
+
+// legge un evento di hostapd e aggiorna i telefoni collegati
+static void handle_ap_event(const char *event) {
+
+    const char *text = event[0] == '<' && strchr(event, '>') ? strchr(event, '>') + 1 : event;
+    bool is_connected = strncmp(text, "AP-STA-CONNECTED ", 17) == 0;
+    bool is_disconnected = strncmp(text, "AP-STA-DISCONNECTED ", 20) == 0;
+    if (!is_connected && !is_disconnected) return;
+
+    char mac[MAC_TEXT_MAX];
+    snprintf(mac, sizeof mac, "%.17s", strchr(text, ' ') + 1);
+
+    int found = -1;
+    for (int i = 0; i < client_count; i++) {
+        if (strcmp(clients[i], mac) == 0) found = i;
+    }
+    if (is_connected && found < 0 && client_count < AP_CLIENTS_MAX) {
+        snprintf(clients[client_count++], MAC_TEXT_MAX, "%s", mac);
+    } else if (is_disconnected && found >= 0) {
+        memmove(clients[found], clients[--client_count], MAC_TEXT_MAX);
+    }
+    LOG("telefono %s %s: %d collegati", mac, is_connected ? "collegato" : "uscito", client_count);
+}
+
+// --- Canale della rete del robot ---
+
+// SSID (come lo scrive wpa_supplicant) della rete che wlan0 usa o cerca: la prima non disabilitata. Ritorna false se
+// non ce n'è
+static bool read_wanted_ssid(char *ssid, size_t size) {
+
+    char list[2048];
+    if (!supplicant_command(&commands, "LIST_NETWORKS", list, sizeof list)) return false;
+
+    // righe "id\tssid\tbssid\tflag", la prima è l'intestazione
+    char *rest = list;
+    char *line = strsep(&rest, "\n");
+    while ((line = strsep(&rest, "\n")) != NULL) {
+        char *fields[4];
+        int count = 0;
+        while (count < 4 && (fields[count] = strsep(&line, "\t")) != NULL) count++;
+        if (count >= 2 && (count < 4 || strstr(fields[3], "[DISABLED]") == NULL)) {
+            snprintf(ssid, size, "%s", fields[1]);
+            return true;
+        }
+    }
+    return false;
+}
+
+// canale della rete che wlan0 cerca nei risultati dell'ultima scansione (punto di accesso più forte)
+static void read_wanted_channel_from_scan(void) {
+
+    char wanted[4 * WIFI_SSID_MAX + 1];
+    if (!read_wanted_ssid(wanted, sizeof wanted)) return;
+    if (!supplicant_command(&commands, "SCAN_RESULTS", reply, sizeof reply)) return;
+
+    // righe "bssid\tfrequenza\tsegnale\tflag\tssid", la prima è l'intestazione
+    int best_signal = -1000;
+    char *rest = reply;
+    char *line = strsep(&rest, "\n");
+    while ((line = strsep(&rest, "\n")) != NULL) {
+        char *fields[5];
+        int count = 0;
+        while (count < 5 && (fields[count] = strsep(&line, "\t")) != NULL) count++;
+        if (count < 5 || strcmp(fields[4], wanted) != 0 || atoi(fields[2]) <= best_signal) continue;
+        int channel = channel_of(atoi(fields[1]));
+        if (channel == 0) continue;
+        best_signal = atoi(fields[2]);
+        wanted_channel = channel;
+    }
+}
+
+// rete del robot riaccesa sul canale della rete che wlan0 usa o cerca, se è diverso
+static void follow_wanted_channel(void) {
+
+    if (has_new_results && is_station) {
+        has_new_results = false;
+        read_wanted_channel_from_scan();
+    }
+    if (is_ap && wanted_channel != 0 && wanted_channel != ap_channel) {
+        LOG("la rete cercata è sul canale %d: sposto la rete del robot", wanted_channel);
+        real_stop_ap();
+        real_start_ap();
+    }
 }
 
 // --- Giro del gestore ---
@@ -257,7 +370,7 @@ static void real_poll(void) {
             supplicant_close(&commands);
             supplicant_close(&events);
             stop_child(&dhcp_pid, STOP_TIMEOUT_MS);
-            real_start_station(is_station_connecting);
+            real_start_station();
         }
         read_events(0);
         if (is_completed && !is_child_running(&dhcp_pid)) start_dhcp();
@@ -271,17 +384,19 @@ static void real_poll(void) {
             real_start_ap();
         }
     }
+
+    if (is_ap) {
+        if (ap_events.fd < 0) supplicant_open(&ap_events, HOSTAPD_CTRL_PATH, true);
+        char event[256];
+        while (supplicant_event(&ap_events, event, sizeof event, 0)) handle_ap_event(event);
+    }
+
+    follow_wanted_channel();
 }
 
 static bool real_get_link(wifi_link_t *link) {
 
     memset(link, 0, sizeof *link);
-
-    if (is_ap) {
-        snprintf(link->ssid, sizeof link->ssid, "%s", WIFI_AP_SSID);
-        snprintf(link->ip, sizeof link->ip, "%s", WIFI_AP_ADDRESS);
-        return false;
-    }
 
     // collegato = wpa_supplicant collegato a una rete E un indirizzo. Solo l'indirizzo non basta: quando la rete cade
     // (hotspot spento, router spento) l'indirizzo dato dal router resta sull'interfaccia finché scade, anche un'ora
@@ -291,6 +406,9 @@ static bool real_get_link(wifi_link_t *link) {
                    supplicant_value(reply, "wpa_state", value, sizeof value) && strcmp(value, "COMPLETED") == 0;
     if (!is_completed) return false;
 
+    if (supplicant_value(reply, "freq", value, sizeof value) && channel_of(atoi(value)) != 0) {
+        wanted_channel = channel_of(atoi(value));
+    }
     if (supplicant_value(reply, "ssid", value, sizeof value)) decode_ssid(value, link->ssid, sizeof link->ssid);
     if (supplicant_command(&commands, "SIGNAL_POLL", reply, sizeof reply) &&
         supplicant_value(reply, "RSSI", value, sizeof value)) {
@@ -299,16 +417,48 @@ static bool real_get_link(wifi_link_t *link) {
     return read_address(link->ip, sizeof link->ip);
 }
 
-static bool real_has_saved_network(void) {
+static int real_get_ap_clients(void) {
+    return is_ap ? client_count : 0;
+}
+
+// riporta l'SSID scritto da SAVE_CONFIG ai byte veri: fra virgolette, oppure in esadecimale
+static void decode_saved_ssid(const char *value, char *ssid, size_t size) {
+
+    size_t n = 0;
+
+    if (value[0] == '"') {
+        const char *end = strrchr(value + 1, '"');
+        size_t length = end != NULL ? (size_t)(end - value - 1) : strlen(value + 1);
+        n = length < size - 1 ? length : size - 1;
+        memcpy(ssid, value + 1, n);
+    } else {
+        for (const char *s = value; s[0] && s[1] && n + 1 < size; s += 2) {
+            char hex[3] = { s[0], s[1], '\0' };
+            ssid[n++] = (char)strtol(hex, NULL, 16);
+        }
+    }
+    ssid[n] = '\0';
+}
+
+static bool real_get_saved_ssid(char *ssid, size_t size) {
+
+    ssid[0] = '\0';
 
     // il file salvato, non la memoria di wpa_supplicant: durante un cambio la rete nuova c'è ma non è salvata
     FILE *f = fopen(WIFI_SUPPLICANT_CONF, "r");
     if (f == NULL) return false;
 
     char line[256];
-    bool found = false;
+    bool is_in_network = false, found = false;
     while (!found && fgets(line, sizeof line, f) != NULL) {
-        found = strstr(line, "network={") != NULL;
+        line[strcspn(line, "\r\n")] = '\0';
+        const char *text = line + strspn(line, " \t");
+        if (strncmp(text, "network={", 9) == 0) {
+            is_in_network = true;
+        } else if (is_in_network && strncmp(text, "ssid=", 5) == 0) {
+            decode_saved_ssid(text + 5, ssid, size);
+            found = true;
+        }
     }
     fclose(f);
     return found;
@@ -326,7 +476,7 @@ static bool parse_scan_line(char *line, wifi_network_t *network) {
     }
     const char *flags = fields[3];
 
-    // reti nascoste (nome vuoto) e sicurezze che il robot non usa: WEP, Enterprise, solo WPA3
+    // reti nascoste (nome vuoto), la rete del robot e sicurezze che il robot non usa: WEP, Enterprise, solo WPA3
     if (fields[4][0] == '\0') return false;
     if (strstr(flags, "WEP") != NULL) return false;
     bool has_psk = strstr(flags, "-PSK") != NULL;
@@ -334,7 +484,7 @@ static bool parse_scan_line(char *line, wifi_network_t *network) {
 
     memset(network, 0, sizeof *network);
     decode_ssid(fields[4], network->ssid, sizeof network->ssid);
-    if (network->ssid[0] == '\0' || !is_valid_utf8(network->ssid)) return false;
+    if (network->ssid[0] == '\0' || !is_valid_utf8(network->ssid) || strcmp(network->ssid, WIFI_AP_SSID) == 0) return false;
 
     network->signal_dbm = atoi(fields[2]);
     network->security = has_psk ? WIFI_SECURITY_WPA : WIFI_SECURITY_OPEN;
@@ -423,6 +573,7 @@ static wifi_assoc_t real_try_network_wait(int64_t timeout_ms) {
 
     while (now_ms() < end) {
         read_events(EVENT_WAIT_MS);
+        follow_wanted_channel();
         if (is_wrong_key) return WIFI_ASSOC_WRONG_KEY;
 
         // collegato, e alla rete nuova
@@ -510,7 +661,8 @@ static bool real_init(void) {
     run_command(argv, COMMAND_TIMEOUT_MS);
 
     // l'indirizzo lasciato dal Wi-Fi di prima farebbe credere per un attimo di essere già collegati
-    clear_address();
+    clear_address(WIFI_INTERFACE);
+    clear_address(WIFI_AP_INTERFACE);
 
     if (!init_backend_check()) LOG("manca il token del robot: la prova del backend fallirà sempre");
     return true;
@@ -524,7 +676,8 @@ const radio_t radio_real = {
     .stop_ap = real_stop_ap,
     .poll = real_poll,
     .get_link = real_get_link,
-    .has_saved_network = real_has_saved_network,
+    .get_ap_clients = real_get_ap_clients,
+    .get_saved_ssid = real_get_saved_ssid,
     .scan = real_scan,
     .try_network_begin = real_try_network_begin,
     .try_network_wait = real_try_network_wait,

@@ -18,14 +18,11 @@ class WifiTest(BackendTestCase):
         return self.client.get("/api/robot/log", headers=self.user).get_json()
 
     def test_scan_answers_with_the_networks_of_the_robot(self):
-        response, taken = self.command("/api/robot/wifi/networks?refresh=1", self.user, method="get",
+        response, taken = self.command("/api/robot/wifi/networks", self.user, method="get",
                                        robot_result={"ok": True, "data": NETWORKS})
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.get_json(), NETWORKS)
-        self.assertEqual((taken[0]["type"], taken[0]["refresh"]), ("wifi_scan", True))
-        response, taken = self.command("/api/robot/wifi/networks", self.user, method="get",
-                                       robot_result={"ok": True, "data": NETWORKS})
-        self.assertFalse(taken[0]["refresh"])
+        self.assertEqual(taken[0]["type"], "wifi_scan")
         self.assertEqual(self.log(), [])        # le scansioni non vanno nel registro
 
     def test_connect_passes_the_password_to_the_robot_but_never_to_the_log(self):

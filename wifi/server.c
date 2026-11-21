@@ -53,6 +53,12 @@ static cJSON *status_json(void) {
     else cJSON_AddNullToObject(json, "signal_dbm");
     if (status.link.ip[0]) cJSON_AddStringToObject(json, "ip", status.link.ip);
     else cJSON_AddNullToObject(json, "ip");
+    if (status.saved_ssid[0]) cJSON_AddStringToObject(json, "saved_ssid", status.saved_ssid);
+    else cJSON_AddNullToObject(json, "saved_ssid");
+
+    cJSON *ap = cJSON_AddObjectToObject(json, "ap");
+    cJSON_AddBoolToObject(ap, "on", status.is_ap_on);
+    cJSON_AddNumberToObject(ap, "clients", status.ap_clients);
 
     cJSON *change = cJSON_AddObjectToObject(json, "change");
     cJSON_AddNumberToObject(change, "number", status.change_number);
@@ -119,7 +125,7 @@ static bool parse_connect(const cJSON *body, wifi_connect_request_t *request, wi
 
 // esegue una richiesta (type: "status", "scan", "connect", "resting") e ritorna i dati della risposta, oppure NULL
 // con reply che dice perché
-static cJSON *run_request(const char *type, const cJSON *body, bool is_refresh, wifi_reply_t *reply) {
+static cJSON *run_request(const char *type, const cJSON *body, wifi_reply_t *reply) {
 
     memset(reply, 0, sizeof *reply);
     reply->ok = true;
@@ -129,7 +135,7 @@ static cJSON *run_request(const char *type, const cJSON *body, bool is_refresh, 
 
     if (strcmp(type, "scan") == 0) {
         static __thread wifi_network_t networks[WIFI_SCAN_MAX_NETWORKS];
-        manager_scan(is_refresh, networks, reply);
+        manager_scan(networks, reply);
         return reply->ok ? scan_json(networks, reply) : NULL;
     }
 
@@ -200,10 +206,9 @@ static void serve_local(int fd) {
 
     cJSON *body = cJSON_Parse(request);
     const cJSON *type = cJSON_GetObjectItemCaseSensitive(body, "type");
-    const cJSON *refresh = cJSON_GetObjectItemCaseSensitive(body, "refresh");
 
     wifi_reply_t reply;
-    cJSON *data = cJSON_IsString(type) ? run_request(type->valuestring, body, cJSON_IsTrue(refresh), &reply) : NULL;
+    cJSON *data = cJSON_IsString(type) ? run_request(type->valuestring, body, &reply) : NULL;
     if (!cJSON_IsString(type)) {
         memset(&reply, 0, sizeof reply);
         reply.reason = "invalid_request";
@@ -291,13 +296,11 @@ static void serve_http(int fd) {
     body_text[body_length] = '\0';
 
     const char *type = NULL;
-    bool is_refresh = false;
     if (strcmp(method, "GET") == 0 && strcmp(path, "/api/wifi/status") == 0) {
         type = "status";
     } else if (strcmp(method, "GET") == 0 && strncmp(path, "/api/wifi/networks", 18) == 0 &&
                (path[18] == '\0' || path[18] == '?')) {
         type = "scan";
-        is_refresh = strstr(path, "refresh=1") != NULL;
     } else if (strcmp(method, "POST") == 0 && strcmp(path, "/api/wifi/connect") == 0) {
         type = "connect";
     }
@@ -309,7 +312,7 @@ static void serve_http(int fd) {
 
     cJSON *body = cJSON_Parse(body_text);
     wifi_reply_t reply;
-    cJSON *data = run_request(type, body, is_refresh, &reply);
+    cJSON *data = run_request(type, body, &reply);
 
     cJSON *password = cJSON_GetObjectItemCaseSensitive(body, "password");
     if (cJSON_IsString(password)) memset(password->valuestring, 0, strlen(password->valuestring));

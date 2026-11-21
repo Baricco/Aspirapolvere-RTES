@@ -51,13 +51,17 @@ class _WifiScreenState extends ConsumerState<WifiScreen> with StateIntervalMixin
 
   _Route _route = _Route.checking;
   String? _wifiKey; // modo e rete dell'ultimo stato visto: quando cambiano si ricarica la lista
+  WifiStatus? _localStatus; // ultimo stato avuto dal robot sulla sua rete
+  int _localMisses = 0; // controlli di fila senza risposta dal robot sulla sua rete
   WifiScan? _scan;
   bool _isScanning = false;
   bool _isRescanWanted = false; // un'altra ricarica chiesta mentre ce n'era già una in corso
   String? _scanError;
   _Change? _change;
   Timer? _checkTimer, _timeoutTimer;
-  bool _isChecking = false;
+  Future<void>? _check; // controllo della strada in corso
+  bool _isRetrying = false;
+  String? _retryError;
 
   WifiApi get _api => _route == _Route.local ? _local : BackendWifiApi(ref.read(apiClientProvider));
 
@@ -86,34 +90,56 @@ class _WifiScreenState extends ConsumerState<WifiScreen> with StateIntervalMixin
   // --------------------------------------------------------------------------------------------- strada
 
   /// Decide con chi parlare: robot Online → backend; altrimenti il robot sulla sua rete, se il telefono ci è
-  /// collegato; altrimenti nessuno. Si ripete ogni wifiRouteCheckInterval e a ogni cambio di Online.
-  Future<void> _checkRoute() async {
-    if (_isChecking || !mounted) return;
-    _isChecking = true;
-    try {
-      final robot = ref.read(robotStateProvider);
-      if (robot?.online == true) {
-        if (_route != _Route.backend) {
-          await WifiNetworkBinding.unbind();
-          _setRoute(_Route.backend);
-        }
-        _noteWifi(robot!.wifi);
-        return;
+  /// collegato; altrimenti nessuno. Si ripete ogni wifiRouteCheckInterval e a ogni cambio di Online. Con un controllo
+  /// già in corso ritorna quello.
+  Future<void> _checkRoute() => _check ??= _runCheck().whenComplete(() => _check = null);
+
+  Future<void> _runCheck() async {
+    if (!mounted) return;
+    final robot = ref.read(robotStateProvider);
+    if (robot?.online == true) {
+      if (_route != _Route.backend) {
+        await WifiNetworkBinding.unbind();
+        _setRoute(_Route.backend);
       }
-      final status = await _local.status();
-      if (!mounted) return;
-      // nel frattempo il robot potrebbe essere tornato online
-      if (ref.read(robotStateProvider)?.online == true) return;
-      if (status == null) {
-        _setRoute(_Route.none);
-        return;
-      }
-      _setRoute(_Route.local);
-      _finishChange(status); // un cambio fatto dalla rete del robot e fallito: il robot l'ha riaccesa
-      _noteWifi(status);
-    } finally {
-      _isChecking = false;
+      _noteWifi(robot!.wifi);
+      return;
     }
+    final status = await _local.status();
+    if (!mounted) return;
+    // nel frattempo il robot potrebbe essere tornato online
+    if (ref.read(robotStateProvider)?.online == true) return;
+    if (status == null) {
+      setState(() => _localMisses++);
+      // sulla rete del robot la schermata resta com'è finché i controlli senza risposta non sono wifiLocalMisses
+      if (_route != _Route.local || _localMisses >= wifiLocalMisses) _setRoute(_Route.none);
+      return;
+    }
+    setState(() {
+      _localMisses = 0;
+      _localStatus = status;
+      _retryError = null;
+    });
+    _setRoute(_Route.local);
+    _finishChange(status);
+    _noteWifi(status);
+  }
+
+  /// "Riprova": controllo della strada con la rotellina, e un testo se il robot non risponde.
+  Future<void> _retry() async {
+    setState(() {
+      _isRetrying = true;
+      _retryError = null;
+    });
+    await _checkRoute();
+    if (!mounted) return;
+    setState(() {
+      _isRetrying = false;
+      if (_route == _Route.none) {
+        _retryError = 'Maurice non risponde su ${robotLocalUrl.replaceFirst('http://', '')}: il telefono è collegato '
+            'a «$robotWifiSsid»?';
+      }
+    });
   }
 
   void _setRoute(_Route route) {
@@ -140,7 +166,7 @@ class _WifiScreenState extends ConsumerState<WifiScreen> with StateIntervalMixin
 
   // ------------------------------------------------------------------------------------------- scansione
 
-  Future<void> _loadScan({bool refresh = false}) async {
+  Future<void> _loadScan() async {
     if (_isScanning) {
       _isRescanWanted = true;
       return;
@@ -153,7 +179,7 @@ class _WifiScreenState extends ConsumerState<WifiScreen> with StateIntervalMixin
     try {
       for (var attempt = 0;; attempt++) {
         try {
-          final scan = await _api.scan(refresh: refresh);
+          final scan = await _api.scan();
           if (mounted && _route == route) setState(() => _scan = scan);
           return;
         } on ApiException catch (error) {
@@ -180,11 +206,18 @@ class _WifiScreenState extends ConsumerState<WifiScreen> with StateIntervalMixin
   // ---------------------------------------------------------------------------------------------- cambio
 
   Future<void> _connect(String ssid, bool isProtected) async {
+    // il cambio va alla strada che c'era al tocco
+    final route = _route;
+    final api = _api;
     final password = isProtected ? await _askPassword(context, ssid) : '';
     if (password == null || !mounted) return;
-    final isFromRobotNetwork = _route == _Route.local;
+    if (_route != route) {
+      ref.read(notificationProvider.notifier).show('Cambio non partito', 'Maurice non risponde più da qui: riprova.');
+      return;
+    }
+    final isFromRobotNetwork = route == _Route.local;
     try {
-      final number = await _api.connect(ssid, isProtected, password);
+      final number = await api.connect(ssid, isProtected, password);
       if (!mounted) return;
       setState(() => _change = _Change(ssid, number, isFromRobotNetwork));
       _pending.start(number, ssid);
@@ -228,15 +261,15 @@ class _WifiScreenState extends ConsumerState<WifiScreen> with StateIntervalMixin
     final canRefresh = !_isScanning && (_route == _Route.backend || _route == _Route.local);
     final isResting = _route != _Route.backend || robot?.navigationState == 'sleep';
     final isBusy = _change != null && _change!.result == null && !_change!.isTimedOut;
-    // dopo un cambio chiesto dalla rete del robot il telefono la perde: finché Maurice non si fa sentire si aspetta
-    final isWaitingRobot = isBusy && _change!.isFromRobotNetwork && _route != _Route.backend;
+    // durante un cambio, finché Maurice non si fa sentire da nessuna strada si aspetta
+    final isWaitingRobot = isBusy && (_route == _Route.none || _route == _Route.checking);
 
     return Scaffold(
       appBar: ScreenHeader(title: 'Rete Wi-Fi', trailing: [
         IconButton(
           icon: const Icon(Icons.refresh_rounded),
           tooltip: 'Aggiorna',
-          onPressed: canRefresh ? () => _loadScan(refresh: true) : null,
+          onPressed: canRefresh ? _loadScan : null,
         ),
         OnlineBadge(state: robot),
       ]),
@@ -244,7 +277,11 @@ class _WifiScreenState extends ConsumerState<WifiScreen> with StateIntervalMixin
         _StatusPanel(
           route: isWaitingRobot ? _Route.checking : _route,
           robot: robot,
-          onRetry: _checkRoute,
+          localStatus: _localStatus,
+          isLocalSilent: _route == _Route.local && _localMisses > 0,
+          isRetrying: _isRetrying,
+          retryError: _retryError,
+          onRetry: _retry,
         ),
         if (_change != null) ...[
           const SizedBox(height: 12),
@@ -256,7 +293,6 @@ class _WifiScreenState extends ConsumerState<WifiScreen> with StateIntervalMixin
             scan: _scan,
             isScanning: _isScanning,
             error: _scanError,
-            isFromRobotNetwork: _route == _Route.local,
             disabledReason: !isResting
                 ? 'Maurice deve essere a riposo per cambiare rete.'
                 : isBusy
@@ -276,11 +312,32 @@ class _WifiScreenState extends ConsumerState<WifiScreen> with StateIntervalMixin
 
 /// In alto: con chi parla l'app e la rete di adesso, oppure come collegarsi alla rete del robot.
 class _StatusPanel extends StatelessWidget {
-  const _StatusPanel({required this.route, required this.robot, required this.onRetry});
+  const _StatusPanel({
+    required this.route,
+    required this.robot,
+    required this.localStatus,
+    required this.isLocalSilent,
+    required this.isRetrying,
+    required this.retryError,
+    required this.onRetry,
+  });
 
   final _Route route;
   final RobotState? robot;
+  final WifiStatus? localStatus; // stato del robot sulla sua rete
+  final bool isLocalSilent; // sulla rete del robot l'ultimo controllo non ha avuto risposta
+  final bool isRetrying;
+  final String? retryError;
   final VoidCallback onRetry;
+
+  /// Cosa fa il collegamento del robot, visto dalla sua rete.
+  static String _localText(WifiStatus? status) {
+    if (status == null) return 'Scegli la rete Wi-Fi a cui Maurice deve collegarsi.';
+    if (status.mode == 'testing') return 'Maurice sta provando una rete nuova.';
+    if (status.mode == 'station' && status.ssid != null) return 'Maurice è collegato a «${status.ssid}».';
+    if (status.savedSsid == null) return 'Nessuna rete salvata: scegli la rete a cui Maurice deve collegarsi.';
+    return 'Maurice cerca «${status.savedSsid}». Puoi sceglierne un\'altra qui sotto.';
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -311,6 +368,9 @@ class _StatusPanel extends StatelessWidget {
                         ? 'Il programma del Wi-Fi del robot non manda il suo stato.'
                         : [if (wifi.signalDbm != null) '${wifi.signalDbm} dBm', if (wifi.ip != null) wifi.ip!].join(' · '),
                     style: secondary),
+                if (wifi != null && wifi.isApOn)
+                  Text('Rete di Maurice accesa · ${wifi.apClients} ${wifi.apClients == 1 ? 'telefono collegato' : 'telefoni collegati'}',
+                      style: secondary),
               ]),
             ),
           ]),
@@ -323,7 +383,9 @@ class _StatusPanel extends StatelessWidget {
             Expanded(
               child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
                 const Text('Sei sulla rete di Maurice', style: TextStyle(fontSize: 17, fontWeight: FontWeight.w700)),
-                Text('Scegli la rete Wi-Fi a cui Maurice deve collegarsi.', style: secondary),
+                Text(_localText(localStatus), style: secondary),
+                if (isLocalSilent)
+                  Text('Maurice non risponde, riprovo…', style: TextStyle(color: palette.warning, fontSize: 14)),
               ]),
             ),
           ]),
@@ -343,14 +405,24 @@ class _StatusPanel extends StatelessWidget {
             if (robotWifiPassword.isNotEmpty) _CopyRow(label: 'Password', value: robotWifiPassword),
             const SizedBox(height: 8),
             Text(
-                'Maurice accende la sua rete quando non riesce a collegarsi alla rete salvata per 30 secondi, e ogni '
-                '5 minuti la spegne per 1 minuto per riprovare. Se Android avvisa che la rete non ha internet, scegli di '
-                'restare collegato.',
+                'Maurice accende la sua rete quando non trova la rete salvata per 30 secondi, e la tiene accesa finché '
+                'c\'è un telefono collegato o finché non raggiunge il server. Se Android avvisa che la rete non ha '
+                'internet, scegli di restare collegato.',
                 style: secondary),
+            if (retryError != null) ...[
+              const SizedBox(height: 10),
+              Text(retryError!, style: TextStyle(color: palette.fault, fontSize: 14, fontWeight: FontWeight.w600)),
+            ],
             const SizedBox(height: 12),
             Align(
               alignment: Alignment.centerRight,
-              child: FilledButton.icon(onPressed: onRetry, icon: const Icon(Icons.refresh_rounded), label: const Text('Riprova')),
+              child: FilledButton.icon(
+                onPressed: isRetrying ? null : onRetry,
+                icon: isRetrying
+                    ? const SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2))
+                    : const Icon(Icons.refresh_rounded),
+                label: const Text('Riprova'),
+              ),
             ),
           ]),
         );
@@ -391,19 +463,25 @@ class _ChangePanel extends StatelessWidget {
     final result = change.result;
 
     final Widget icon;
-    final String text;
+    String text;
     if (result != null) {
       final color = result == 'ok' ? palette.online : isWifiChangeKept(result) ? palette.warning : palette.fault;
       icon = Icon(result == 'ok' ? Icons.check_circle_rounded : Icons.error_rounded, color: color, size: 30);
       text = wifiResultMessage(result, change.ssid);
+      if (change.isFromRobotNetwork) {
+        text += result == 'ok'
+            ? ' Puoi tornare sulla tua rete: Maurice spegne la sua quando non c\'è più nessuno collegato.'
+            : isWifiChangeKept(result)
+                ? ' La rete di Maurice resta accesa finché Maurice non raggiunge il server.'
+                : ' La rete di Maurice resta accesa: puoi riprovare.';
+      }
     } else if (change.isTimedOut) {
       icon = Icon(Icons.schedule_rounded, color: palette.warning, size: 30);
       text = wifiTimeoutMessage(change.ssid);
     } else {
       icon = const SizedBox(width: 30, height: 30, child: Padding(padding: EdgeInsets.all(4), child: CircularProgressIndicator(strokeWidth: 3)));
       text = change.isFromRobotNetwork
-          ? 'Maurice si sta collegando a «${change.ssid}»: il telefono perde la rete di Maurice e torna sulla sua. '
-              'L\'esito arriva appena Maurice si fa sentire.'
+          ? 'Maurice si sta collegando a «${change.ssid}». Resta sulla rete di Maurice: l\'esito arriva qui.'
           : 'Maurice si sta collegando a «${change.ssid}»: per qualche secondo risulterà Offline.';
     }
 
@@ -426,7 +504,6 @@ class _NetworksPanel extends StatelessWidget {
     required this.scan,
     required this.isScanning,
     required this.error,
-    required this.isFromRobotNetwork,
     required this.disabledReason,
     required this.onSelect,
     required this.onOther,
@@ -435,7 +512,6 @@ class _NetworksPanel extends StatelessWidget {
   final WifiScan? scan;
   final bool isScanning;
   final String? error;
-  final bool isFromRobotNetwork;
   final String? disabledReason; // non null: le reti non si possono scegliere, e si dice perché
   final void Function(String ssid, bool isProtected) onSelect;
   final VoidCallback onOther;
@@ -444,7 +520,6 @@ class _NetworksPanel extends StatelessWidget {
   Widget build(BuildContext context) {
     final palette = AppPalette.of(context);
     final secondary = TextStyle(color: palette.textSecondary, fontSize: 13);
-    final scannedAt = scan?.scannedAt;
     final isEnabled = disabledReason == null;
 
     return GlassPanel(
@@ -457,12 +532,6 @@ class _NetworksPanel extends StatelessWidget {
             if (isScanning) const SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2)),
           ]),
         ),
-        if (isFromRobotNetwork && scannedAt != null)
-          Padding(
-            padding: const EdgeInsets.fromLTRB(16, 2, 16, 0),
-            child: Text('Lista delle ${_time(scannedAt)}: per aggiornarla Maurice spegne la sua rete per qualche secondo.',
-                style: secondary),
-          ),
         if (disabledReason != null)
           Padding(
             padding: const EdgeInsets.fromLTRB(16, 6, 16, 0),
@@ -518,9 +587,6 @@ IconData _signalIcon(int dbm) => switch (signalBars(dbm)) {
       2 => Icons.network_wifi_2_bar_rounded,
       _ => Icons.network_wifi_1_bar_rounded,
     };
-
-String _time(DateTime time) =>
-    '${time.hour.toString().padLeft(2, '0')}:${time.minute.toString().padLeft(2, '0')}';
 
 /// Password con l'occhio per mostrarla. Ritorna null se l'utente annulla.
 Future<String?> _askPassword(BuildContext context, String ssid) async {

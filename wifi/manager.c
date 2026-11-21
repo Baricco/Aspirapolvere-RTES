@@ -35,7 +35,6 @@ static struct {
 
     // richiesta in corso: una alla volta
     request_type_t request;
-    bool is_refresh;
     wifi_connect_request_t connect;
     unsigned request_num;                   // numero dell'ultima richiesta
     unsigned reply_num;                     // numero della richiesta a cui si riferisce reply
@@ -50,8 +49,9 @@ static atomic_bool is_stop_requested;
 
 // dati del solo thread del gestore
 static const radio_t *radio;
-static int64_t mode_deadline_ms;            // CONNECTING e AP: fine del modo
-static int64_t lost_since_ms;               // STATION: da quando manca l'indirizzo (0 = c'è)
+static int64_t lost_since_ms;               // da quando wlan0 è senza indirizzo (0 = c'è)
+static int64_t ap_idle_since_ms;            // da quando la rete del robot è senza telefoni (0 = ce ne sono)
+static int64_t backend_check_ms;            // prossima prova del backend per spegnere la rete del robot
 
 // funzione helper che scrive un messaggio nel registro (stderr: procd lo manda a logread)
 #define LOG(...) do { fprintf(stderr, "rtes-wifi: " __VA_ARGS__); fputc('\n', stderr); } while (0)
@@ -79,7 +79,6 @@ const char *wifi_mode_name(wifi_mode_t mode) {
         case WIFI_MODE_CONNECTING:  return "connecting";
         case WIFI_MODE_STATION:     return "station";
         case WIFI_MODE_TESTING:     return "testing";
-        case WIFI_MODE_AP:          return "ap";
     }
     return "unknown";
 }
@@ -145,18 +144,41 @@ static wifi_mode_t get_mode(void) {
     return mode;
 }
 
-// funzione helper che legge il collegamento dalla radio e lo pubblica. Ritorna true se c'è un indirizzo
+static bool is_ap_on(void) {
+    pthread_mutex_lock(&shared.lock);
+    bool is_on = shared.status.is_ap_on;
+    pthread_mutex_unlock(&shared.lock);
+    return is_on;
+}
+
+// funzione helper che legge collegamento e telefoni collegati dalla radio e li pubblica. Ritorna true se c'è un
+// indirizzo
 static bool update_link(void) {
 
     wifi_link_t link;
     memset(&link, 0, sizeof link);
     bool has_address = radio->get_link(&link);
+    int clients = radio->get_ap_clients();
 
     pthread_mutex_lock(&shared.lock);
     shared.status.link = link;
+    shared.status.ap_clients = clients;
     pthread_mutex_unlock(&shared.lock);
 
     return has_address;
+}
+
+// funzione helper che legge la rete salvata e la pubblica. Ritorna true se c'è
+static bool update_saved_ssid(void) {
+
+    char ssid[WIFI_SSID_MAX + 1];
+    bool is_saved = radio->get_saved_ssid(ssid, sizeof ssid);
+
+    pthread_mutex_lock(&shared.lock);
+    snprintf(shared.status.saved_ssid, sizeof shared.status.saved_ssid, "%s", ssid);
+    pthread_mutex_unlock(&shared.lock);
+
+    return is_saved;
 }
 
 // funzione helper che ordina le reti per segnale e toglie i doppioni (stesso SSID da più punti di accesso: resta il
@@ -205,74 +227,75 @@ static bool scan_and_store(int64_t timeout_ms) {
     return true;
 }
 
-// --- Modi ---
+// --- Regole (docs/wifi.md, sezione 4) ---
 
-// funzione helper che accende la rete del robot, dopo una scansione (con la rete del robot accesa il chip
-// probabilmente non cerca reti: l'app vede questa lista)
-static void enter_ap(void) {
+// funzione helper che accende la rete del robot
+static void turn_ap_on(void) {
 
-    scan_and_store(scaled_ms(WIFI_SCAN_TIMEOUT_S));
-    radio->stop_station();
-    if (!radio->start_ap()) LOG("la rete del robot non si accende: riprovo alla fine del periodo");
+    if (!radio->start_ap()) LOG("la rete del robot non si accende: riprovo da sola");
 
-    set_mode(WIFI_MODE_AP);
-    mode_deadline_ms = now_ms() + scaled_ms(WIFI_AP_DURATION_S);
-    LOG("rete del robot accesa (%s) per %d s", WIFI_AP_SSID, WIFI_AP_DURATION_S);
+    pthread_mutex_lock(&shared.lock);
+    shared.status.is_ap_on = true;
+    pthread_mutex_unlock(&shared.lock);
+
+    ap_idle_since_ms = now_ms();
+    backend_check_ms = 0;
+    LOG("rete del robot accesa (%s)", WIFI_AP_SSID);
 }
 
-// funzione helper che spegne la rete del robot e prova la rete salvata per duration_s secondi
-static void leave_ap(double duration_s) {
+// funzione helper che spegne la rete del robot
+static void turn_ap_off(void) {
+
+    pthread_mutex_lock(&shared.lock);
+    shared.status.is_ap_on = false;
+    shared.status.ap_clients = 0;
+    pthread_mutex_unlock(&shared.lock);
 
     radio->stop_ap();
-    radio->start_station(true);
-
-    set_mode(WIFI_MODE_CONNECTING);
-    mode_deadline_ms = now_ms() + scaled_ms(duration_s);
-    LOG("rete del robot spenta: provo la rete salvata per %.0f s", duration_s);
+    LOG("rete del robot spenta");
 }
 
-// funzione helper che fa avanzare il modo a ogni giro: collegamento riuscito, perso, tempi scaduti
-static void step_mode(bool has_address) {
+// funzione helper che applica le regole a ogni giro: modo di wlan0, accensione e spegnimento della rete del robot
+static void apply_rules(bool has_address, bool is_saved) {
 
     int64_t now = now_ms();
+    wifi_mode_t mode = get_mode();
 
-    switch (get_mode()) {
+    if (mode != WIFI_MODE_TESTING) {
+        if (has_address && mode != WIFI_MODE_STATION) LOG("collegato alla rete salvata");
+        if (!has_address && mode == WIFI_MODE_STATION) LOG("indirizzo perso");
+        set_mode(has_address ? WIFI_MODE_STATION : WIFI_MODE_CONNECTING);
+    }
 
-        case WIFI_MODE_CONNECTING:
-            if (has_address) {
-                set_mode(WIFI_MODE_STATION);
-                lost_since_ms = 0;
-                LOG("collegato alla rete salvata");
-            } else if (!radio->has_saved_network() || now >= mode_deadline_ms) {
-                LOG("nessun collegamento alla rete salvata");
-                enter_ap();
-            }
-            break;
+    if (has_address) lost_since_ms = 0;
+    else if (lost_since_ms == 0) lost_since_ms = now;
 
-        case WIFI_MODE_STATION:
-            if (has_address) {
-                lost_since_ms = 0;
-            } else if (lost_since_ms == 0) {
-                lost_since_ms = now;
-                LOG("indirizzo perso");
-            } else if (now - lost_since_ms >= scaled_ms(WIFI_LOST_TIMEOUT_S)) {
-                LOG("senza indirizzo da %d s", WIFI_LOST_TIMEOUT_S);
-                enter_ap();
-            }
-            break;
+    if (!is_ap_on()) {
+        // accesa: wlan0 senza indirizzo da WIFI_LOST_TIMEOUT_S, oppure nessuna rete salvata
+        if (!is_saved || (lost_since_ms != 0 && now - lost_since_ms >= scaled_ms(WIFI_LOST_TIMEOUT_S))) {
+            if (is_saved) LOG("senza indirizzo da %d s", WIFI_LOST_TIMEOUT_S);
+            else LOG("nessuna rete salvata");
+            turn_ap_on();
+        }
+        return;
+    }
 
-        case WIFI_MODE_AP:
-            if (now >= mode_deadline_ms) {
-                if (radio->has_saved_network()) {
-                    leave_ap(WIFI_AP_RETRY_S);
-                } else {
-                    mode_deadline_ms = now + scaled_ms(WIFI_AP_DURATION_S);
-                }
-            }
-            break;
+    pthread_mutex_lock(&shared.lock);
+    int clients = shared.status.ap_clients;
+    pthread_mutex_unlock(&shared.lock);
 
-        case WIFI_MODE_TESTING:
-            break;
+    if (clients > 0) ap_idle_since_ms = 0;
+    else if (ap_idle_since_ms == 0) ap_idle_since_ms = now;
+
+    // spenta: nessun telefono da WIFI_AP_IDLE_S E wlan0 collegato E backend raggiunto
+    bool is_idle = ap_idle_since_ms != 0 && now - ap_idle_since_ms >= scaled_ms(WIFI_AP_IDLE_S);
+    if (!is_idle || mode != WIFI_MODE_STATION || now < backend_check_ms) return;
+
+    if (radio->check_backend()) {
+        LOG("nessun telefono collegato e backend raggiunto");
+        turn_ap_off();
+    } else {
+        backend_check_ms = now_ms() + scaled_ms(WIFI_BACKEND_RECHECK_S);
     }
 }
 
@@ -305,14 +328,9 @@ static wifi_result_t check_connection(void) {
 }
 
 // funzione helper che fa il cambio di rete (docs/wifi.md, sezione 5). Il cambio è già pubblicato come in corso
-static void run_change(const wifi_connect_request_t *request, bool was_ap) {
+static void run_change(const wifi_connect_request_t *request) {
 
     LOG("cambio di rete verso «%s»", request->ssid);
-
-    if (was_ap) {
-        radio->stop_ap();
-        radio->start_station(true);
-    }
 
     wifi_result_t result;
 
@@ -336,22 +354,13 @@ static void run_change(const wifi_connect_request_t *request, bool was_ap) {
 
     bool is_kept = result == WIFI_RESULT_OK || result == WIFI_RESULT_BACKEND_UNREACHABLE;
 
-    if (is_kept) {
-        radio->try_network_commit();
-        set_mode(WIFI_MODE_STATION);
-        lost_since_ms = 0;
-    } else {
-        radio->try_network_abort();
-        if (radio->has_saved_network()) {
-            // partendo dalla rete del robot la rete di prima già non andava: la si prova solo quanto nell'alternanza
-            set_mode(WIFI_MODE_CONNECTING);
-            mode_deadline_ms = now_ms() + scaled_ms(was_ap ? WIFI_AP_RETRY_S : WIFI_CONNECT_TIMEOUT_S);
-        } else {
-            enter_ap();
-        }
-    }
+    if (is_kept) radio->try_network_commit();
+    else radio->try_network_abort();
 
+    set_mode(is_kept ? WIFI_MODE_STATION : WIFI_MODE_CONNECTING);
+    lost_since_ms = 0;
     update_link();
+    update_saved_ssid();
 
     pthread_mutex_lock(&shared.lock);
     shared.status.change_state = WIFI_CHANGE_DONE;
@@ -374,22 +383,9 @@ static void send_reply(unsigned request_num, const wifi_reply_t *reply) {
 }
 
 // funzione helper che esegue la scansione chiesta
-static void handle_scan(unsigned request_num, bool is_refresh) {
+static void handle_scan(unsigned request_num) {
 
-    bool ok = true;
-
-    if (get_mode() == WIFI_MODE_AP) {
-        // con la rete del robot accesa: l'ultima scansione, oppure una nuova spegnendo la rete per poco
-        if (is_refresh) {
-            radio->stop_ap();
-            radio->start_station(false);
-            ok = scan_and_store(scaled_ms(WIFI_AP_SCAN_S));
-            radio->stop_station();
-            if (!radio->start_ap()) LOG("la rete del robot non si riaccende dopo la scansione");
-        }
-    } else {
-        ok = scan_and_store(scaled_ms(WIFI_SCAN_TIMEOUT_S));
-    }
+    bool ok = scan_and_store(scaled_ms(WIFI_SCAN_TIMEOUT_S));
 
     wifi_reply_t reply = { .ok = ok, .http_code = ok ? 200 : 503 };
     if (!ok) {
@@ -410,10 +406,9 @@ void manager_run(const radio_t *selected_radio) {
 
     if (!radio->init()) LOG("preparazione della radio non riuscita: vado avanti lo stesso");
 
-    radio->start_station(true);
+    radio->start_station();
     set_mode(WIFI_MODE_CONNECTING);
-    mode_deadline_ms = now_ms() + scaled_ms(WIFI_CONNECT_TIMEOUT_S);
-    if (!radio->has_saved_network()) LOG("nessuna rete salvata");
+    bool is_saved = update_saved_ssid();
 
     while (!atomic_load(&is_stop_requested)) {
 
@@ -429,7 +424,6 @@ void manager_run(const radio_t *selected_radio) {
         }
         request_type_t request = shared.request;
         unsigned request_num = shared.request_num;
-        bool is_refresh = shared.is_refresh;
         wifi_connect_request_t connect = shared.connect;
         pthread_mutex_unlock(&shared.lock);
 
@@ -437,10 +431,9 @@ void manager_run(const radio_t *selected_radio) {
         bool has_address = update_link();
 
         if (request == REQUEST_SCAN) {
-            handle_scan(request_num, is_refresh);
+            handle_scan(request_num);
         } else if (request == REQUEST_CONNECT) {
             // il cambio è accettato: risposta subito, poi il cambio (l'esito arriva nello stato)
-            bool was_ap = get_mode() == WIFI_MODE_AP;
             pthread_mutex_lock(&shared.lock);
             shared.status.change_number++;
             snprintf(shared.status.change_ssid, sizeof shared.status.change_ssid, "%s", connect.ssid);
@@ -452,15 +445,16 @@ void manager_run(const radio_t *selected_radio) {
             send_reply(request_num, &reply);
             pthread_mutex_unlock(&shared.lock);
 
-            run_change(&connect, was_ap);
+            run_change(&connect);
             memset(&connect, 0, sizeof connect);    // la password non resta in memoria
+            is_saved = update_saved_ssid();
         } else {
-            step_mode(has_address);
+            apply_rules(has_address, is_saved);
         }
     }
 
-    if (get_mode() == WIFI_MODE_AP) radio->stop_ap();
-    else radio->stop_station();
+    if (is_ap_on()) radio->stop_ap();
+    radio->stop_station();
     LOG("fermo");
 }
 
@@ -476,7 +470,7 @@ void manager_get_status(wifi_status_t *status) {
 }
 
 bool manager_is_ap(void) {
-    return get_mode() == WIFI_MODE_AP;
+    return is_ap_on();
 }
 
 void manager_set_resting(bool is_resting) {
@@ -526,7 +520,7 @@ static bool is_busy(void) {
     return shared.request != REQUEST_NONE || shared.status.change_state == WIFI_CHANGE_TESTING;
 }
 
-void manager_scan(bool is_refresh, wifi_network_t *networks, wifi_reply_t *reply) {
+void manager_scan(wifi_network_t *networks, wifi_reply_t *reply) {
 
     pthread_mutex_lock(&shared.lock);
 
@@ -536,7 +530,6 @@ void manager_scan(bool is_refresh, wifi_network_t *networks, wifi_reply_t *reply
         return;
     }
 
-    shared.is_refresh = is_refresh;
     if (!submit_request(REQUEST_SCAN, WIFI_SCAN_REPLY_WAIT_S, reply)) {
         pthread_mutex_unlock(&shared.lock);
         reject(reply, 503, "scan_failed", "La ricerca delle reti non ha risposto in tempo");

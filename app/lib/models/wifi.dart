@@ -20,7 +20,7 @@ class WifiNetwork {
       );
 }
 
-/// Risultato di una scansione: le reti e quando sono state cercate (con la rete del robot accesa può essere vecchia).
+/// Risultato di una scansione: le reti e quando sono state cercate.
 class WifiScan {
   const WifiScan(this.networks, this.scannedAt);
 
@@ -56,21 +56,28 @@ class WifiChange {
 
 /// Il campo wifi dello stato del robot, uguale alla risposta di GET /api/wifi/status sulla rete del robot.
 class WifiStatus {
-  const WifiStatus(this.mode, this.ssid, this.signalDbm, this.ip, this.change);
+  const WifiStatus(this.mode, this.ssid, this.signalDbm, this.ip, this.savedSsid, this.isApOn, this.apClients, this.change);
 
-  final String mode; // connecting, station, testing, ap
+  final String mode; // collegamento di wlan0: connecting, station, testing
   final String? ssid;
   final int? signalDbm;
   final String? ip;
+  final String? savedSsid; // rete salvata, null se non c'è
+  final bool isApOn; // rete del robot accesa
+  final int apClients; // telefoni collegati alla rete del robot
   final WifiChange change;
 
   factory WifiStatus.fromJson(Map<String, dynamic> json) {
     final change = json['change'] is Map<String, dynamic> ? json['change'] as Map<String, dynamic> : const {};
+    final ap = json['ap'] is Map<String, dynamic> ? json['ap'] as Map<String, dynamic> : const {};
     return WifiStatus(
       json['mode'] as String? ?? 'connecting',
       json['ssid'] as String?,
       (json['signal_dbm'] as num?)?.toInt(),
       json['ip'] as String?,
+      json['saved_ssid'] as String?,
+      ap['on'] == true,
+      (ap['clients'] as num?)?.toInt() ?? 0,
       WifiChange(
         (change['number'] as num?)?.toInt() ?? 0,
         change['ssid'] as String? ?? '',

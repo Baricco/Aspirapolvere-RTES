@@ -13,12 +13,11 @@
 #define WIFI_PASSWORD_MAX   63      // lunghezza massima di una password WPA (oltre sarebbe la chiave in esadecimale)
 #define WIFI_IP_MAX         16      // "255.255.255.255" più il terminatore
 
-// modo del Wi-Fi (docs/wifi.md, sezione 4)
+// modo del collegamento di wlan0 (docs/wifi.md, sezione 4.1)
 typedef enum {
-    WIFI_MODE_CONNECTING,           // prova la rete salvata
+    WIFI_MODE_CONNECTING,           // cerca la rete salvata
     WIFI_MODE_STATION,              // collegato alla rete salvata
     WIFI_MODE_TESTING,              // cambio di rete in corso
-    WIFI_MODE_AP,                   // rete del robot accesa
 } wifi_mode_t;
 
 // sicurezza di una rete: solo quelle che il robot sa usare
@@ -62,7 +61,7 @@ typedef struct {
 
 // collegamento di adesso
 typedef struct {
-    char ssid[WIFI_SSID_MAX + 1];   // rete in uso (in AP: quella del robot), vuoto se nessuna
+    char ssid[WIFI_SSID_MAX + 1];   // rete in uso, vuoto se nessuna
     int signal_dbm;                 // 0 se non si sa
     char ip[WIFI_IP_MAX];           // indirizzo IPv4 di wlan0, vuoto se non c'è
 } wifi_link_t;
@@ -90,7 +89,7 @@ int64_t now_ms(void);
 int64_t epoch_s(void);
 
 // tempi della configurazione in millisecondi, moltiplicati per la scala del tempo (1 sul robot, più piccola nella
-// simulazione per provare l'alternanza senza aspettare minuti)
+// simulazione)
 int64_t scaled_ms(double seconds);
 extern double time_scale;
 

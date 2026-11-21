@@ -283,14 +283,17 @@ void main() {
 
     test('stato del Wi-Fi nello stato del robot', () {
       final state = RobotState(jsonDecode('{"wifi":{"mode":"station","ssid":"Casa","signal_dbm":-58,"ip":"192.168.1.40",'
+          '"saved_ssid":"Casa","ap":{"on":true,"clients":2},'
           '"change":{"number":5,"ssid":"Ufficio","state":"done","result":"backend_unreachable","time":1}}}') as Map<String, dynamic>);
       final wifi = state.wifi!;
       expect((wifi.mode, wifi.ssid, wifi.signalDbm, wifi.ip), ('station', 'Casa', -58, '192.168.1.40'));
+      expect((wifi.savedSsid, wifi.isApOn, wifi.apClients), ('Casa', true, 2));
       expect(wifi.change, const WifiChange(5, 'Ufficio', 'done', 'backend_unreachable'));
       expect(wifi.change.isDone, isTrue);
       expect(RobotState(const {}).wifi, isNull);
-      final empty = WifiStatus.fromJson(const {'mode': 'ap', 'ssid': null, 'signal_dbm': null, 'ip': null});
+      final empty = WifiStatus.fromJson(const {'mode': 'connecting', 'ssid': null, 'signal_dbm': null, 'ip': null});
       expect((empty.ssid, empty.signalDbm, empty.change.number, empty.change.state), (null, null, 0, 'none'));
+      expect((empty.savedSsid, empty.isApOn, empty.apClients), (null, false, 0));
     });
 
     test('tacche del segnale', () {

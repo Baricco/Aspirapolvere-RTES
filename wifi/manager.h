@@ -1,7 +1,7 @@
 #ifndef WIFI_MANAGER_H
 #define WIFI_MANAGER_H
 
-// Gestore dei modi del Wi-Fi (docs/wifi.md, sezioni 4-6): un thread solo, l'unico che tocca la radio. Gli altri
+// Gestore del Wi-Fi (docs/wifi.md, sezioni 4-6): un thread solo, l'unico che tocca la radio. Gli altri
 // thread (server locale e HTTP) leggono lo stato pubblicato e gli passano le richieste con le funzioni qui sotto,
 // che aspettano la sua risposta.
 
@@ -14,6 +14,9 @@
 typedef struct {
     wifi_mode_t mode;
     wifi_link_t link;
+    char saved_ssid[WIFI_SSID_MAX + 1];     // rete salvata, vuoto se non c'è
+    bool is_ap_on;                          // rete del robot accesa
+    int ap_clients;                         // telefoni collegati alla rete del robot
     unsigned change_number;                 // numero dell'ultimo cambio di rete (0 = nessuno)
     char change_ssid[WIFI_SSID_MAX + 1];
     wifi_change_state_t change_state;
@@ -39,9 +42,8 @@ void manager_stop(void);
 // copia dello stato pubblicato
 void manager_get_status(wifi_status_t *status);
 
-// reti vicine (refresh: con la rete del robot accesa la spegne per cercare di nuovo). networks deve avere posto per
-// WIFI_SCAN_MAX_NETWORKS reti
-void manager_scan(bool is_refresh, wifi_network_t *networks, wifi_reply_t *reply);
+// reti vicine. networks deve avere posto per WIFI_SCAN_MAX_NETWORKS reti
+void manager_scan(wifi_network_t *networks, wifi_reply_t *reply);
 
 // cambio di rete: controlla i parametri e il riposo, poi risponde subito; l'esito arriva nello stato
 void manager_connect(const wifi_connect_request_t *request, wifi_reply_t *reply);

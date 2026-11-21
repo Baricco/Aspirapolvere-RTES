@@ -11,21 +11,21 @@
 
 #define COMMAND_TIMEOUT_MS  5000    // attesa massima della risposta a un comando (SAVE_CONFIG scrive su flash)
 
-bool supplicant_open(supplicant_link_t *link, bool is_events) {
+bool supplicant_open(supplicant_link_t *link, const char *ctrl_path, bool is_events) {
 
     static unsigned counter;
 
     link->fd = socket(AF_UNIX, SOCK_DGRAM | SOCK_CLOEXEC, 0);
     if (link->fd < 0) return false;
 
-    // il nostro capo del socket: wpa_supplicant risponde a questo indirizzo
+    // il nostro capo del socket: il programma risponde a questo indirizzo
     struct sockaddr_un local = { .sun_family = AF_UNIX };
     snprintf(link->local_path, sizeof link->local_path, "%s/ctrl-%d-%u", WIFI_RUN_DIR, (int)getpid(), counter++);
     snprintf(local.sun_path, sizeof local.sun_path, "%s", link->local_path);
     unlink(local.sun_path);
 
     struct sockaddr_un remote = { .sun_family = AF_UNIX };
-    snprintf(remote.sun_path, sizeof remote.sun_path, "%s/%s", WIFI_SUPPLICANT_CTRL_DIR, WIFI_INTERFACE);
+    snprintf(remote.sun_path, sizeof remote.sun_path, "%s", ctrl_path);
 
     if (bind(link->fd, (struct sockaddr *)&local, sizeof local) != 0 ||
         connect(link->fd, (struct sockaddr *)&remote, sizeof remote) != 0) {
